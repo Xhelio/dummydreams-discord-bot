@@ -154,8 +154,24 @@ async def auto_assign_role(tiktok_user: str, total_coins: int):
 # ==========================================
 # 4. TIKTOK LIVE MONITORING (AUTO STANDBY)
 # ==========================================
+import time
+import asyncio
+from TikTokLive import TikTokLiveClient
+from TikTokLive.events import GiftEvent
+
+# ==========================================
+# 4. TIKTOK LIVE MONITORING (INSTANT & ADAPTIVE)
+# ==========================================
+
+# Inisialisasi timestamp awal dengan waktu berjalan saat script di-run.
+# Ini menjamin sesi awal dianggap HIGH TRAFFIC secara instan.
+STARTUP_TIME = time.time()
+LAST_GIFT_TIMESTAMP = {
+    username.lower(): STARTUP_TIME for username in TIKTOK_USERNAMES
+}
+
 def create_tiktok_client(username: str) -> TikTokLiveClient:
-    """Create a new TikTokLiveClient instance with English logging format."""
+    """Membuat instance client dengan pencatatan timestamp gift terakhir."""
     client = TikTokLiveClient(unique_id=username.lower())
 
     @client.on(GiftEvent)
@@ -172,42 +188,65 @@ def create_tiktok_client(username: str) -> TikTokLiveClient:
             coins = diamond_count * repeat_count
 
             if coins > 0:
+                # Perbarui timestamp gift terakhir
+                LAST_GIFT_TIMESTAMP[username.lower()] = time.time()
+
                 total_coins = save_gift_data(user_name, coins)
-                # Formatted English Gift Log
                 print(f"[gift - @{client.unique_id}] {user_name} sent {gift_name} ({coins} c); total : {total_coins}")
                 await auto_assign_role(user_name, total_coins)
 
     return client
 
 async def run_tiktok_client_with_standby(username: str):
-    """Monitoring loop dengan penanganan jeda rate limit yang lebih aman."""
-    retry_delay = 120  # Standby 2 menit saat akun offline
+    """Monitoring loop dengan trigger instan dan Dynamic Cooldown."""
+    user_key = username.lower()
+    retry_delay = 120  # Standby 2 menit jika streamer sedang offline
 
     while True:
         client = create_tiktok_client(username)
         try:
+            # Pemicuan koneksi instan di awal
             print(f"[@{username}] connecting...")
             await client.start()
             print(f"[@{username}] connected")
         except Exception as e:
             error_msg = str(e).lower()
 
-            # Pastikan koneksi lama ditutup dengan bersih
+            # Bersihkan koneksi socket lama
             try:
                 await client.disconnect()
             except Exception:
                 pass
 
+            # Evaluasi trafik: Sesi awal (STARTUP_TIME) otomatis dianggap HIGH TRAFFIC
+            last_gift = LAST_GIFT_TIMESTAMP.get(user_key, time.time())
+            seconds_since_last_gift = time.time() - last_gift
+            is_high_traffic = seconds_since_last_gift <= 180
+
+            # Penanganan Rate Limit
             if "rate_limit" in error_msg or "too many connections" in error_msg or "429" in error_msg:
-                print(f"[@{username}] rate limit detected (cooldown 5 minutes)")
-                await asyncio.sleep(300)  # Naikkan jeda jadi 5 menit jika kena rate limit
+                if is_high_traffic:
+                    cooldown = 60  # Mode Intens / Awal Run: Retry cepat 1 menit
+                    print(f"[@{username}] rate limit (HIGH TRAFFIC) - retry in {cooldown}s")
+                else:
+                    cooldown = 300 # Mode Sepi: Cooldown aman 5 menit
+                    print(f"[@{username}] rate limit (LOW TRAFFIC) - retry in {cooldown}s")
+                await asyncio.sleep(cooldown)
+
+            # Penanganan Akun Offline
             elif "offline" in error_msg or "not live" in error_msg or "user_offline" in error_msg:
                 print(f"[@{username}] offline (cooldown 2 minutes)")
                 await asyncio.sleep(retry_delay)
+
+            # Penanganan Disconnect / Signal Drop
             else:
-                # KRUSIAL: Beri jeda 15-30 detik saat disconnect biasa agar tidak spam handshake
-                print(f"[@{username}] disconnected/error: {e} (cooldown 20 seconds)")
-                await asyncio.sleep(20)
+                if is_high_traffic:
+                    cooldown = 15  # Mode Intens / Awal Run: Reconnect 15 detik
+                else:
+                    cooldown = 30  # Mode Sepi: Reconnect 30 detik
+                print(f"[@{username}] disconnected: {e} (cooldown {cooldown}s)")
+                await asyncio.sleep(cooldown)
+ 
 
 # ==========================================
 # 5. DISCORD BOT COMMANDS (ENGLISH RESPONSE)
@@ -328,10 +367,13 @@ async def topdonator(ctx):
     await ctx.send(response)
 
 # ==========================================
-# 6. RUN PARALLEL SERVICES
+# 6. RUN PARALLEL SERVICES WITH STAGGERED STARTUP
 # ==========================================
 async def main():
-    for username in TIKTOK_USERNAMES:
+    # Beri jeda 3-5 detik antar akun agar tidak menembak server TikTok bersamaan
+    for index, username in enumerate(TIKTOK_USERNAMES):
+        if index > 0:
+            await asyncio.sleep(4)  # Jeda 4 detik sebelum menghubungkan akun berikutnya
         asyncio.create_task(run_tiktok_client_with_standby(username))
 
     await bot.start(DISCORD_TOKEN)
