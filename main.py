@@ -5,6 +5,7 @@ import discord
 from discord.ext import commands
 from TikTokLive import TikTokLiveClient
 from TikTokLive.events import GiftEvent, ConnectEvent, DisconnectEvent
+from TikTokLive.client.errors import UserOfflineError
 from keep_alive import keep_alive
 
 from db import init_db, save_gift_data, get_discord_id_from_tiktok, get_db_connection
@@ -31,6 +32,11 @@ ROLE_TIERS = {
     ]
 }
 STACK_ROLES = False
+
+# Global Trackers
+STARTUP_TIME = time.time()
+LAST_GIFT_TIMESTAMP = {TARGET_TIKTOK_USER.lower(): STARTUP_TIME}
+IS_LIVE_NOTIFIED = {TARGET_TIKTOK_USER.lower(): False}
 
 # Discord Bot Setup
 intents = discord.Intents.default()
@@ -132,22 +138,22 @@ async def delete_live_announcement(username: str):
         conn.commit()
 
 # TikTok Client Setup
-STARTUP_TIME = time.time()
-LAST_GIFT_TIMESTAMP = {TARGET_TIKTOK_USER.lower(): STARTUP_TIME}
-
 def create_tiktok_client(username: str) -> TikTokLiveClient:
     client = TikTokLiveClient(unique_id=username.lower())
 
-    # Trigger saat berhasil tersambung ke room live
     @client.on(ConnectEvent)
     async def on_connect(event: ConnectEvent):
+        user_key = username.lower()
         print(f"[@{username}] Connected to TikTok Live!")
-        await send_live_announcement(username)
+        if not IS_LIVE_NOTIFIED.get(user_key, False):
+            await send_live_announcement(username)
+            IS_LIVE_NOTIFIED[user_key] = True
 
-    # Trigger saat terputus dari room live
     @client.on(DisconnectEvent)
     async def on_disconnect(event: DisconnectEvent):
+        user_key = username.lower()
         print(f"[@{username}] Disconnected from TikTok Live!")
+        IS_LIVE_NOTIFIED[user_key] = False
         await delete_live_announcement(username)
 
     @client.on(GiftEvent)
@@ -173,14 +179,30 @@ def create_tiktok_client(username: str) -> TikTokLiveClient:
 
 async def run_tiktok_client_with_standby(username: str):
     user_key = username.lower()
-    retry_delay = 120
+    retry_delay = 180  # Cooldown 3 menit jika offline
 
     while True:
         client = create_tiktok_client(username)
         try:
-            print(f"[@{username}] connecting...")
+            print(f"[@{username}] Checking live status...")
+            is_currently_live = await client.is_live()
+
+            if not is_currently_live:
+                IS_LIVE_NOTIFIED[user_key] = False
+                await delete_live_announcement(username)
+                print(f"[@{username}] Streamer is OFFLINE. Standby for 3 minutes...")
+                await asyncio.sleep(retry_delay)
+                continue
+
+            print(f"[@{username}] Streamer is LIVE! Connecting...")
             await client.start()
-            print(f"[@{username}] connected")
+
+        except UserOfflineError:
+            IS_LIVE_NOTIFIED[user_key] = False
+            await delete_live_announcement(username)
+            print(f"[@{username}] Streamer is offline (UserOfflineError). Retry in 3 minutes...")
+            await asyncio.sleep(retry_delay)
+
         except Exception as e:
             error_msg = str(e).lower()
             try:
@@ -193,16 +215,17 @@ async def run_tiktok_client_with_standby(username: str):
             is_high_traffic = seconds_since_last_gift <= 180
 
             if "rate_limit" in error_msg or "too many connections" in error_msg or "429" in error_msg:
-                cooldown = 60 if is_high_traffic else 300
-                print(f"[@{username}] rate limit - retry in {cooldown}s")
+                cooldown = 120 if is_high_traffic else 300
+                print(f"[@{username}] Rate limit detected! Cooldown {cooldown}s...")
                 await asyncio.sleep(cooldown)
-            elif "offline" in error_msg or "not live" in error_msg or "user_offline" in error_msg:
+            elif "offline" in error_msg or "not live" in error_msg:
+                IS_LIVE_NOTIFIED[user_key] = False
                 await delete_live_announcement(username)
-                print(f"[@{username}] offline (cooldown 2 minutes)")
+                print(f"[@{username}] Streamer offline. Cooldown 3 minutes...")
                 await asyncio.sleep(retry_delay)
             else:
-                cooldown = 15 if is_high_traffic else 30
-                print(f"[@{username}] disconnected: {e} (cooldown {cooldown}s)")
+                cooldown = 30 if is_high_traffic else 60
+                print(f"[@{username}] Disconnected: {e} (retry in {cooldown}s)")
                 await asyncio.sleep(cooldown)
 
 # Discord Commands
