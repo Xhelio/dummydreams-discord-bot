@@ -1,58 +1,53 @@
 import asyncio
 import os
-import time
 import discord
 from discord.ext import commands
-from TikTokLive import TikTokLiveClient
-from TikTokLive.events import GiftEvent, ConnectEvent, DisconnectEvent
-from TikTokLive.client.errors import UserOfflineError
-from keep_alive import keep_alive
 
-from db import init_db, save_gift_data, get_discord_id_from_tiktok, get_db_connection
+from db import (
+    init_db,
+    get_discord_id_from_tiktok,
+    get_db_connection,
+    get_daily_top_supporters,
+    save_gift_data,
+    save_daily_gift_data
+)
+from utils import get_schedule_info, load_role_config, load_summary_config
+from server import keep_alive
+from observer_clarissa import run_clarissa_observer
+from observer_george import run_george_observer  # Import observer baru
 
-# Start Flask Server
-keep_alive()
-
-# Configuration (1 Akun per Repl)
-TARGET_TIKTOK_USER = "clarissadreams"
 DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN')
 ANNOUNCEMENT_CHANNEL_ID = int(os.environ.get('ANNOUNCEMENT_CHANNEL_ID', "0"))
 
-GUILD_IDS = [762924058655457291, 987654321098765432]
-ROLE_TIERS = {
-    762924058655457291: [
-        (100, 1554883561759187105),
-        (500, 1554883677031370902),
-        (1000, 1554883726989594725),
-    ],
-    987654321098765432: [
-        (100, 555555555555555555),
-        (500, 666666666666666666),
-        (1000, 777777777777777777),
-    ]
-}
-STACK_ROLES = False
+NOTIFICATION_LOCK = asyncio.Lock()
 
-# Global Trackers
-STARTUP_TIME = time.time()
-LAST_GIFT_TIMESTAMP = {TARGET_TIKTOK_USER.lower(): STARTUP_TIME}
-IS_LIVE_NOTIFIED = {TARGET_TIKTOK_USER.lower(): False}
-
-# Discord Bot Setup
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Automatic Role Assignment Helper
+def handle_api_announcement(username: str, is_live: bool):
+    try:
+        loop = bot.loop if bot.is_ready() else asyncio.get_event_loop()
+        asyncio.run_coroutine_threadsafe(
+            process_live_announcement(username, is_live),
+            loop
+        )
+    except Exception as e:
+        print(f"[API Error] Failed to schedule announcement for @{username}: {e}")
+
 async def auto_assign_role(tiktok_user: str, total_coins: int):
     discord_id = get_discord_id_from_tiktok(tiktok_user)
     if not discord_id:
         return
 
-    for guild_id in GUILD_IDS:
+    role_tiers, stack_roles = load_role_config()
+    if not role_tiers:
+        return
+
+    for guild_id, tiers in role_tiers.items():
         guild = bot.get_guild(guild_id)
-        if not guild or guild_id not in ROLE_TIERS:
+        if not guild:
             continue
 
         try:
@@ -60,11 +55,10 @@ async def auto_assign_role(tiktok_user: str, total_coins: int):
         except discord.NotFound:
             continue
 
-        tiers = ROLE_TIERS[guild_id]
         roles_to_add = []
         roles_to_remove = []
 
-        if STACK_ROLES:
+        if stack_roles:
             for min_coins, role_id in tiers:
                 role = guild.get_role(role_id)
                 if role and total_coins >= min_coins and role not in member.roles:
@@ -98,135 +92,106 @@ async def auto_assign_role(tiktok_user: str, total_coins: int):
             role_names = ", ".join([r.name for r in roles_to_remove])
             print(f"[Discord] Removed previous tier role ({role_names}) from {member.display_name} in '{guild.name}'.")
 
-# Live-share / Announcement Helpers
-async def send_live_announcement(username: str):
-    if not ANNOUNCEMENT_CHANNEL_ID:
-        return
-    channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
-    if not channel:
-        return
-
-    live_url = f"https://www.tiktok.com/@{username}/live"
-    try:
-        msg = await channel.send(f"🔴 **@{username}** sedang LIVE di TikTok!\nTonton di sini: {live_url}")
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT OR REPLACE INTO active_live_announcements (tiktok_username, channel_id, message_id) VALUES (?, ?, ?)",
-            (username.lower(), channel.id, msg.id)
-        )
-        conn.commit()
-    except Exception as e:
-        print(f"[Discord Error] Failed to send announcement: {e}")
-
-async def delete_live_announcement(username: str):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT channel_id, message_id FROM active_live_announcements WHERE tiktok_username = ?", (username.lower(),))
-    row = cursor.fetchone()
-
-    if row:
-        channel_id, message_id = row[0], row[1]
-        try:
-            channel = bot.get_channel(channel_id)
-            if channel:
-                msg = await channel.fetch_message(message_id)
-                await msg.delete()
-        except Exception:
-            pass
-        cursor.execute("DELETE FROM active_live_announcements WHERE tiktok_username = ?", (username.lower(),))
-        conn.commit()
-
-# TikTok Client Setup
-def create_tiktok_client(username: str) -> TikTokLiveClient:
-    client = TikTokLiveClient(unique_id=username.lower())
-
-    @client.on(ConnectEvent)
-    async def on_connect(event: ConnectEvent):
-        user_key = username.lower()
-        print(f"[@{username}] Connected to TikTok Live!")
-        if not IS_LIVE_NOTIFIED.get(user_key, False):
-            await send_live_announcement(username)
-            IS_LIVE_NOTIFIED[user_key] = True
-
-    @client.on(DisconnectEvent)
-    async def on_disconnect(event: DisconnectEvent):
-        user_key = username.lower()
-        print(f"[@{username}] Disconnected from TikTok Live!")
-        IS_LIVE_NOTIFIED[user_key] = False
-        await delete_live_announcement(username)
-
-    @client.on(GiftEvent)
-    async def on_gift(event: GiftEvent):
-        is_streakable = getattr(event.gift, "streakable", False)
-        is_repeat_end = getattr(event, "repeat_end", True)
-
-        if not is_streakable or is_repeat_end:
-            user_name = event.user.unique_id.lower()
-            gift_name = getattr(event.gift, "name", "gift")
-
-            diamond_count = getattr(event.gift, "diamond_count", 0)
-            repeat_count = getattr(event, "repeat_count", 1)
-            coins = diamond_count * repeat_count
-
-            if coins > 0:
-                LAST_GIFT_TIMESTAMP[username.lower()] = time.time()
-                total_coins = save_gift_data(user_name, coins)
-                print(f"[gift - @{client.unique_id}] {user_name} sent {gift_name} ({coins} c); total : {total_coins}")
-                await auto_assign_role(user_name, total_coins)
-
-    return client
-
-async def run_tiktok_client_with_standby(username: str):
+async def process_live_announcement(username: str, is_live: bool):
     user_key = username.lower()
-    retry_delay = 180  # Cooldown 3 menit jika offline
+    async with NOTIFICATION_LOCK:
+        if not ANNOUNCEMENT_CHANNEL_ID:
+            print("[Discord] Notification failed: ANNOUNCEMENT_CHANNEL_ID is not set.")
+            return
 
-    while True:
-        client = create_tiktok_client(username)
+        await bot.wait_until_ready()
+        channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
+        if not channel:
+            try:
+                channel = await bot.fetch_channel(ANNOUNCEMENT_CHANNEL_ID)
+            except Exception as e:
+                print(f"[Discord] Notification failed: Channel ID {ANNOUNCEMENT_CHANNEL_ID} not found ({e}).")
+                return
+
+        host_name, account_name = get_schedule_info(user_key)
+        live_url = f"https://www.tiktok.com/@{user_key}/live"
+        live_content = (
+            f"🔴 **{host_name} just live!**\n"
+            f"Currently streaming on **{account_name}** (@{user_key})\n\n"
+            f"Watch here:\n{live_url}"
+        )
+        offline_content = f"⚪ **@{user_key}** has ended the stream / disconnected from TikTok Live."
+
+        conn = get_db_connection()
         try:
-            print(f"[@{username}] Checking live status...")
-            is_currently_live = await client.is_live()
+            res = conn.execute(
+                "SELECT channel_id, message_id FROM active_live_announcements WHERE tiktok_username = ?",
+                (user_key,)
+            )
+            row = res.fetchone()
 
-            if not is_currently_live:
-                IS_LIVE_NOTIFIED[user_key] = False
-                await delete_live_announcement(username)
-                print(f"[@{username}] Streamer is OFFLINE. Standby for 3 minutes...")
-                await asyncio.sleep(retry_delay)
-                continue
+            old_msg = None
+            if row:
+                old_message_id = int(row[1])
+                try:
+                    old_msg = await channel.fetch_message(old_message_id)
+                except Exception:
+                    old_msg = None
 
-            print(f"[@{username}] Streamer is LIVE! Connecting...")
-            await client.start()
+            if old_msg:
+                is_announcement_msg = "🔴" in old_msg.content or "just live!" in old_msg.content
+                is_offline_msg = "⚪" in old_msg.content or "ended the stream" in old_msg.content
 
-        except UserOfflineError:
-            IS_LIVE_NOTIFIED[user_key] = False
-            await delete_live_announcement(username)
-            print(f"[@{username}] Streamer is offline (UserOfflineError). Retry in 3 minutes...")
-            await asyncio.sleep(retry_delay)
+                if is_live:
+                    if is_announcement_msg:
+                        if host_name in old_msg.content:
+                            return
+                        else:
+                            try:
+                                await old_msg.delete()
+                            except Exception:
+                                pass
+                            new_msg = await channel.send(live_content)
+                            conn.execute(
+                                "INSERT OR REPLACE INTO active_live_announcements (tiktok_username, channel_id, message_id) VALUES (?, ?, ?)",
+                                (user_key, str(channel.id), str(new_msg.id))
+                            )
+                            conn.commit()
+                            return
+                    elif is_offline_msg:
+                        try:
+                            await old_msg.delete()
+                        except Exception:
+                            pass
+                        new_msg = await channel.send(live_content)
+                        conn.execute(
+                            "INSERT OR REPLACE INTO active_live_announcements (tiktok_username, channel_id, message_id) VALUES (?, ?, ?)",
+                            (user_key, str(channel.id), str(new_msg.id))
+                        )
+                        conn.commit()
+                        return
+                else:
+                    if is_offline_msg:
+                        return
+                    else:
+                        try:
+                            edited_msg = await old_msg.edit(content=offline_content)
+                            conn.execute(
+                                "INSERT OR REPLACE INTO active_live_announcements (tiktok_username, channel_id, message_id) VALUES (?, ?, ?)",
+                                (user_key, str(channel.id), str(edited_msg.id))
+                            )
+                            conn.commit()
+                        except Exception as e:
+                            print(f"[Discord] Failed to edit message for @{user_key}: {e}")
+                        return
+            else:
+                target_content = live_content if is_live else offline_content
+                new_msg = await channel.send(target_content)
+                conn.execute(
+                    "INSERT OR REPLACE INTO active_live_announcements (tiktok_username, channel_id, message_id) VALUES (?, ?, ?)",
+                    (user_key, str(channel.id), str(new_msg.id))
+                )
+                conn.commit()
 
         except Exception as e:
-            error_msg = str(e).lower()
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
-
-            last_gift = LAST_GIFT_TIMESTAMP.get(user_key, time.time())
-            seconds_since_last_gift = time.time() - last_gift
-            is_high_traffic = seconds_since_last_gift <= 180
-
-            if "rate_limit" in error_msg or "too many connections" in error_msg or "429" in error_msg:
-                cooldown = 120 if is_high_traffic else 300
-                print(f"[@{username}] Rate limit detected! Cooldown {cooldown}s...")
-                await asyncio.sleep(cooldown)
-            elif "offline" in error_msg or "not live" in error_msg:
-                IS_LIVE_NOTIFIED[user_key] = False
-                await delete_live_announcement(username)
-                print(f"[@{username}] Streamer offline. Cooldown 3 minutes...")
-                await asyncio.sleep(retry_delay)
-            else:
-                cooldown = 30 if is_high_traffic else 60
-                print(f"[@{username}] Disconnected: {e} (retry in {cooldown}s)")
-                await asyncio.sleep(cooldown)
+            print(f"[Discord Error] Failed to process announcement for @{user_key}: {e}")
+        finally:
+            conn.close()
 
 # Discord Commands
 @bot.event
@@ -237,77 +202,101 @@ async def on_ready():
 async def claim(ctx, tiktok_user: str):
     tiktok_user_clean = tiktok_user.lstrip("@").lower()
     conn = get_db_connection()
-    cursor = conn.cursor()
+    try:
+        res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (ctx.author.id,))
+        if res.fetchone():
+            await ctx.send(f"❌ You have already claimed a TikTok account.")
+            return
 
-    cursor.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (ctx.author.id,))
-    existing_discord_claim = cursor.fetchone()
-    if existing_discord_claim:
-        await ctx.send(f"❌ You have already claimed TikTok account `@{existing_discord_claim[0]}`.")
-        return
+        res = conn.execute("SELECT discord_id FROM user_mappings WHERE tiktok_user = ?", (tiktok_user_clean,))
+        if res.fetchone():
+            await ctx.send(f"❌ TikTok username `@{tiktok_user_clean}` has already been claimed.")
+            return
 
-    cursor.execute("SELECT discord_id FROM user_mappings WHERE tiktok_user = ?", (tiktok_user_clean,))
-    existing_tiktok_claim = cursor.fetchone()
-    if existing_tiktok_claim:
-        await ctx.send(f"❌ TikTok username `@{tiktok_user_clean}` has already been claimed.")
-        return
+        conn.execute("INSERT INTO user_mappings (discord_id, tiktok_user) VALUES (?, ?)", (ctx.author.id, tiktok_user_clean))
+        conn.commit()
 
-    cursor.execute("INSERT INTO user_mappings (discord_id, tiktok_user) VALUES (?, ?)", (ctx.author.id, tiktok_user_clean))
-    conn.commit()
+        res = conn.execute("SELECT total_coins FROM tiktok_gifts WHERE tiktok_user = ?", (tiktok_user_clean,))
+        row = res.fetchone()
+        total_coins = row[0] if row else 0
 
-    cursor.execute("SELECT total_coins FROM tiktok_gifts WHERE tiktok_user = ?", (tiktok_user_clean,))
-    row = cursor.fetchone()
-    total_coins = row[0] if row else 0
-
-    await ctx.send(
-        f"✅ Linked Discord account {ctx.author.mention} to TikTok `@{tiktok_user_clean}`.\n"
-        f"Current recorded total: **{total_coins} c**."
-    )
-    await auto_assign_role(tiktok_user_clean, total_coins)
+        await ctx.send(f"✅ Linked Discord account {ctx.author.mention} to TikTok `@{tiktok_user_clean}`. Total: **{total_coins} c**.")
+    finally:
+        conn.close()
 
 @bot.command(name="mycoins", aliases=["check", "coins"])
 async def mycoins(ctx):
     conn = get_db_connection()
-    cursor = conn.cursor()
+    try:
+        res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (ctx.author.id,))
+        mapping = res.fetchone()
+        if not mapping:
+            await ctx.send(f"❌ {ctx.author.mention}, you haven't linked a TikTok account yet! Use `!claim @username`.")
+            return
 
-    cursor.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (ctx.author.id,))
-    mapping = cursor.fetchone()
+        tiktok_user = mapping[0]
+        res = conn.execute("SELECT display_name, total_coins FROM tiktok_gifts WHERE tiktok_user = ?", (tiktok_user,))
+        gift_data = res.fetchone()
+        display_name = gift_data[0] if (gift_data and gift_data[0]) else tiktok_user
+        total_coins = gift_data[1] if gift_data else 0
 
-    if not mapping:
-        await ctx.send(f"❌ {ctx.author.mention}, you haven't linked a TikTok account yet! Use `!claim @your_tiktok_username` first.")
-        return
+        await ctx.send(f"📊 **Coin Balance for {ctx.author.display_name}:** @{tiktok_user} | **{total_coins} c**")
+    finally:
+        conn.close()
 
-    tiktok_user = mapping[0]
-    cursor.execute("SELECT total_coins FROM tiktok_gifts WHERE tiktok_user = ?", (tiktok_user,))
-    gift_data = cursor.fetchone()
-    total_coins = gift_data[0] if gift_data else 0
-
-    await ctx.send(
-        f"📊 **Coin Balance for {ctx.author.display_name}:**\n"
-        f"• TikTok Account: `@{tiktok_user}`\n"
-        f"• Total Coins: **{total_coins} c**"
-    )
-
-@bot.command(name="topdonator")
-async def topdonator(ctx):
+@bot.command(name="topsupporter", aliases=["leaderboard", "koin", "topdonator"])
+async def topsupporter(ctx):
     conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT tiktok_user, total_coins FROM tiktok_gifts ORDER BY total_coins DESC LIMIT 5")
-    rows = cursor.fetchall()
+    try:
+        res = conn.execute("SELECT tiktok_user, display_name, total_coins FROM tiktok_gifts ORDER BY total_coins DESC LIMIT 10")
+        rows = res.fetchall()
+        if not rows:
+            await ctx.send("❌ No gift data recorded yet.")
+            return
 
+        table = "```text\n"
+        table += f"{'NO':<4} | {'NAME / USERNAME':<24} | {'TOTAL COINS':<10}\n"
+        table += "-" * 46 + "\n"
+        for idx, (username, display_name, coins) in enumerate(rows, start=1):
+            name_str = display_name if display_name else f"@{username}"
+            if len(name_str) > 23:
+                name_str = name_str[:20] + "..."
+            table += f"{idx:<4} | {name_str:<24} | {coins:<10} c\n"
+        table += "```"
+        await ctx.send(f"🏆 **TIKTOK LIVE TOP SUPPORTERS LEADERBOARD**\n{table}")
+    finally:
+        conn.close()
+
+@bot.command(name="dailyrank", aliases=["daily", "harini"])
+async def dailyrank(ctx):
+    rows = get_daily_top_supporters()
     if not rows:
-        await ctx.send("No gift data recorded yet.")
+        await ctx.send("❌ Belum ada data koin yang tercatat untuk hari ini.")
         return
 
-    response = "**🏆 Top 5 TikTok Live Donators:**\n"
-    for idx, (user, coins) in enumerate(rows, start=1):
-        response += f"{idx}. `@{user}` - {coins} c\n"
-
-    await ctx.send(response)
+    table = "```text\n"
+    table += f"{'NO':<4} | {'NAME / USERNAME':<24} | {'TODAY COINS':<10}\n"
+    table += "-" * 46 + "\n"
+    for idx, (username, display_name, coins) in enumerate(rows, start=1):
+        name_str = display_name if display_name else f"@{username}"
+        if len(name_str) > 23:
+            name_str = name_str[:20] + "..."
+        table += f"{idx:<4} | {name_str:<24} | {coins:<10} c\n"
+    table += "```"
+    await ctx.send(f"🏆 **TIKTOK LIVE DAILY RANKING (HARI INI)**\n{table}")
 
 async def main():
     init_db()
-    asyncio.create_task(run_tiktok_client_with_standby(TARGET_TIKTOK_USER))
+    keep_alive(handle_api_announcement)
+
+    # Jalankan observer Clarissa & George secara bersamaan
+    asyncio.create_task(run_clarissa_observer(process_live_announcement, auto_assign_role))
+    asyncio.create_task(run_george_observer(process_live_announcement, auto_assign_role))
+
     await bot.start(DISCORD_TOKEN)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n[Bot] Stopped successfully.")

@@ -1,0 +1,15 @@
+{
+  "accounts": [
+    {
+      "account_name": "George Vilora",
+      "tiktok_username": "georgevilora"
+    },
+    {
+      "account_name": "Jeremy Jenas",
+      "tiktok_username": "clarissadreams"
+    }
+  ],
+  "default_name": "Host",
+  "summary_channel_id": 1556625476468867084,
+  "overwrite_summary": true
+}

@@ -1,0 +1,22 @@
+{
+  "clarissadreams": {
+    "account_name": "Jeremy Jeans",
+    "default_name": "Host",
+    "hosts": [
+      { "name": "SOLEN", "start_hour": 1, "end_hour": 7 },
+      { "name": "ZIZE", "start_hour": 7, "end_hour": 13 },
+      { "name": "YOSA", "start_hour": 13, "end_hour": 19 },
+      { "name": "IELYA", "start_hour": 19, "end_hour": 1 }
+    ]
+  },
+  "georgevilora": {
+    "account_name": "George Vilora",
+    "default_name": "Host",
+    "hosts": [
+      { "name": "YUCA", "start_hour": 1, "end_hour": 7 },
+      { "name": "SINTA", "start_hour": 7, "end_hour": 13 },
+      { "name": "COLE", "start_hour": 13, "end_hour": 19 },
+      { "name": "LUNA", "start_hour": 19, "end_hour": 1 }
+    ]
+  }
+}
