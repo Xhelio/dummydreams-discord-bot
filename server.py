@@ -36,6 +36,8 @@ button:hover { background: #0369a1; }
 .btn-action { padding: 4px 8px; font-size: 0.75rem; text-decoration: none; border-radius: 4px; display: inline-block; }
 .btn-toggle { background: #ca8a04; color: white; }
 .btn-del { background: #dc2626; color: white; }
+.btn-live { background: #22c55e; color: white; font-weight: bold; }
+.btn-live:hover { background: #16a34a; }
 .edit-form { display: flex; gap: 6px; }
 .edit-form input { width: 90px; padding: 4px 6px; }
 .edit-form button { padding: 4px 8px; font-size: 0.75rem; }
@@ -208,6 +210,7 @@ def view_viewers():
                     <td>
                         {{% if v[3] %}}
                         <span class="badge badge-active">🔴 Live di @{{ v[3] }}</span>
+                        <a href="https://www.tiktok.com/@{{ v[3] }}/live" target="_blank" class="btn-action btn-live">🔴 Watch Live</a>
                         {{% else %}}
                         <span class="badge badge-inactive">Offline</span>
                         {{% endif %}}
@@ -291,6 +294,7 @@ def view_monitor():
                     <td>
                         {{% if h[3] == 1 %}}
                         <span class="badge badge-active">🔴 Sedang Live</span>
+                        <a href="https://www.tiktok.com/@{{ h[1] }}/live" target="_blank" class="btn-action btn-live">🔴 Watch Live</a>
                         {{% else %}}
                         <span class="badge badge-inactive">Offline</span>
                         {{% endif %}}
