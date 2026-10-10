@@ -25,8 +25,9 @@ table { border-collapse: collapse; width: 100%; margin-bottom: 10px; }
 th, td { border-bottom: 1px solid #334155; padding: 10px 14px; text-align: left; font-size: 0.875rem; }
 th { background-color: #0284c7; color: white; text-transform: uppercase; font-size: 0.75rem; }
 tr:nth-child(even) { background-color: #162032; }
-.badge { background: #0369a1; color: #e0f2fe; padding: 3px 8px; border-radius: 4px; font-weight: 600; }
-.badge-active { background: #15803d; color: #dcfce7; }
+.badge { background: #0369a1; color: #e0f2fe; padding: 3px 8px; border-radius: 4px; font-weight: 600; text-decoration: none; display: inline-block; }
+.badge-active { background: #15803d; color: #dcfce7; border: 1px solid #22c55e; transition: all 0.2s; }
+.badge-active:hover { background: #166534; transform: translateY(-1px); }
 .badge-inactive { background: #475569; color: #cbd5e1; }
 .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-top: 10px; }
 input, select, button { padding: 8px 12px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: white; font-size: 0.875rem; }
@@ -36,8 +37,6 @@ button:hover { background: #0369a1; }
 .btn-action { padding: 4px 8px; font-size: 0.75rem; text-decoration: none; border-radius: 4px; display: inline-block; }
 .btn-toggle { background: #ca8a04; color: white; }
 .btn-del { background: #dc2626; color: white; }
-.btn-live { background: #22c55e; color: white; font-weight: bold; }
-.btn-live:hover { background: #16a34a; }
 .edit-form { display: flex; gap: 6px; }
 .edit-form input { width: 90px; padding: 4px 6px; }
 .edit-form button { padding: 4px 8px; font-size: 0.75rem; }
@@ -59,20 +58,20 @@ def home():
 # 1. Dashboard Navigasi Utama
 @app.route('/admin/data', methods=['GET'])
 def view_data():
-    html = f"""
+    html = """
     <!DOCTYPE html>
     <html lang="id">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Database Admin Panel</title>
-        <style>{BASE_CSS}</style>
+        <style>BASE_CSS_PLACEHOLDER</style>
     </head>
     <body>
         <div class="header">
             <h1>🛡️ Database Admin Panel</h1>
         </div>
-        {NAV_HTML}
+        NAV_HTML_PLACEHOLDER
         
         <div class="card">
             <h2>📌 Menu Pengelolaan Admin</h2>
@@ -89,7 +88,8 @@ def view_data():
         </div>
     </body>
     </html>
-    """
+    """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML)
+    
     return render_template_string(html)
 
 # 2. Halaman Jadwal Shift Host
@@ -107,20 +107,20 @@ def view_schedule():
     except Exception as e:
         return f"<h3>Database Error: {e}</h3>", 500
 
-    html = f"""
+    html = """
     <!DOCTYPE html>
     <html lang="id">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Jadwal Shift Host</title>
-        <style>{BASE_CSS}</style>
+        <style>BASE_CSS_PLACEHOLDER</style>
     </head>
     <body>
         <div class="header">
             <h1>📅 Jadwal Shift Host</h1>
         </div>
-        {NAV_HTML}
+        NAV_HTML_PLACEHOLDER
 
         <div class="card">
             <h2>+ Tambah / Update Shift Host</h2>
@@ -140,21 +140,22 @@ def view_schedule():
                     <th>Nama Host Shift</th>
                     <th>Jam Shift</th>
                 </tr>
-                {{% for sc in schedules %}}
+                {% for sc in schedules %}
                 <tr>
                     <td>@{{ sc[0] }}</td>
                     <td>@{{ sc[0] }}</td>
                     <td><strong>{{ sc[2] }}</strong></td>
                     <td>{{ "%02d:00"|format(sc[3]) }} - {{ "%02d:00"|format(sc[4]) }} WIB</td>
                 </tr>
-                {{% else %}}
+                {% else %}
                 <tr><td colspan="4">Belum ada data jadwal shift host.</td></tr>
-                {{% endfor %}}
+                {% endfor %}
             </table>
         </div>
     </body>
     </html>
-    """
+    """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML)
+    
     return render_template_string(html, schedules=schedules)
 
 # 3. Halaman Viewer & Edit Koin
@@ -177,20 +178,20 @@ def view_viewers():
     except Exception as e:
         return f"<h3>Database Error: {e}</h3>", 500
 
-    html = f"""
+    html = """
     <!DOCTYPE html>
     <html lang="id">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Daftar Viewer & Koin</title>
-        <style>{BASE_CSS}</style>
+        <style>BASE_CSS_PLACEHOLDER</style>
     </head>
     <body>
         <div class="header">
             <h1>👥 Daftar Viewer & Koin</h1>
         </div>
-        {NAV_HTML}
+        NAV_HTML_PLACEHOLDER
 
         <div class="card">
             <h2>Daftar Viewer</h2>
@@ -202,18 +203,17 @@ def view_viewers():
                     <th>Status Live Realtime</th>
                     <th>Edit Koin</th>
                 </tr>
-                {{% for v in viewers %}}
+                {% for v in viewers %}
                 <tr>
                     <td>@{{ v[0] }}</td>
                     <td>{{ v[1] or '-' }}</td>
                     <td><span class="badge">{{ v[2] }} c</span></td>
                     <td>
-                        {{% if v[3] %}}
-                        <span class="badge badge-active">🔴 Live di @{{ v[3] }}</span>
-                        <a href="https://www.tiktok.com/@{{ v[3] }}/live" target="_blank" class="btn-action btn-live">🔴 Watch Live</a>
-                        {{% else %}}
+                        {% if v[3] %}
+                        <a href="https://www.tiktok.com/@{{ v[3] }}/live" target="_blank" class="badge badge-active">🔴 Sedang Live ↗</a>
+                        {% else %}
                         <span class="badge badge-inactive">Offline</span>
-                        {{% endif %}}
+                        {% endif %}
                     </td>
                     <td>
                         <form action="/admin/edit-coin" method="POST" class="edit-form">
@@ -223,14 +223,15 @@ def view_viewers():
                         </form>
                     </td>
                 </tr>
-                {{% else %}}
+                {% else %}
                 <tr><td colspan="5">Belum ada data viewer tercatat.</td></tr>
-                {{% endfor %}}
+                {% endfor %}
             </table>
         </div>
     </body>
     </html>
-    """
+    """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML)
+    
     return render_template_string(html, viewers=viewers)
 
 # 4. Halaman Monitoring Sesi Live & Target Host
@@ -261,20 +262,20 @@ def view_monitor():
     except Exception as e:
         return f"<h3>Database Error: {e}</h3>", 500
 
-    html = f"""
+    html = """
     <!DOCTYPE html>
     <html lang="id">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Monitor Live Realtime</title>
-        <style>{BASE_CSS}</style>
+        <style>BASE_CSS_PLACEHOLDER</style>
     </head>
     <body>
         <div class="header">
             <h1>📹 Monitor Live Realtime</h1>
         </div>
-        {NAV_HTML}
+        NAV_HTML_PLACEHOLDER
 
         <!-- Target Host -->
         <div class="card">
@@ -286,27 +287,26 @@ def view_monitor():
             <br>
             <table>
                 <tr><th>ID</th><th>Username TikTok</th><th>Nama Channel</th><th>Status Realtime</th><th>Aksi</th></tr>
-                {{% for h in hosts %}}
+                {% for h in hosts %}
                 <tr>
                     <td>{{ h[0] }}</td>
                     <td>@{{ h[1] }}</td>
                     <td>@{{ h[1] }}</td>
                     <td>
-                        {{% if h[3] == 1 %}}
-                        <span class="badge badge-active">🔴 Sedang Live</span>
-                        <a href="https://www.tiktok.com/@{{ h[1] }}/live" target="_blank" class="btn-action btn-live">🔴 Watch Live</a>
-                        {{% else %}}
+                        {% if h[3] == 1 %}
+                        <a href="https://www.tiktok.com/@{{ h[1] }}/live" target="_blank" class="badge badge-active" title="Klik untuk nonton Live">🔴 Sedang Live ↗</a>
+                        {% else %}
                         <span class="badge badge-inactive">Offline</span>
-                        {{% endif %}}
+                        {% endif %}
                     </td>
                     <td>
                         <a href="/admin/toggle-host/{{ h[0] }}" class="btn-action btn-toggle">Ubah Status Active</a>
                         <a href="/admin/delete-host/{{ h[0] }}" class="btn-action btn-del" onclick="return confirm('Hapus target ini?')">Hapus</a>
                     </td>
                 </tr>
-                {{% else %}}
+                {% else %}
                 <tr><td colspan="5">Belum ada target terdaftar.</td></tr>
-                {{% endfor %}}
+                {% endfor %}
             </table>
         </div>
 
@@ -322,29 +322,36 @@ def view_monitor():
                     <th>Koin</th>
                     <th>Host Terjadwal</th>
                 </tr>
-                {{% for s in sessions %}}
+                {% for s in sessions %}
                 <tr>
                     <td>@{{ s[1] }}</td>
                     <td>{{ s[2] }}</td>
-                    <td>{{ s[3] or '🔴 Sedang Live' }}</td>
                     <td>
-                        {{% if s[4] > 0 %}}
+                        {% if s[3] %}
+                        {{ s[3] }}
+                        {% else %}
+                        <a href="https://www.tiktok.com/@{{ s[1] }}/live" target="_blank" class="badge badge-active">🔴 Sedang Live ↗</a>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if s[4] > 0 %}
                         {{ s[4] // 3600 }}j {{ (s[4] % 3600) // 60 }}m {{ s[4] % 60 }}d
-                        {{% else %}}
+                        {% else %}
                         -
-                        {{% endif %}}
+                        {% endif %}
                     </td>
                     <td><span class="badge">{{ s[5] }} c</span></td>
                     <td><strong>{{ s[6] or '-' }}</strong></td>
                 </tr>
-                {{% else %}}
+                {% else %}
                 <tr><td colspan="6">Belum ada histori sesi live.</td></tr>
-                {{% endfor %}}
+                {% endfor %}
             </table>
         </div>
     </body>
     </html>
-    """
+    """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML)
+    
     return render_template_string(html, hosts=hosts, sessions=sessions)
 
 # --- Action Handlers ---
