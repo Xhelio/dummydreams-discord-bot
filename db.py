@@ -87,6 +87,17 @@ def init_db():
             )
         """)
 
+        # Migrasi Otomatis: Tambahkan kolom baru jika tabel sudah pernah dibuat sebelumnya
+        try:
+            conn.execute("ALTER TABLE host_schedules ADD COLUMN account_name TEXT")
+        except Exception:
+            pass  # Abaikan jika kolom account_name sudah ada
+
+        try:
+            conn.execute("ALTER TABLE live_sessions ADD COLUMN scheduled_host TEXT")
+        except Exception:
+            pass  # Abaikan jika kolom scheduled_host sudah ada
+
         cur = conn.cursor()
         
         # Inisialisasi Akun TikTok Target
