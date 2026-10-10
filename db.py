@@ -75,6 +75,10 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # Solusi 2: Drop tabel host_schedules lama agar terbuat ulang dengan skema baru secara sempurna
+        conn.execute("DROP TABLE IF EXISTS host_schedules")
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS host_schedules (
                 schedule_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,12 +91,7 @@ def init_db():
             )
         """)
 
-        # Migrasi Otomatis: Tambahkan kolom baru jika tabel sudah pernah dibuat sebelumnya
-        try:
-            conn.execute("ALTER TABLE host_schedules ADD COLUMN account_name TEXT")
-        except Exception:
-            pass  # Abaikan jika kolom account_name sudah ada
-
+        # Migrasi Otomatis Kolom Baru pada live_sessions
         try:
             conn.execute("ALTER TABLE live_sessions ADD COLUMN scheduled_host TEXT")
         except Exception:
