@@ -11,226 +11,125 @@ TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
 
 async_announcement_handler = None
 
+# CSS Template Bersama
+BASE_CSS = """
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 30px; background: #0f172a; color: #f8fafc; }
+.header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; border-bottom: 1px solid #334155; padding-bottom: 16px; }
+h1 { font-size: 1.5rem; color: #f8fafc; }
+.nav-links { display: flex; gap: 10px; margin-bottom: 24px; flex-wrap: wrap; }
+.nav-btn { background: #1e293b; color: #38bdf8; border: 1px solid #334155; text-decoration: none; padding: 8px 16px; border-radius: 8px; font-size: 0.875rem; font-weight: 600; transition: all 0.2s; }
+.nav-btn:hover, .nav-btn.active { background: #0284c7; color: white; border-color: #0284c7; }
+.card { background: #1e293b; border-radius: 10px; border: 1px solid #334155; padding: 20px; margin-bottom: 24px; }
+h2 { color: #38bdf8; font-size: 1.1rem; margin-bottom: 16px; }
+table { border-collapse: collapse; width: 100%; margin-bottom: 10px; }
+th, td { border-bottom: 1px solid #334155; padding: 10px 14px; text-align: left; font-size: 0.875rem; }
+th { background-color: #0284c7; color: white; text-transform: uppercase; font-size: 0.75rem; }
+tr:nth-child(even) { background-color: #162032; }
+.badge { background: #0369a1; color: #e0f2fe; padding: 3px 8px; border-radius: 4px; font-weight: 600; }
+.badge-active { background: #15803d; color: #dcfce7; }
+.badge-inactive { background: #475569; color: #cbd5e1; }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-top: 10px; }
+input, select, button { padding: 8px 12px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: white; font-size: 0.875rem; }
+button { background: #0284c7; cursor: pointer; font-weight: 600; border: none; }
+button:hover { background: #0369a1; }
+.btn-danger { background: #ef4444; }
+.btn-action { padding: 4px 8px; font-size: 0.75rem; text-decoration: none; border-radius: 4px; display: inline-block; }
+.btn-toggle { background: #ca8a04; color: white; }
+.btn-del { background: #dc2626; color: white; }
+.edit-form { display: flex; gap: 6px; }
+.edit-form input { width: 90px; padding: 4px 6px; }
+.edit-form button { padding: 4px 8px; font-size: 0.75rem; }
+"""
+
+NAV_HTML = """
+<div class="nav-links">
+    <a href="/admin/data" class="nav-btn">🏠 Main Menu</a>
+    <a href="/admin/schedule" class="nav-btn">📅 Jadwal Shift</a>
+    <a href="/admin/viewers" class="nav-btn">👥 Viewer & Koin</a>
+    <a href="/admin/monitor" class="nav-btn">📹 Monitor Live</a>
+</div>
+"""
+
 @app.route('/')
 def home():
-    html = """
-    <!DOCTYPE html>
-    <html lang="id">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>DummyDreams Bot Dashboard</title>
-        <style>
-            * { box-sizing: border-box; margin: 0; padding: 0; }
-            body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; min-height: 100vh; display: flex; justify-content: center; align-items: center; padding: 20px; }
-            .container { background: #1e293b; border-radius: 16px; border: 1px solid #334155; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5); width: 100%; max-width: 550px; padding: 32px; text-align: center; }
-            .status-badge { display: inline-flex; align-items: center; gap: 8px; background: rgba(34, 197, 94, 0.1); border: 1px solid rgba(34, 197, 94, 0.3); color: #4ade80; padding: 6px 16px; border-radius: 9999px; font-size: 0.875rem; font-weight: 600; margin-bottom: 20px; }
-            .pulse { width: 8px; height: 8px; background-color: #22c55e; border-radius: 50%; box-shadow: 0 0 10px #22c55e; animation: pulse-animation 2s infinite; }
-            @keyframes pulse-animation { 0% { box-shadow: 0 0 0 0px rgba(34, 197, 94, 0.7); } 100% { box-shadow: 0 0 0 10px rgba(34, 197, 94, 0); } }
-            h1 { font-size: 1.875rem; font-weight: 700; color: #f8fafc; margin-bottom: 10px; }
-            p.desc { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin-bottom: 28px; }
-            .btn { display: inline-block; background: linear-gradient(135deg, #0284c7, #0369a1); color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 10px; font-weight: 600; font-size: 0.95rem; transition: all 0.2s ease; width: 100%; box-shadow: 0 4px 6px -1px rgba(2, 132, 199, 0.3); }
-            .btn:hover { background: linear-gradient(135deg, #0369a1, #075985); transform: translateY(-1px); }
-            .info-box { margin-top: 28px; padding-top: 20px; border-top: 1px solid #334155; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; text-align: left; }
-            .info-item { background: #0f172a; padding: 12px; border-radius: 8px; border: 1px solid #1e293b; }
-            .info-label { font-size: 0.75rem; color: #64748b; font-weight: 600; text-transform: uppercase; }
-            .info-val { font-size: 0.875rem; color: #cbd5e1; font-weight: 500; margin-top: 2px; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="status-badge">
-                <span class="pulse"></span> Server Active 24/7
-            </div>
-            <h1>DummyDreams Bot</h1>
-            <p class="desc">Discord Bot & TikTok Live Observer Service sedang berjalan normal di latar belakang.</p>
-            <a href="/admin/data" class="btn">🛡️ Buka Database Admin Panel</a>
-            
-            <div class="info-box">
-                <div class="info-item">
-                    <div class="info-label">Environment</div>
-                    <div class="info-val">Production (Render)</div>
-                </div>
-                <div class="info-item">
-                    <div class="info-label">Database</div>
-                    <div class="info-val">Turso (LibSQL)</div>
-                </div>
-            </div>
-        </div>
-    </body>
-    </html>
-    """
-    return render_template_string(html)
+    return redirect('/admin/data')
 
+# 1. Dashboard Navigasi Utama
 @app.route('/admin/data', methods=['GET'])
 def view_data():
-    try:
-        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
-        cur = conn.cursor()
-
-        # 1. Full List Viewer
-        viewers = cur.execute("""
-            SELECT 
-                g.tiktok_user, 
-                g.display_name, 
-                g.total_coins,
-                a.tiktok_username as active_channel
-            FROM tiktok_gifts g
-            LEFT JOIN active_live_announcements a ON g.tiktok_user = a.tiktok_username
-            ORDER BY g.total_coins DESC
-        """).fetchall()
-
-        # 2. Akun Target TikTok Host (Realtime status dari active_live_announcements)
-        hosts = cur.execute("""
-            SELECT 
-                h.host_id, 
-                h.tiktok_username, 
-                h.is_active,
-                CASE WHEN a.tiktok_username IS NOT NULL THEN 1 ELSE 0 END as is_currently_live
-            FROM hosts h
-            LEFT JOIN active_live_announcements a ON h.tiktok_username = a.tiktok_username
-            ORDER BY h.host_id ASC
-        """).fetchall()
-
-        # 3. Jadwal Shift Host
-        schedules = cur.execute("""
-            SELECT tiktok_username, account_name, host_name, start_hour, end_hour 
-            FROM host_schedules 
-            ORDER BY tiktok_username, start_hour
-        """).fetchall()
-
-        # 4. Sesi Live Lengkap
-        sessions = cur.execute("""
-            SELECT session_id, tiktok_username, start_time, end_time, duration_seconds, total_coins, scheduled_host 
-            FROM live_sessions 
-            ORDER BY start_time DESC
-        """).fetchall()
-
-        conn.close()
-    except Exception as e:
-        return f"<h3>Database Error: {e}</h3>", 500
-
-    html = """
+    html = f"""
     <!DOCTYPE html>
     <html lang="id">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Database Admin Panel</title>
-        <style>
-            * { box-sizing: border-box; margin: 0; padding: 0; }
-            body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 30px; background: #0f172a; color: #f8fafc; }
-            .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; border-bottom: 1px solid #334155; padding-bottom: 20px; }
-            h1 { font-size: 1.5rem; color: #f8fafc; }
-            .btn-back { background: #334155; color: #f8fafc; text-decoration: none; padding: 8px 16px; border-radius: 6px; font-size: 0.875rem; }
-            .card { background: #1e293b; border-radius: 10px; border: 1px solid #334155; padding: 20px; margin-bottom: 24px; }
-            h2 { color: #38bdf8; font-size: 1.1rem; margin-bottom: 16px; }
-            table { border-collapse: collapse; width: 100%; margin-bottom: 10px; }
-            th, td { border-bottom: 1px solid #334155; padding: 10px 14px; text-align: left; font-size: 0.875rem; }
-            th { background-color: #0284c7; color: white; text-transform: uppercase; font-size: 0.75rem; }
-            tr:nth-child(even) { background-color: #162032; }
-            .badge { background: #0369a1; color: #e0f2fe; padding: 3px 8px; border-radius: 4px; font-weight: 600; }
-            .badge-active { background: #15803d; color: #dcfce7; }
-            .badge-inactive { background: #475569; color: #cbd5e1; }
-            .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-top: 10px; }
-            input, select, button { padding: 8px 12px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: white; font-size: 0.875rem; }
-            button { background: #0284c7; cursor: pointer; font-weight: 600; border: none; }
-            button:hover { background: #0369a1; }
-            .btn-danger { background: #ef4444; }
-            .btn-action { padding: 4px 8px; font-size: 0.75rem; text-decoration: none; border-radius: 4px; display: inline-block; }
-            .btn-toggle { background: #ca8a04; color: white; }
-            .btn-del { background: #dc2626; color: white; }
-            .edit-form { display: flex; gap: 6px; }
-            .edit-form input { width: 90px; padding: 4px 6px; }
-            .edit-form button { padding: 4px 8px; font-size: 0.75rem; }
-        </style>
+        <style>{BASE_CSS}</style>
     </head>
     <body>
         <div class="header">
             <h1>🛡️ Database Admin Panel</h1>
-            <a href="/" class="btn-back">← Kembali</a>
+        </div>
+        {NAV_HTML}
+        
+        <div class="card">
+            <h2>📌 Menu Pengelolaan Admin</h2>
+            <p style="color: #94a3b8; font-size: 0.95rem; margin-bottom: 16px;">
+                Pilih modul di atas untuk mengelola jadwal shift, data viewer, atau memantau sesi live realtime.
+            </p>
         </div>
 
-        <!-- 1. Full List Viewer -->
-        <div class="card">
-            <h2>👥 Daftar Viewer & Koin</h2>
-            <table>
-                <tr>
-                    <th>Username (@)</th>
-                    <th>Nama Viewer</th>
-                    <th>Total Koin</th>
-                    <th>Status Live Realtime</th>
-                    <th>Edit Koin</th>
-                </tr>
-                {% for v in viewers %}
-                <tr>
-                    <td>@{{ v[0] }}</td>
-                    <td>{{ v[1] or '-' }}</td>
-                    <td><span class="badge">{{ v[2] }} c</span></td>
-                    <td>
-                        {% if v[3] %}
-                        <span class="badge badge-active">🔴 Live di @{{ v[3] }}</span>
-                        {% else %}
-                        <span class="badge badge-inactive">Offline</span>
-                        {% endif %}
-                    </td>
-                    <td>
-                        <form action="/admin/edit-coin" method="POST" class="edit-form">
-                            <input type="hidden" name="tiktok_user" value="{{ v[0] }}">
-                            <input type="number" name="new_coins" value="{{ v[2] }}" required>
-                            <button type="submit">Simpan</button>
-                        </form>
-                    </td>
-                </tr>
-                {% else %}
-                <tr><td colspan="5">Belum ada data viewer tercatat.</td></tr>
-                {% endfor %}
-            </table>
+        <div class="card" style="border-color: #ef4444;">
+            <h2 style="color: #ef4444;">⚠️ Danger Zone</h2>
+            <form action="/admin/reset-db" method="POST" onsubmit="return confirm('HAPUS SELURUH DATA GIFT DAN SESI LIVE?')">
+                <button type="submit" class="btn-danger">🔥 Reset Data Gift & Sesi Live</button>
+            </form>
         </div>
+    </body>
+    </html>
+    """
+    return render_template_string(html)
 
-        <!-- 2. Sesi Live -->
-        <div class="card">
-            <h2>📹 Daftar Sesi Live</h2>
-            <table>
-                <tr>
-                    <th>Username (@)</th>
-                    <th>Mulai</th>
-                    <th>Selesai</th>
-                    <th>Durasi</th>
-                    <th>Koin</th>
-                    <th>Host Terjadwal</th>
-                </tr>
-                {% for s in sessions %}
-                <tr>
-                    <td>@{{ s[1] }}</td>
-                    <td>{{ s[2] }}</td>
-                    <td>{{ s[3] or '🔴 Sedang Live' }}</td>
-                    <td>
-                        {% if s[4] > 0 %}
-                        {{ s[4] // 3600 }}j {{ (s[4] % 3600) // 60 }}m {{ s[4] % 60 }}d
-                        {% else %}
-                        -
-                        {% endif %}
-                    </td>
-                    <td><span class="badge">{{ s[5] }} c</span></td>
-                    <td><strong>{{ s[6] or '-' }}</strong></td>
-                </tr>
-                {% else %}
-                <tr><td colspan="6">Belum ada histori sesi live.</td></tr>
-                {% endfor %}
-            </table>
+# 2. Halaman Jadwal Shift Host
+@app.route('/admin/schedule', methods=['GET'])
+def view_schedule():
+    try:
+        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+        cur = conn.cursor()
+        schedules = cur.execute("""
+            SELECT tiktok_username, account_name, host_name, start_hour, end_hour 
+            FROM host_schedules 
+            ORDER BY tiktok_username, start_hour
+        """).fetchall()
+        conn.close()
+    except Exception as e:
+        return f"<h3>Database Error: {e}</h3>", 500
+
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="id">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Jadwal Shift Host</title>
+        <style>{BASE_CSS}</style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>📅 Jadwal Shift Host</h1>
         </div>
+        {NAV_HTML}
 
-        <!-- 3. Jadwal Shift Host -->
         <div class="card">
-            <h2>📅 Jadwal Shift Host (Database)</h2>
+            <h2>+ Tambah / Update Shift Host</h2>
             <form action="/admin/add-schedule" method="POST" class="form-grid">
                 <input type="text" name="tiktok_username" placeholder="Username TikTok (@...)" required>
                 <input type="text" name="account_name" placeholder="Nama Channel" required>
                 <input type="text" name="host_name" placeholder="Nama Host (misal: SOLEN)" required>
                 <input type="number" name="start_hour" placeholder="Jam Mulai (0-23)" min="0" max="23" required>
                 <input type="number" name="end_hour" placeholder="Jam Selesai (0-23)" min="0" max="23" required>
-                <button type="submit">+ Tambah / Update Shift</button>
+                <button type="submit">Simpan Shift</button>
             </form>
             <br>
             <table>
@@ -242,32 +141,154 @@ def view_data():
                 </tr>
                 {% for sc in schedules %}
                 <tr>
-                    <td>@{{ sc[0] }}</td>
-                    <td>@{{ sc[0] }}</td>
-                    <td><strong>{{ sc[2] }}</strong></td>
-                    <td>{{ "%02d:00"|format(sc[3]) }} - {{ "%02d:00"|format(sc[4]) }} WIB</td>
+                    <td>@{sc[0]}</td>
+                    <td>@{sc[0]}</td>
+                    <td><strong>{sc[2]}</strong></td>
+                    <td>{"%02d:00"|format(sc[3])} - {"%02d:00"|format(sc[4])} WIB</td>
                 </tr>
                 {% else %}
                 <tr><td colspan="4">Belum ada data jadwal shift host.</td></tr>
                 {% endfor %}
             </table>
         </div>
+    </body>
+    </html>
+    """
+    return render_template_string(html, schedules=schedules)
 
-        <!-- 4. Target Host TikTok -->
+# 3. Halaman Viewer & Edit Koin
+@app.route('/admin/viewers', methods=['GET'])
+def view_viewers():
+    try:
+        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+        cur = conn.cursor()
+        viewers = cur.execute("""
+            SELECT 
+                g.tiktok_user, 
+                g.display_name, 
+                g.total_coins,
+                a.tiktok_username as active_channel
+            FROM tiktok_gifts g
+            LEFT JOIN active_live_announcements a ON g.tiktok_user = a.tiktok_username
+            ORDER BY g.total_coins DESC
+        """).fetchall()
+        conn.close()
+    except Exception as e:
+        return f"<h3>Database Error: {e}</h3>", 500
+
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="id">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Daftar Viewer & Koin</title>
+        <style>{BASE_CSS}</style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>👥 Daftar Viewer & Koin</h1>
+        </div>
+        {NAV_HTML}
+
         <div class="card">
-            <h2>🎙️ Daftar Target Akun TikTok</h2>
+            <h2>Daftar Viewer</h2>
+            <table>
+                <tr>
+                    <th>Username (@)</th>
+                    <th>Nama Viewer</th>
+                    <th>Total Koin</th>
+                    <th>Status Live Realtime</th>
+                    <th>Edit Koin</th>
+                </tr>
+                {% for v in viewers %}
+                <tr>
+                    <td>@{v[0]}</td>
+                    <td>{v[1] or '-'}</td>
+                    <td><span class="badge">{v[2]} c</span></td>
+                    <td>
+                        {% if v[3] %}
+                        <span class="badge badge-active">🔴 Live di @{v[3]}</span>
+                        {% else %}
+                        <span class="badge badge-inactive">Offline</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <form action="/admin/edit-coin" method="POST" class="edit-form">
+                            <input type="hidden" name="tiktok_user" value="{v[0]}">
+                            <input type="number" name="new_coins" value="{v[2]}" required>
+                            <button type="submit">Simpan</button>
+                        </form>
+                    </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="5">Belum ada data viewer tercatat.</td></tr>
+                {% endfor %}
+            </table>
+        </div>
+    </body>
+    </html>
+    """
+    return render_template_string(html, viewers=viewers)
+
+# 4. Halaman Monitoring Sesi Live & Target Host
+@app.route('/admin/monitor', methods=['GET'])
+def view_monitor():
+    try:
+        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+        cur = conn.cursor()
+
+        hosts = cur.execute("""
+            SELECT 
+                h.host_id, 
+                h.tiktok_username, 
+                h.is_active,
+                CASE WHEN a.tiktok_username IS NOT NULL THEN 1 ELSE 0 END as is_currently_live
+            FROM hosts h
+            LEFT JOIN active_live_announcements a ON h.tiktok_username = a.tiktok_username
+            ORDER BY h.host_id ASC
+        """).fetchall()
+
+        sessions = cur.execute("""
+            SELECT session_id, tiktok_username, start_time, end_time, duration_seconds, total_coins, scheduled_host 
+            FROM live_sessions 
+            ORDER BY start_time DESC
+        """).fetchall()
+
+        conn.close()
+    except Exception as e:
+        return f"<h3>Database Error: {e}</h3>", 500
+
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="id">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Monitor Live Realtime</title>
+        <style>{BASE_CSS}</style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>📹 Monitor Live Realtime</h1>
+        </div>
+        {NAV_HTML}
+
+        <!-- Target Host -->
+        <div class="card">
+            <h2>🎙️ Akun Target TikTok</h2>
             <form action="/admin/add-host" method="POST" class="form-grid">
                 <input type="text" name="tiktok_username" placeholder="Username TikTok (@...)" required>
-                <button type="submit">+ Tambah Target</button>
+                <button type="submit">+ Tambah Target Host</button>
             </form>
             <br>
             <table>
                 <tr><th>ID</th><th>Username TikTok</th><th>Nama Channel</th><th>Status Realtime</th><th>Aksi</th></tr>
                 {% for h in hosts %}
                 <tr>
-                    <td>{{ h[0] }}</td>
-                    <td>@{{ h[1] }}</td>
-                    <td>@{{ h[1] }}</td>
+                    <td>{h[0]}</td>
+                    <td>@{h[1]}</td>
+                    <td>@{h[1]}</td>
                     <td>
                         {% if h[3] == 1 %}
                         <span class="badge badge-active">🔴 Sedang Live</span>
@@ -276,8 +297,8 @@ def view_data():
                         {% endif %}
                     </td>
                     <td>
-                        <a href="/admin/toggle-host/{{ h[0] }}" class="btn-action btn-toggle">Ubah Status Active</a>
-                        <a href="/admin/delete-host/{{ h[0] }}" class="btn-action btn-del" onclick="return confirm('Hapus target ini?')">Hapus</a>
+                        <a href="/admin/toggle-host/{h[0]}" class="btn-action btn-toggle">Ubah Status Active</a>
+                        <a href="/admin/delete-host/{h[0]}" class="btn-action btn-del" onclick="return confirm('Hapus target ini?')">Hapus</a>
                     </td>
                 </tr>
                 {% else %}
@@ -286,17 +307,42 @@ def view_data():
             </table>
         </div>
 
-        <!-- Danger Zone -->
-        <div class="card" style="border-color: #ef4444;">
-            <h2 style="color: #ef4444;">⚠️ Danger Zone</h2>
-            <form action="/admin/reset-db" method="POST" onsubmit="return confirm('HAPUS SELURUH DATA GIFT DAN SESI LIVE?')">
-                <button type="submit" class="btn-danger">🔥 Reset Data Gift & Sesi Live</button>
-            </form>
+        <!-- Sesi Live -->
+        <div class="card">
+            <h2>📹 Riwayat Sesi Live</h2>
+            <table>
+                <tr>
+                    <th>Username (@)</th>
+                    <th>Mulai</th>
+                    <th>Selesai</th>
+                    <th>Durasi</th>
+                    <th>Koin</th>
+                    <th>Host Terjadwal</th>
+                </tr>
+                {% for s in sessions %}
+                <tr>
+                    <td>@{s[1]}</td>
+                    <td>{s[2]}</td>
+                    <td>{s[3] or '🔴 Sedang Live'}</td>
+                    <td>
+                        {% if s[4] > 0 %}
+                        {s[4] // 3600}j {(s[4] % 3600) // 60}m {s[4] % 60}d
+                        {% else %}
+                        -
+                        {% endif %}
+                    </td>
+                    <td><span class="badge">{s[5]} c</span></td>
+                    <td><strong>{s[6] or '-'}</strong></td>
+                </tr>
+                {% else %}
+                <tr><td colspan="6">Belum ada histori sesi live.</td></tr>
+                {% endfor %}
+            </table>
         </div>
     </body>
     </html>
     """
-    return render_template_string(html, viewers=viewers, hosts=hosts, schedules=schedules, sessions=sessions)
+    return render_template_string(html, hosts=hosts, sessions=sessions)
 
 # --- Action Handlers ---
 
@@ -308,7 +354,7 @@ def add_host():
         conn.execute("INSERT OR REPLACE INTO hosts (tiktok_username, display_name, is_active) VALUES (?, ?, 1)", (username, username))
         conn.commit()
         conn.close()
-    return redirect('/admin/data')
+    return redirect('/admin/monitor')
 
 @app.route('/admin/toggle-host/<int:host_id>')
 def toggle_host(host_id):
@@ -316,7 +362,7 @@ def toggle_host(host_id):
     conn.execute("UPDATE hosts SET is_active = CASE WHEN is_active = 1 THEN 0 ELSE 1 END WHERE host_id = ?", (host_id,))
     conn.commit()
     conn.close()
-    return redirect('/admin/data')
+    return redirect('/admin/monitor')
 
 @app.route('/admin/delete-host/<int:host_id>')
 def delete_host(host_id):
@@ -324,7 +370,7 @@ def delete_host(host_id):
     conn.execute("DELETE FROM hosts WHERE host_id = ?", (host_id,))
     conn.commit()
     conn.close()
-    return redirect('/admin/data')
+    return redirect('/admin/monitor')
 
 @app.route('/admin/edit-coin', methods=['POST'])
 def edit_coin():
@@ -335,7 +381,7 @@ def edit_coin():
         conn.execute("UPDATE tiktok_gifts SET total_coins = ? WHERE tiktok_user = ?", (new_coins, username))
         conn.commit()
         conn.close()
-    return redirect('/admin/data')
+    return redirect('/admin/viewers')
 
 @app.route('/admin/add-schedule', methods=['POST'])
 def add_schedule():
@@ -346,7 +392,7 @@ def add_schedule():
         start_h = int(request.form.get("start_hour", 0))
         end_h = int(request.form.get("end_hour", 0))
     except ValueError:
-        return redirect('/admin/data')
+        return redirect('/admin/schedule')
 
     if username and host_name:
         conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
@@ -356,7 +402,7 @@ def add_schedule():
         """, (username, acc_name, host_name, start_h, end_h))
         conn.commit()
         conn.close()
-    return redirect('/admin/data')
+    return redirect('/admin/schedule')
 
 @app.route('/admin/reset-db', methods=['POST'])
 def reset_db():
