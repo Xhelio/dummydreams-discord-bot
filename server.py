@@ -119,7 +119,6 @@ def view_data():
     
     return render_template_string(html)
 
-# 2. Halaman Jadwal Shift Host (Default, Sementara, Offline)
 @app.route('/admin/schedule', methods=['GET'])
 def view_schedule():
     clean_expired_schedules_and_offlines()
@@ -129,7 +128,6 @@ def view_schedule():
         conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
         cur = conn.cursor()
 
-        # Data Default Schedules
         schedules_raw = cur.execute("""
             SELECT schedule_id, tiktok_username, account_name, host_name, start_hour, end_hour 
             FROM host_schedules 
@@ -148,14 +146,12 @@ def view_schedule():
                 "shift_label": get_shift_name(s[4], s[5])
             })
 
-        # Data Temp Schedules
         temp_schedules = cur.execute("""
             SELECT temp_id, schedule_date, tiktok_username, account_name, host_name, shift_num 
             FROM temp_schedules 
             ORDER BY schedule_date ASC, shift_num ASC
         """).fetchall()
 
-        # Data Host Offlines
         offlines = cur.execute("""
             SELECT offline_id, host_name, offline_type, offline_date, offline_day, note 
             FROM host_offlines 
@@ -181,7 +177,6 @@ def view_schedule():
         </div>
         NAV_HTML_PLACEHOLDER
 
-        <!-- Segmen 1: Jadwal Shift Default -->
         <div class="card">
             <h2>📌 Jadwal Shift Default (Statis)</h2>
             <form action="/admin/add-schedule" method="POST" class="form-grid">
@@ -240,7 +235,6 @@ def view_schedule():
             </table>
         </div>
 
-        <!-- Segmen 2: Jadwal Sementara -->
         <div class="card">
             <h2>⏳ Jadwal Sementara (Penimpa Durasi Shift)</h2>
             <form action="/admin/add-temp-schedule" method="POST" class="form-grid">
@@ -286,7 +280,6 @@ def view_schedule():
             </table>
         </div>
 
-        <!-- Segmen 3: Offline Host -->
         <div class="card">
             <h2>🚫 Status Offline Host</h2>
             <form action="/admin/add-offline" method="POST" class="form-grid">
@@ -357,8 +350,6 @@ def view_schedule():
     """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
     
     return render_template_string(html, schedules=schedules, temp_schedules=temp_schedules, offlines=offlines, host_vars=host_vars)
-
-# --- Action Handlers untuk Shift & Offline ---
 
 @app.route('/admin/add-schedule', methods=['POST'])
 def add_schedule():
@@ -459,7 +450,6 @@ def delete_offline(off_id):
     conn.close()
     return redirect('/admin/schedule')
 
-# 3. Halaman Viewer & Edit Koin
 @app.route('/admin/viewers', methods=['GET'])
 def view_viewers():
     try:
@@ -536,7 +526,6 @@ def view_viewers():
     
     return render_template_string(html, viewers=viewers)
 
-# 4. Halaman Monitoring Sesi Live & Target Host
 @app.route('/admin/monitor', methods=['GET'])
 def view_monitor():
     try:
@@ -606,4 +595,192 @@ def view_monitor():
                     <td>{{ h[2] or h[1] }}</td>
                     <td>
                         {% if h[4] == 1 %}
-                        <a href="https://www.tiktok.com/@{{ h[1] }}/live" target="_blank" class="badge badge-active" title="Klik untuk nonton Live">
+                        <a href="https://www.tiktok.com/@{{ h[1] }}/live" target="_blank" class="badge badge-active" title="Klik untuk nonton Live">🔴 Sedang Live ↗</a>
+                        {% else %}
+                        <span class="badge badge-inactive">Offline</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <a href="/admin/toggle-host/{{ h[0] }}" class="btn-action btn-toggle">Ubah Status Active</a>
+                        <a href="/admin/delete-host/{{ h[0] }}" class="btn-action btn-del" onclick="return confirm('Hapus target ini?')">Hapus</a>
+                    </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="5">Belum ada target terdaftar.</td></tr>
+                {% endfor %}
+            </table>
+        </div>
+
+        <div class="card">
+            <h2>📹 Riwayat Sesi Live</h2>
+            <table>
+                <tr>
+                    <th>Username (@)</th>
+                    <th>Mulai</th>
+                    <th>Selesai</th>
+                    <th>Durasi</th>
+                    <th>Koin</th>
+                    <th>Host Terjadwal</th>
+                </tr>
+                {% for s in sessions %}
+                <tr>
+                    <td>@{{ s[1] }}</td>
+                    <td>{{ s[2] }}</td>
+                    <td>
+                        {% if s[3] %}
+                            {{ s[3] }}
+                        {% elif s[7] == 1 %}
+                            <span class="badge badge-active">🔴 Sedang Live</span>
+                        {% else %}
+                            <span style="color: #94a3b8; font-style: italic;">Tidak ada data</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if s[4] > 0 %}
+                            {{ s[4] // 3600 }}j {{ (s[4] % 3600) // 60 }}m {{ s[4] % 60 }}d
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                    <td><span class="badge">{{ s[5] }} c</span></td>
+                    <td><strong>{{ s[6] or '-' }}</strong></td>
+                </tr>
+                {% else %}
+                <tr><td colspan="6">Belum ada histori sesi live.</td></tr>
+                {% endfor %}
+            </table>
+        </div>
+        AUTO_REFRESH_JS_PLACEHOLDER
+    </body>
+    </html>
+    """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
+    
+    return render_template_string(html, hosts=hosts, sessions=sessions)
+
+@app.route('/admin/add-host', methods=['POST'])
+def add_host():
+    username = request.form.get("tiktok_username", "").strip().lower().lstrip("@")
+    display_name = request.form.get("display_name", username).strip()
+    if username:
+        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+        conn.execute("INSERT OR REPLACE INTO hosts (tiktok_username, display_name, is_active) VALUES (?, ?, 1)", (username, display_name))
+        conn.commit()
+        conn.close()
+    return redirect('/admin/monitor')
+
+@app.route('/admin/toggle-host/<int:host_id>')
+def toggle_host(host_id):
+    conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+    conn.execute("UPDATE hosts SET is_active = CASE WHEN is_active = 1 THEN 0 ELSE 1 END WHERE host_id = ?", (host_id,))
+    conn.commit()
+    conn.close()
+    return redirect('/admin/monitor')
+
+@app.route('/admin/delete-host/<int:host_id>')
+def delete_host(host_id):
+    conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+    conn.execute("DELETE FROM hosts WHERE host_id = ?", (host_id,))
+    conn.commit()
+    conn.close()
+    return redirect('/admin/monitor')
+
+@app.route('/admin/edit-coin', methods=['POST'])
+def edit_coin():
+    username = request.form.get("tiktok_user", "").strip().lower().lstrip("@")
+    new_coins = int(request.form.get("new_coins", 0))
+    if username:
+        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+        conn.execute("UPDATE tiktok_gifts SET total_coins = ? WHERE tiktok_user = ?", (new_coins, username))
+        conn.commit()
+        conn.close()
+    return redirect('/admin/viewers')
+
+@app.route('/admin/reset-db', methods=['POST'])
+def reset_db():
+    conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+    conn.execute("DELETE FROM gift_logs")
+    conn.execute("DELETE FROM live_sessions")
+    conn.execute("DELETE FROM tiktok_gifts")
+    conn.execute("DELETE FROM daily_tiktok_gifts")
+    conn.execute("DELETE FROM active_live_announcements")
+    conn.execute("DELETE FROM temp_schedules")
+    conn.execute("DELETE FROM host_offlines")
+    conn.commit()
+    conn.close()
+    return redirect('/admin/data')
+
+@app.route('/api/config', methods=['GET'])
+def get_bot_config():
+    secret_key = request.headers.get("X-API-KEY")
+    expected_key = os.environ.get("API_SECRET_KEY")
+
+    if expected_key and secret_key != expected_key:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+
+    target_username = request.args.get("username", "").lower()
+
+    try:
+        with open("config/config.json", "r") as f:
+            config_data = json.load(f)
+
+        accounts = config_data.get("accounts", [])
+
+        if target_username:
+            matched_acc = next((acc for acc in accounts if acc["tiktok_username"].lower() == target_username), None)
+            if matched_acc:
+                return jsonify({
+                    "account_name": matched_acc["account_name"],
+                    "tiktok_username": matched_acc["tiktok_username"],
+                    "default_name": config_data.get("default_name", "Host"),
+                    "summary_channel_id": config_data.get("summary_channel_id", 0),
+                    "overwrite_summary": config_data.get("overwrite_summary", True)
+                }), 200
+            return jsonify({"status": "error", "message": "Account not found"}), 404
+
+        return jsonify(config_data), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/heartbeat', methods=['POST'])
+def handle_heartbeat():
+    secret_key = request.headers.get("X-API-KEY")
+    expected_key = os.environ.get("API_SECRET_KEY")
+
+    if expected_key and secret_key != expected_key:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+
+    data = request.get_json() or {}
+    username = data.get("username", "unknown")
+    print(f"[API] Received heartbeat from worker for @{username}")
+    return jsonify({"status": "ok"}), 200
+
+@app.route('/api/announcement', methods=['POST'])
+def trigger_announcement():
+    data = request.get_json() or {}
+    secret_key = request.headers.get("X-API-KEY")
+    expected_key = os.environ.get("API_SECRET_KEY")
+
+    if expected_key and secret_key != expected_key:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+
+    username = data.get("username")
+    is_live = data.get("is_live")
+
+    if not username or is_live is None:
+        return jsonify({"status": "error", "message": "Missing username or is_live status"}), 400
+
+    if async_announcement_handler:
+        async_announcement_handler(username, is_live)
+        return jsonify({"status": "success", "message": f"Announcement triggered for @{username}"}), 200
+
+    return jsonify({"status": "error", "message": "Bot handler not ready"}), 500
+
+def run():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port, threaded=True)
+
+def keep_alive(handler_callback=None):
+    global async_announcement_handler
+    async_announcement_handler = handler_callback
+    t = Thread(target=run, daemon=True)
+    t.start()
