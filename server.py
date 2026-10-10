@@ -1,4 +1,4 @@
-from flask import Flask, render_template_string, request, jsonify, redirect, url_for
+from flask import Flask, render_template_string, request, jsonify, redirect
 from threading import Thread
 import os
 import json
@@ -84,7 +84,7 @@ def view_data():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Turso DB Admin & Analytics Panel</title>
+        <title>Turso DB Admin Panel</title>
         <style>
             * { box-sizing: border-box; margin: 0; padding: 0; }
             body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 30px; background: #0f172a; color: #f8fafc; }
@@ -98,12 +98,17 @@ def view_data():
             th { background-color: #0284c7; color: white; text-transform: uppercase; font-size: 0.75rem; }
             tr:nth-child(even) { background-color: #162032; }
             .badge { background: #0369a1; color: #e0f2fe; padding: 3px 8px; border-radius: 4px; font-weight: 600; }
-            .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-top: 10px; }
+            .badge-active { background: #15803d; color: #dcfce7; }
+            .badge-inactive { background: #b91c1c; color: #fee2e2; }
+            .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-top: 10px; }
             input, select, button { padding: 8px 12px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: white; font-size: 0.875rem; }
             button { background: #0284c7; cursor: pointer; font-weight: 600; border: none; }
             button:hover { background: #0369a1; }
             .btn-danger { background: #ef4444; }
             .btn-danger:hover { background: #dc2626; }
+            .btn-action { padding: 4px 8px; font-size: 0.75rem; text-decoration: none; border-radius: 4px; display: inline-block; }
+            .btn-toggle { background: #ca8a04; color: white; }
+            .btn-del { background: #dc2626; color: white; }
         </style>
     </head>
     <body>
@@ -112,28 +117,43 @@ def view_data():
             <a href="/" class="btn-back">← Kembali</a>
         </div>
 
-        <!-- 1. Host Manager -->
+        <!-- CRUD Host Manager -->
         <div class="card">
-            <h2>🎙️ Kelola Host / Streamer</h2>
+            <h2>🎙️ Kelola Host / Target TikTok (CRUD)</h2>
             <form action="/admin/add-host" method="POST" class="form-grid">
                 <input type="text" name="tiktok_username" placeholder="Username TikTok (@...)" required>
                 <input type="text" name="display_name" placeholder="Nama Host" required>
-                <button type="submit">+ Tambah Host</button>
+                <button type="submit">+ Tambah Host Baru</button>
             </form>
             <br>
             <table>
-                <tr><th>ID</th><th>Username</th><th>Display Name</th><th>Status</th></tr>
+                <tr><th>ID</th><th>Username TikTok</th><th>Display Name</th><th>Status</th><th>Aksi</th></tr>
                 {% for h in hosts %}
-                <tr><td>{{ h[0] }}</td><td>@{{ h[1] }}</td><td>{{ h[2] }}</td><td>{{ 'Aktif' if h[3] == 1 else 'Nonaktif' }}</td></tr>
+                <tr>
+                    <td>{{ h[0] }}</td>
+                    <td>@{{ h[1] }}</td>
+                    <td>{{ h[2] }}</td>
+                    <td>
+                        {% if h[3] == 1 %}
+                        <span class="badge badge-active">Aktif</span>
+                        {% else %}
+                        <span class="badge badge-inactive">Nonaktif</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <a href="/admin/toggle-host/{{ h[0] }}" class="btn-action btn-toggle">Toggle Status</a>
+                        <a href="/admin/delete-host/{{ h[0] }}" class="btn-action btn-del" onclick="return confirm('Hapus host ini?')">Hapus</a>
+                    </td>
+                </tr>
                 {% else %}
-                <tr><td colspan="4">Belum ada host terdaftar.</td></tr>
+                <tr><td colspan="5">Belum ada host terdaftar di database.</td></tr>
                 {% endfor %}
             </table>
         </div>
 
-        <!-- 2. Edit Koin Viewer Manual -->
+        <!-- Edit Koin Viewer -->
         <div class="card">
-            <h2>✏️ Edit Koin Viewer</h2>
+            <h2>✏️ Edit Koin Viewer Manual</h2>
             <form action="/admin/edit-coin" method="POST" class="form-grid">
                 <input type="text" name="tiktok_user" placeholder="Username TikTok Viewer" required>
                 <input type="number" name="new_coins" placeholder="Jumlah Koin Baru" required>
@@ -141,7 +161,7 @@ def view_data():
             </form>
         </div>
 
-        <!-- 3. Host Shift Manager -->
+        <!-- Shift Manager -->
         <div class="card">
             <h2>📅 Jadwal Shift Host</h2>
             <form action="/admin/add-schedule" method="POST" class="form-grid">
@@ -167,7 +187,7 @@ def view_data():
             </table>
         </div>
 
-        <!-- 4. Stat Sesi Live Terbaru -->
+        <!-- Stat Sesi Live -->
         <div class="card">
             <h2>📹 Statistik Sesi Live Terbaru</h2>
             <table>
@@ -180,23 +200,10 @@ def view_data():
             </table>
         </div>
 
-        <!-- 5. Stat Gift Paling Populer -->
-        <div class="card">
-            <h2>🎁 Gift Paling Sering Digunakan</h2>
-            <table>
-                <tr><th>Nama Gift</th><th>Total Terkirim</th><th>Total Koin Generated</th></tr>
-                {% for g in top_gifts %}
-                <tr><td>{{ g[0] }}</td><td>{{ g[1] }}x</td><td><span class="badge">{{ g[2] }} c</span></td></tr>
-                {% else %}
-                <tr><td colspan="3">Belum ada data gift.</td></tr>
-                {% endfor %}
-            </table>
-        </div>
-
-        <!-- 6. Reset Database Control -->
+        <!-- Reset Database -->
         <div class="card" style="border-color: #ef4444;">
-            <h2 style="color: #ef4444;">⚠️ Danger Zone: Reset Database</h2>
-            <form action="/admin/reset-db" method="POST" onsubmit="return confirm('Apakah Anda yakin ingin MENGHAPUS SELURUH DATA GIFT?')">
+            <h2 style="color: #ef4444;">⚠️ Danger Zone</h2>
+            <form action="/admin/reset-db" method="POST" onsubmit="return confirm('HAPUS SELURUH DATA GIFT?')">
                 <button type="submit" class="btn-danger">🔥 Reset Data Gift & Sesi Live</button>
             </form>
         </div>
@@ -205,7 +212,7 @@ def view_data():
     """
     return render_template_string(html, gifts=gifts, hosts=hosts, sessions=sessions, top_gifts=top_gifts, schedules=schedules)
 
-# --- Endpoint Form Action Handler ---
+# --- Endpoint CRUD Host Actions ---
 
 @app.route('/admin/add-host', methods=['POST'])
 def add_host():
@@ -216,6 +223,22 @@ def add_host():
         conn.execute("INSERT OR REPLACE INTO hosts (tiktok_username, display_name, is_active) VALUES (?, ?, 1)", (username, display_name))
         conn.commit()
         conn.close()
+    return redirect('/admin/data')
+
+@app.route('/admin/toggle-host/<int:host_id>')
+def toggle_host(host_id):
+    conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+    conn.execute("UPDATE hosts SET is_active = CASE WHEN is_active = 1 THEN 0 ELSE 1 END WHERE host_id = ?", (host_id,))
+    conn.commit()
+    conn.close()
+    return redirect('/admin/data')
+
+@app.route('/admin/delete-host/<int:host_id>')
+def delete_host(host_id):
+    conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+    conn.execute("DELETE FROM hosts WHERE host_id = ?", (host_id,))
+    conn.commit()
+    conn.close()
     return redirect('/admin/data')
 
 @app.route('/admin/edit-coin', methods=['POST'])
@@ -258,7 +281,7 @@ def reset_db():
     conn.close()
     return redirect('/admin/data')
 
-# --- Existing API Endpoint ---
+# --- Existing API Endpoints ---
 
 @app.route('/api/config', methods=['GET'])
 def get_bot_config():
