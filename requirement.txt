@@ -1,0 +1,4 @@
+discord.py
+TikTokLive
+libsql-experimental
+python-dotenv
