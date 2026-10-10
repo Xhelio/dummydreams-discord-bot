@@ -13,8 +13,7 @@ from db import (
 )
 from utils import get_schedule_info, load_role_config, load_summary_config
 from server import keep_alive
-from observer_clarissa import run_clarissa_observer
-from observer_george import run_george_observer
+from observer import run_all_observers
 
 DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN')
 ANNOUNCEMENT_CHANNEL_ID = int(os.environ.get('ANNOUNCEMENT_CHANNEL_ID', "0"))
@@ -353,14 +352,9 @@ async def main():
     init_db()
     keep_alive(handle_api_announcement)
 
-    # Jalankan observer Clarissa & George secara bersamaan
-    asyncio.create_task(run_clarissa_observer(process_live_announcement, auto_assign_role))
-    asyncio.create_task(run_george_observer(process_live_announcement, auto_assign_role))
+    # Jalankan observer secara dinamis dengan membaca daftar dari Database
+    asyncio.create_task(run_all_observers(process_live_announcement, auto_assign_role))
 
     await bot.start(DISCORD_TOKEN)
 
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n[Bot] Stopped successfully.")
+if
