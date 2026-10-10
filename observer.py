@@ -19,72 +19,86 @@ async def _trigger_announcement(announcement_callback, username: str, is_live: b
     else:
         announcement_callback(username, is_live)
 
+def clear_active_live_status(username: str):
+    """Menghapus status live akun dari database."""
+    conn = get_db_connection()
+    try:
+        conn.execute("DELETE FROM active_live_announcements WHERE tiktok_username = ?", (username,))
+        conn.commit()
+    except Exception as e:
+        print(f"[{username}] Failed to clear active live status: {e}")
+    finally:
+        conn.close()
+
 async def start_single_observer(tiktok_username: str, announcement_callback, role_callback):
     username_clean = tiktok_username.lower().lstrip("@")
     current_session_id = None
-    client = TikTokLiveClient(unique_id=username_clean)
-
-    @client.on(ConnectEvent)
-    async def on_connect(event: ConnectEvent):
-        nonlocal current_session_id
-        print(f"[{username_clean}] Connected to live stream.")
-        current_session_id = start_live_session(username_clean)
-        await _trigger_announcement(announcement_callback, username_clean, True)
-
-    @client.on(DisconnectEvent)
-    async def on_disconnect(event: DisconnectEvent):
-        nonlocal current_session_id
-        print(f"[{username_clean}] Disconnected from live stream.")
-        if current_session_id:
-            end_live_session(current_session_id)
-            current_session_id = None
-        
-        # Hapus record status live dari database saat disconnect
-        conn = get_db_connection()
-        try:
-            conn.execute("DELETE FROM active_live_announcements WHERE tiktok_username = ?", (username_clean,))
-            conn.commit()
-        except Exception as e:
-            print(f"[{username_clean}] Failed to clear active live status: {e}")
-        finally:
-            conn.close()
-
-        await _trigger_announcement(announcement_callback, username_clean, False)
-
-    @client.on(GiftEvent)
-    async def on_gift(event: GiftEvent):
-        if event.gift.streakable and event.gift.streaking:
-            return
-
-        user = event.user.unique_id
-        display_name = event.user.nickname
-        coins = event.gift.diamond_count * event.repeat_count
-        gift_name = event.gift.name
-
-        if coins > 0:
-            total_coins = save_gift_data(user, display_name, coins)
-            save_daily_gift_data(user, display_name, coins)
-            log_gift_transaction(
-                session_id=current_session_id,
-                host_user=username_clean,
-                viewer_user=user,
-                viewer_display=display_name,
-                gift_name=gift_name,
-                gift_count=event.repeat_count,
-                coins=coins
-            )
-            if role_callback:
-                if asyncio.iscoroutinefunction(role_callback):
-                    await role_callback(user, total_coins)
-                else:
-                    role_callback(user, total_coins)
 
     while True:
+        client = TikTokLiveClient(unique_id=username_clean)
+
+        @client.on(ConnectEvent)
+        async def on_connect(event: ConnectEvent):
+            nonlocal current_session_id
+            print(f"[{username_clean}] Connected to live stream.")
+            current_session_id = start_live_session(username_clean)
+            await _trigger_announcement(announcement_callback, username_clean, True)
+
+        @client.on(DisconnectEvent)
+        async def on_disconnect(event: DisconnectEvent):
+            nonlocal current_session_id
+            print(f"[{username_clean}] Disconnected from live stream.")
+            if current_session_id:
+                end_live_session(current_session_id)
+                current_session_id = None
+            
+            clear_active_live_status(username_clean)
+            await _trigger_announcement(announcement_callback, username_clean, False)
+
+        @client.on(GiftEvent)
+        async def on_gift(event: GiftEvent):
+            if event.gift.streakable and event.gift.streaking:
+                return
+
+            user = event.user.unique_id
+            display_name = event.user.nickname
+            coins = event.gift.diamond_count * event.repeat_count
+            gift_name = event.gift.name
+
+            if coins > 0:
+                total_coins = save_gift_data(user, display_name, coins)
+                save_daily_gift_data(user, display_name, coins)
+                log_gift_transaction(
+                    session_id=current_session_id,
+                    host_user=username_clean,
+                    viewer_user=user,
+                    viewer_display=display_name,
+                    gift_name=gift_name,
+                    gift_count=event.repeat_count,
+                    coins=coins
+                )
+                if role_callback:
+                    if asyncio.iscoroutinefunction(role_callback):
+                        await role_callback(user, total_coins)
+                    else:
+                        role_callback(user, total_coins)
+
         try:
+            # Jalankan client koneksi TikTok Live
             await client.start()
         except Exception as e:
-            print(f"[{username_clean}] Observer error: {e}. Retrying in 15 seconds...")
-            await asyncio.sleep(15)
+            # Jika stream offline atau error saat berusaha terhubung
+            print(f"[{username_clean}] Account is offline / connection closed ({e}). Re-checking in 30s...")
+        finally:
+            # Pastikan jika client terputus/offline, status DB dibersihkan & sesi di-close
+            if current_session_id:
+                end_live_session(current_session_id)
+                current_session_id = None
+            clear_active_live_status(username_clean)
+            await _trigger_announcement(announcement_callback, username_clean, False)
+
+        # Interval jeda sebelum cek rutin ulang status live berikutnya
+        await asyncio.sleep(30)
 
 async def run_all_observers(announcement_callback, role_callback):
     """Membaca daftar host aktif dari DB dan menjalankan observer secara paralel."""
