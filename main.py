@@ -14,7 +14,7 @@ from db import (
 from utils import get_schedule_info, load_role_config, load_summary_config
 from server import keep_alive
 from observer_clarissa import run_clarissa_observer
-from observer_george import run_george_observer  # Import observer baru
+from observer_george import run_george_observer
 
 DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN')
 ANNOUNCEMENT_CHANNEL_ID = int(os.environ.get('ANNOUNCEMENT_CHANNEL_ID', "0"))
@@ -193,7 +193,7 @@ async def process_live_announcement(username: str, is_live: bool):
         finally:
             conn.close()
 
-# Discord Commands
+# --- Discord Commands ---
 @bot.event
 async def on_ready():
     print(f"[Discord] Bot logged in as {bot.user}")
@@ -205,7 +205,7 @@ async def claim(ctx, tiktok_user: str):
     try:
         res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (ctx.author.id,))
         if res.fetchone():
-            await ctx.send(f"❌ You have already claimed a TikTok account.")
+            await ctx.send("❌ You have already claimed a TikTok account.")
             return
 
         res = conn.execute("SELECT discord_id FROM user_mappings WHERE tiktok_user = ?", (tiktok_user_clean,))
@@ -241,6 +241,37 @@ async def mycoins(ctx):
         total_coins = gift_data[1] if gift_data else 0
 
         await ctx.send(f"📊 **Coin Balance for {ctx.author.display_name}:** @{tiktok_user} | **{total_coins} c**")
+    finally:
+        conn.close()
+
+@bot.command(name="myhistory")
+async def myhistory(ctx):
+    conn = get_db_connection()
+    try:
+        res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (ctx.author.id,))
+        mapping = res.fetchone()
+        if not mapping:
+            await ctx.send(f"❌ {ctx.author.mention}, kamu belum link akun! Gunakan `!claim @username`.")
+            return
+
+        tiktok_user = mapping[0]
+        res = conn.execute("""
+            SELECT tiktok_username, gift_name, gift_count, coins, created_at 
+            FROM gift_logs 
+            WHERE viewer_username = ? 
+            ORDER BY created_at DESC LIMIT 5
+        """, (tiktok_user,))
+        rows = res.fetchall()
+
+        if not rows:
+            await ctx.send("📜 Belum ada riwayat gift yang tercatat.")
+            return
+
+        msg = f"📜 **Riwayat Gift Terbaru untuk @{tiktok_user}:**\n"
+        for host, g_name, g_count, coins, dt in rows:
+            msg += f"• `{dt}` - **{g_count}x {g_name}** ({coins}c) ke host **@{host}**\n"
+
+        await ctx.send(msg)
     finally:
         conn.close()
 
@@ -284,6 +315,39 @@ async def dailyrank(ctx):
         table += f"{idx:<4} | {name_str:<24} | {coins:<10} c\n"
     table += "```"
     await ctx.send(f"🏆 **TIKTOK LIVE DAILY RANKING (HARI INI)**\n{table}")
+
+@bot.command(name="livesessions", aliases=["sessions"])
+async def livesessions(ctx, host_username: str = None):
+    conn = get_db_connection()
+    try:
+        if host_username:
+            u_clean = host_username.lstrip("@").lower()
+            res = conn.execute("""
+                SELECT session_id, tiktok_username, start_time, duration_seconds, total_coins 
+                FROM live_sessions WHERE tiktok_username = ? ORDER BY start_time DESC LIMIT 5
+            """, (u_clean,))
+        else:
+            res = conn.execute("""
+                SELECT session_id, tiktok_username, start_time, duration_seconds, total_coins 
+                FROM live_sessions ORDER BY start_time DESC LIMIT 5
+            """)
+        
+        rows = res.fetchall()
+        if not rows:
+            await ctx.send("❌ Belum ada riwayat sesi live yang tercatat.")
+            return
+
+        msg = "📹 **Riwayat Sesi Live Terbaru:**\n"
+        for s_id, host, s_time, dur_sec, coins in rows:
+            hrs = dur_sec // 3600
+            mins = (dur_sec % 3600) // 60
+            secs = dur_sec % 60
+            dur_str = f"{hrs:02d}:{mins:02d}:{secs:02d}" if dur_sec > 0 else "Masih Live / Disconnect"
+            msg += f"• Sesi `#{s_id}` (@{host}) | Mulai: `{s_time}` | Durasi: `{dur_str}` | Total: **{coins} c**\n"
+
+        await ctx.send(msg)
+    finally:
+        conn.close()
 
 async def main():
     init_db()
