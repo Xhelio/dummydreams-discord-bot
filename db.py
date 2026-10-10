@@ -30,6 +30,19 @@ def get_shift_name(start_hour: int, end_hour: int) -> str:
         return "Shift 4 (19:00 - 01:00)"
     return f"Custom ({start_hour:02d}:00 - {end_hour:02d}:00)"
 
+def get_all_host_names() -> list:
+    """Mendapatkan daftar unik nama host terdaftar dari jadwal default."""
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        rows = cur.execute("SELECT DISTINCT host_name FROM host_schedules ORDER BY host_name ASC").fetchall()
+        hosts = [r[0] for r in rows if r[0]]
+        if not hosts:
+            hosts = ["SOLEN", "ZIZE", "YOSA", "IELYA", "YUCA", "SINTA", "COLE", "LUNA"]
+        return hosts
+    finally:
+        conn.close()
+
 def init_db():
     conn = get_db_connection()
     try:
@@ -96,7 +109,6 @@ def init_db():
             )
         """)
 
-        # 1. Tabel Jadwal Shift Default
         conn.execute("""
             CREATE TABLE IF NOT EXISTS host_schedules (
                 schedule_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,7 +121,6 @@ def init_db():
             )
         """)
 
-        # 2. Tabel Jadwal Sementara
         conn.execute("""
             CREATE TABLE IF NOT EXISTS temp_schedules (
                 temp_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -122,27 +133,29 @@ def init_db():
             )
         """)
 
-        # 3. Tabel Offline Host
         conn.execute("""
             CREATE TABLE IF NOT EXISTS host_offlines (
                 offline_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 host_name TEXT NOT NULL,
-                offline_type TEXT NOT NULL, -- 'temporary' atau 'routine'
-                offline_date TEXT,          -- YYYY-MM-DD jika temporary
-                offline_day TEXT,           -- 'Monday', 'Tuesday', dll jika routine
+                offline_type TEXT NOT NULL,
+                offline_date TEXT,
+                offline_day TEXT,
                 note TEXT
             )
         """)
 
+        try:
+            conn.execute("ALTER TABLE live_sessions ADD COLUMN scheduled_host TEXT")
+        except Exception:
+            pass
+
         cur = conn.cursor()
         
-        # Inisialisasi Akun TikTok Target
         cur.execute("SELECT COUNT(*) FROM hosts")
         if cur.fetchone()[0] == 0:
             cur.execute("INSERT INTO hosts (tiktok_username, display_name) VALUES ('clarissadreams', 'Jeremy Jeans')")
             cur.execute("INSERT INTO hosts (tiktok_username, display_name) VALUES ('georgevilora', 'George Vilora')")
 
-        # Inisialisasi Otomatis Jadwal Shift
         cur.execute("SELECT COUNT(*) FROM host_schedules")
         if cur.fetchone()[0] == 0:
             schedule_path = os.path.join("config", "schedule.json")
@@ -187,7 +200,6 @@ def init_db():
         conn.close()
 
 def clean_expired_schedules_and_offlines():
-    """Menghapus otomatis jadwal sementara & offline sementara yang sudah kadaluwarsa."""
     wib = pytz.timezone('Asia/Jakarta')
     now_dt = datetime.now(wib)
     today_str = now_dt.strftime('%Y-%m-%d')
@@ -196,30 +208,24 @@ def clean_expired_schedules_and_offlines():
     conn = get_db_connection()
     try:
         cur = conn.cursor()
-        
-        # 1. Hapus jadwal sementara jika tanggal < hari ini
         cur.execute("DELETE FROM temp_schedules WHERE schedule_date < ?", (today_str,))
         
-        # 2. Hapus jadwal sementara hari ini jika shift sudah berlalu
         temp_today = cur.execute("SELECT temp_id, shift_num FROM temp_schedules WHERE schedule_date = ?", (today_str,)).fetchall()
         for temp_id, shift_num in temp_today:
             start_h, end_h = get_shift_hours(shift_num)
             if start_h < end_h:
                 if current_hour >= end_h:
                     cur.execute("DELETE FROM temp_schedules WHERE temp_id = ?", (temp_id,))
-            else: # Shift malam (misal 19-01)
+            else:
                 if 1 <= current_hour < 19:
                     cur.execute("DELETE FROM temp_schedules WHERE temp_id = ?", (temp_id,))
 
-        # 3. Hapus status offline sementara jika tanggal < hari ini
         cur.execute("DELETE FROM host_offlines WHERE offline_type = 'temporary' AND offline_date < ?", (today_str,))
-        
         conn.commit()
     finally:
         conn.close()
 
 def get_scheduled_host_name(tiktok_username: str, dt_obj: datetime = None) -> str:
-    """Mendapatkan nama host bertugas dengan mengecek: Offline -> Temp Schedule -> Default Schedule."""
     clean_expired_schedules_and_offlines()
 
     if not dt_obj:
@@ -231,7 +237,6 @@ def get_scheduled_host_name(tiktok_username: str, dt_obj: datetime = None) -> st
     day_name = dt_obj.strftime('%A')
     user_clean = tiktok_username.lower()
 
-    # Tentukan Shift Ke berapa saat ini
     current_shift = 1
     if 1 <= current_hour < 7: current_shift = 1
     elif 7 <= current_hour < 13: current_shift = 2
@@ -242,7 +247,6 @@ def get_scheduled_host_name(tiktok_username: str, dt_obj: datetime = None) -> st
     try:
         cur = conn.cursor()
 
-        # 1. Cek Jadwal Sementara (Temporary Schedule Override)
         temp_row = cur.execute("""
             SELECT host_name FROM temp_schedules 
             WHERE tiktok_username = ? AND schedule_date = ? AND shift_num = ?
@@ -250,7 +254,6 @@ def get_scheduled_host_name(tiktok_username: str, dt_obj: datetime = None) -> st
 
         candidate_host = temp_row[0] if temp_row else None
 
-        # 2. Jika tidak ada jadwal sementara, ambil dari Default Schedule
         if not candidate_host:
             default_rows = cur.execute("""
                 SELECT host_name, start_hour, end_hour 
@@ -271,7 +274,6 @@ def get_scheduled_host_name(tiktok_username: str, dt_obj: datetime = None) -> st
         if not candidate_host:
             return "Host"
 
-        # 3. Cek apakah Host Candidate sedang Offline (Temporary / Routine)
         off_row = cur.execute("""
             SELECT note FROM host_offlines 
             WHERE UPPER(host_name) = UPPER(?) AND (
