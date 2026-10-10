@@ -76,9 +76,6 @@ def init_db():
             )
         """)
 
-        # Solusi 2: Drop tabel host_schedules lama agar terbuat ulang dengan skema baru secara sempurna
-        conn.execute("DROP TABLE IF EXISTS host_schedules")
-
         conn.execute("""
             CREATE TABLE IF NOT EXISTS host_schedules (
                 schedule_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -91,11 +88,11 @@ def init_db():
             )
         """)
 
-        # Migrasi Otomatis Kolom Baru pada live_sessions
+        # Migrasi Otomatis Kolom Baru pada live_sessions jika belum ada
         try:
             conn.execute("ALTER TABLE live_sessions ADD COLUMN scheduled_host TEXT")
         except Exception:
-            pass  # Abaikan jika kolom scheduled_host sudah ada
+            pass
 
         cur = conn.cursor()
         
@@ -105,21 +102,47 @@ def init_db():
             cur.execute("INSERT INTO hosts (tiktok_username, display_name) VALUES ('clarissadreams', 'Jeremy Jeans')")
             cur.execute("INSERT INTO hosts (tiktok_username, display_name) VALUES ('georgevilora', 'George Vilora')")
 
-        # Migrasi schedule.json ke Database jika host_schedules masih kosong
+        # Inisialisasi Otomatis Jadwal Shift dari config/schedule.json
         cur.execute("SELECT COUNT(*) FROM host_schedules")
-        if cur.fetchone()[0] == 0 and os.path.exists("schedule.json"):
-            try:
-                with open("schedule.json", "r") as f:
-                    sched_data = json.load(f)
-                for account_key, info in sched_data.items():
-                    acc_name = info.get("account_name", account_key)
-                    for h in info.get("hosts", []):
-                        cur.execute("""
-                            INSERT INTO host_schedules (tiktok_username, account_name, host_name, start_hour, end_hour)
-                            VALUES (?, ?, ?, ?, ?)
-                        """, (account_key.lower(), acc_name, h["name"], h["start_hour"], h["end_hour"]))
-            except Exception as e:
-                print(f"[DB Warning] Gagal migrasi schedule.json: {e}")
+        if cur.fetchone()[0] == 0:
+            schedule_path = os.path.join("config", "schedule.json")
+            if not os.path.exists(schedule_path):
+                schedule_path = "schedule.json"  # Fallback check
+
+            loaded_from_json = False
+            if os.path.exists(schedule_path):
+                try:
+                    with open(schedule_path, "r") as f:
+                        sched_data = json.load(f)
+                    for account_key, info in sched_data.items():
+                        acc_name = info.get("account_name", account_key)
+                        for h in info.get("hosts", []):
+                            cur.execute("""
+                                INSERT OR IGNORE INTO host_schedules (tiktok_username, account_name, host_name, start_hour, end_hour)
+                                VALUES (?, ?, ?, ?, ?)
+                            """, (account_key.lower(), acc_name, h["name"], h["start_hour"], h["end_hour"]))
+                    loaded_from_json = True
+                    print(f"[DB Init] Successfully loaded schedule from {schedule_path}")
+                except Exception as e:
+                    print(f"[DB Warning] Failed to parse {schedule_path}: {e}")
+
+            # Fallback hardcoded data jika file json tidak ditemukan
+            if not loaded_from_json:
+                default_schedules = [
+                    ("clarissadreams", "Jeremy Jeans", "SOLEN", 1, 7),
+                    ("clarissadreams", "Jeremy Jeans", "ZIZE", 7, 13),
+                    ("clarissadreams", "Jeremy Jeans", "YOSA", 13, 19),
+                    ("clarissadreams", "Jeremy Jeans", "IELYA", 19, 1),
+                    ("georgevilora", "George Vilora", "YUCA", 1, 7),
+                    ("georgevilora", "George Vilora", "SINTA", 7, 13),
+                    ("georgevilora", "George Vilora", "COLE", 13, 19),
+                    ("georgevilora", "George Vilora", "LUNA", 19, 1),
+                ]
+                for username, acc_name, host_name, start_h, end_h in default_schedules:
+                    cur.execute("""
+                        INSERT OR IGNORE INTO host_schedules (tiktok_username, account_name, host_name, start_hour, end_hour)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (username, acc_name, host_name, start_h, end_h))
 
         conn.commit()
     finally:
@@ -146,7 +169,6 @@ def get_scheduled_host_name(tiktok_username: str, dt_obj: datetime = None) -> st
                 if start_h <= current_hour < end_h:
                     return host_name
             else:
-                # Menangani shift malam yang melewati tengah malam (misal 19.00 - 01.00)
                 if current_hour >= start_h or current_hour < end_h:
                     return host_name
         return "Host"
