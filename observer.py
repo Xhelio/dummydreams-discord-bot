@@ -10,6 +10,14 @@ from db import (
     get_active_hosts
 )
 
+async def _trigger_announcement(announcement_callback, username: str, is_live: bool):
+    if not announcement_callback:
+        return
+    if asyncio.iscoroutinefunction(announcement_callback):
+        await announcement_callback(username, is_live)
+    else:
+        announcement_callback(username, is_live)
+
 async def start_single_observer(tiktok_username: str, announcement_callback, role_callback):
     username_clean = tiktok_username.lower().lstrip("@")
     current_session_id = None
@@ -20,8 +28,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         nonlocal current_session_id
         print(f"[{username_clean}] Connected to live stream.")
         current_session_id = start_live_session(username_clean)
-        if announcement_callback:
-            announcement_callback(username_clean, True)
+        await _trigger_announcement(announcement_callback, username_clean, True)
 
     @client.on(DisconnectEvent)
     async def on_disconnect(event: DisconnectEvent):
@@ -30,8 +37,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         if current_session_id:
             end_live_session(current_session_id)
             current_session_id = None
-        if announcement_callback:
-            announcement_callback(username_clean, False)
+        await _trigger_announcement(announcement_callback, username_clean, False)
 
     @client.on(GiftEvent)
     async def on_gift(event: GiftEvent):
@@ -56,7 +62,10 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 coins=coins
             )
             if role_callback:
-                await role_callback(user, total_coins)
+                if asyncio.iscoroutinefunction(role_callback):
+                    await role_callback(user, total_coins)
+                else:
+                    role_callback(user, total_coins)
 
     while True:
         try:
