@@ -12,7 +12,6 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     try:
-        # 1. Tabel Lama (Dipertahankan)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS tiktok_gifts (
                 tiktok_user TEXT PRIMARY KEY,
@@ -43,8 +42,6 @@ def init_db():
                 PRIMARY KEY (tiktok_user, date)
             )
         """)
-
-        # 2. Tabel Baru untuk Fitur Tracking & Manajemen
         conn.execute("""
             CREATE TABLE IF NOT EXISTS hosts (
                 host_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,11 +84,27 @@ def init_db():
                 PRIMARY KEY (tiktok_username, shift_date)
             )
         """)
+        
+        # Masukkan data default jika tabel hosts masih kosong
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM hosts")
+        if cur.fetchone()[0] == 0:
+            cur.execute("INSERT INTO hosts (tiktok_username, display_name) VALUES ('calissadreams', 'Clarissa')")
+            cur.execute("INSERT INTO hosts (tiktok_username, display_name) VALUES ('georgevilora', 'George')")
+        
         conn.commit()
     finally:
         conn.close()
 
-# --- Fungsi Tracking Sesi Live & Gift ---
+def get_active_hosts() -> list:
+    """Mengambil daftar username TikTok aktif dari database."""
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        rows = cur.execute("SELECT tiktok_username FROM hosts WHERE is_active = 1").fetchall()
+        return [r[0] for r in rows]
+    finally:
+        conn.close()
 
 def start_live_session(tiktok_username: str) -> int:
     wib = pytz.timezone('Asia/Jakarta')
@@ -112,7 +125,6 @@ def end_live_session(session_id: int):
     wib = pytz.timezone('Asia/Jakarta')
     now = datetime.now(wib)
     now_str = now.strftime('%Y-%m-%d %H:%M:%S')
-    
     conn = get_db_connection()
     try:
         cur = conn.cursor()
@@ -135,23 +147,15 @@ def log_gift_transaction(session_id: int, host_user: str, viewer_user: str, view
     conn = get_db_connection()
     try:
         cur = conn.cursor()
-        # Log transaksi detail
         cur.execute("""
             INSERT INTO gift_logs (session_id, tiktok_username, viewer_username, viewer_display_name, gift_name, gift_count, coins)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (session_id, host_user.lower(), viewer_user.lower(), viewer_display, gift_name, gift_count, coins))
-        
-        # Tambah koin ke sesi live
         if session_id:
-            cur.execute("""
-                UPDATE live_sessions SET total_coins = total_coins + ? WHERE session_id = ?
-            """, (coins, session_id))
-            
+            cur.execute("UPDATE live_sessions SET total_coins = total_coins + ? WHERE session_id = ?", (coins, session_id))
         conn.commit()
     finally:
         conn.close()
-
-# --- Helper Query Agregasi Lama ---
 
 def save_gift_data(username: str, display_name: str, coins: int) -> int:
     conn = get_db_connection()
