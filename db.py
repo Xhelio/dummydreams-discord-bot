@@ -42,6 +42,16 @@ def get_all_host_names() -> list:
     finally:
         conn.close()
 
+def get_active_hosts() -> list:
+    """Mendapatkan daftar username TikTok host yang berstatus aktif di database."""
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        rows = cur.execute("SELECT tiktok_username FROM hosts WHERE is_active = 1").fetchall()
+        return [r[0] for r in rows]
+    finally:
+        conn.close()
+
 def init_db():
     conn = get_db_connection()
     try:
@@ -221,7 +231,7 @@ def clean_expired_schedules_and_offlines():
 
         cur.execute("DELETE FROM host_offlines WHERE offline_type = 'temporary' AND offline_date < ?", (today_str,))
         
-        # Bersihkan otomatis sesi-sesi usang/sampah tanpa koin
+        # Bersihkan otomatis sesi-sesi usang tanpa koin
         cur.execute("DELETE FROM live_sessions WHERE end_time IS NULL AND total_coins = 0 AND datetime(start_time) < datetime('now', '-30 minutes')")
         
         conn.commit()
@@ -293,7 +303,6 @@ def get_scheduled_host_name(tiktok_username: str, dt_obj: datetime = None) -> st
         conn.close()
 
 def start_live_session(tiktok_username: str) -> int:
-    """Menggabungkan sesi live jika masih dalam akun & host shift yang sama."""
     wib = pytz.timezone('Asia/Jakarta')
     now_dt = datetime.now(wib)
     now_str = now_dt.strftime('%Y-%m-%d %H:%M:%S')
@@ -304,7 +313,6 @@ def start_live_session(tiktok_username: str) -> int:
     try:
         cur = conn.cursor()
 
-        # 1. Cek apakah ada sesi aktif yang belum selesai (end_time IS NULL) untuk host yang sama
         active_row = cur.execute("""
             SELECT session_id FROM live_sessions 
             WHERE tiktok_username = ? AND scheduled_host = ? AND end_time IS NULL
@@ -314,7 +322,6 @@ def start_live_session(tiktok_username: str) -> int:
         if active_row:
             return active_row[0]
 
-        # 2. Cek apakah ada sesi baru saja berakhir (< 1 jam lalu) dalam shift yang sama -> Lanjutkan Sesi Tersebut
         recent_row = cur.execute("""
             SELECT session_id FROM live_sessions 
             WHERE tiktok_username = ? AND scheduled_host = ? AND end_time IS NOT NULL 
@@ -324,7 +331,6 @@ def start_live_session(tiktok_username: str) -> int:
 
         if recent_row:
             recent_id = recent_row[0]
-            # Reset end_time & duration agar sesi berlanjut
             cur.execute("""
                 UPDATE live_sessions 
                 SET end_time = NULL, duration_seconds = 0 
@@ -333,7 +339,6 @@ def start_live_session(tiktok_username: str) -> int:
             conn.commit()
             return recent_id
 
-        # 3. Jika benar-benar sesi baru, buat entri baru di database
         cur.execute("""
             INSERT INTO live_sessions (tiktok_username, start_time, scheduled_host) 
             VALUES (?, ?, ?)
@@ -344,7 +349,6 @@ def start_live_session(tiktok_username: str) -> int:
         conn.close()
 
 def end_live_session(session_id: int):
-    """Menandai sesi berakhir dan mengukur total durasi sejak awal terhubung."""
     wib = pytz.timezone('Asia/Jakarta')
     now = datetime.now(wib)
     now_str = now.strftime('%Y-%m-%d %H:%M:%S')
