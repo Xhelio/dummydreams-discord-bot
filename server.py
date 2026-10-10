@@ -51,6 +51,35 @@ NAV_HTML = """
 </div>
 """
 
+AUTO_REFRESH_JS = """
+<script>
+    // Opsi 2: Polling AJAX/Fetch setiap 5 detik untuk update data realtime tanpa reload halaman
+    setInterval(function() {
+        fetch(window.location.href)
+            .then(response => response.text())
+            .then(html => {
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(html, 'text/html');
+                
+                // Update tabel-tabel utama
+                const currentCards = document.querySelectorAll('.card');
+                const newCards = doc.querySelectorAll('.card');
+                
+                currentCards.forEach((card, index) => {
+                    if (newCards[index] && !card.querySelector('form[action="/admin/reset-db"]')) {
+                        const currentTable = card.querySelector('table');
+                        const newTable = newCards[index].querySelector('table');
+                        if (currentTable && newTable) {
+                            currentTable.innerHTML = newTable.innerHTML;
+                        }
+                    }
+                });
+            })
+            .catch(err => console.log('Realtime sync error:', err));
+    }, 5000);
+</script>
+"""
+
 @app.route('/')
 def home():
     return redirect('/admin/data')
@@ -86,9 +115,10 @@ def view_data():
                 <button type="submit" class="btn-danger">🔥 Reset Data Gift & Sesi Live</button>
             </form>
         </div>
+        AUTO_REFRESH_JS_PLACEHOLDER
     </body>
     </html>
-    """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML)
+    """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
     
     return render_template_string(html)
 
@@ -152,9 +182,10 @@ def view_schedule():
                 {% endfor %}
             </table>
         </div>
+        AUTO_REFRESH_JS_PLACEHOLDER
     </body>
     </html>
-    """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML)
+    """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
     
     return render_template_string(html, schedules=schedules)
 
@@ -228,9 +259,10 @@ def view_viewers():
                 {% endfor %}
             </table>
         </div>
+        AUTO_REFRESH_JS_PLACEHOLDER
     </body>
     </html>
-    """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML)
+    """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
     
     return render_template_string(html, viewers=viewers)
 
@@ -350,9 +382,10 @@ def view_monitor():
                 {% endfor %}
             </table>
         </div>
+        AUTO_REFRESH_JS_PLACEHOLDER
     </body>
     </html>
-    """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML)
+    """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
     
     return render_template_string(html, hosts=hosts, sessions=sessions)
 
