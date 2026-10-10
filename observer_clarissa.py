@@ -1,105 +1,69 @@
 import asyncio
-import time
 from TikTokLive import TikTokLiveClient
-from TikTokLive.events import GiftEvent, ConnectEvent, DisconnectEvent
-from TikTokLive.client.errors import UserOfflineError
+from TikTokLive.events import ConnectEvent, DisconnectEvent, GiftEvent
+from db import (
+    save_gift_data, 
+    save_daily_gift_data, 
+    start_live_session, 
+    end_live_session, 
+    log_gift_transaction
+)
 
-from db import save_gift_data, save_daily_gift_data
-from utils import get_schedule_info
+TIKTOK_USERNAME = "calissadreams"
+current_session_id = None
 
-LOCAL_TARGET_USER = "clarissadreams"
-LAST_GIFT_TIMESTAMP = {LOCAL_TARGET_USER.lower(): time.time()}
-
-def create_clarissa_client(username: str, stop_event: asyncio.Event, announcement_callback, role_callback) -> TikTokLiveClient:
-    client = TikTokLiveClient(unique_id=username.lower())
+async def run_clarissa_observer(announcement_callback, role_callback):
+    global current_session_id
+    client = TikTokLiveClient(unique_id=TIKTOK_USERNAME)
 
     @client.on(ConnectEvent)
     async def on_connect(event: ConnectEvent):
-        print(f"[@{username}] Connected to TikTok Live!")
-        await announcement_callback(username, is_live=True)
+        global current_session_id
+        print(f"[Clarissa] Connected to @{TIKTOK_USERNAME} live stream.")
+        current_session_id = start_live_session(TIKTOK_USERNAME)
+        if announcement_callback:
+            announcement_callback(TIKTOK_USERNAME, True)
 
     @client.on(DisconnectEvent)
     async def on_disconnect(event: DisconnectEvent):
-        print(f"[@{username}] Disconnected from TikTok Live!")
-        await announcement_callback(username, is_live=False)
-        stop_event.set()
+        global current_session_id
+        print(f"[Clarissa] Disconnected from @{TIKTOK_USERNAME} live stream.")
+        if current_session_id:
+            end_live_session(current_session_id)
+            current_session_id = None
+        if announcement_callback:
+            announcement_callback(TIKTOK_USERNAME, False)
 
     @client.on(GiftEvent)
     async def on_gift(event: GiftEvent):
-        is_streakable = getattr(event.gift, "streakable", False)
-        is_repeat_end = getattr(event, "repeat_end", True)
+        # Abaikan streak gift yang belum selesai
+        if event.gift.streakable and event.gift.streaking:
+            return
 
-        if not is_streakable or is_repeat_end:
-            user_name = event.user.unique_id.lower()
-            display_name = getattr(event.user, "nickname", user_name)
-            gift_name = getattr(event.gift, "name", "gift")
+        user = event.user.unique_id
+        display_name = event.user.nickname
+        coins = event.gift.diamond_count * event.repeat_count
+        gift_name = event.gift.name
 
-            diamond_count = getattr(event.gift, "diamond_count", 0)
-            repeat_count = getattr(event, "repeat_count", 1) # Diperbaiki di sini
-            coins = diamond_count * repeat_count
-
-            if coins > 0:
-                LAST_GIFT_TIMESTAMP[username.lower()] = time.time()
-                total_coins = save_gift_data(user_name, display_name, coins)
-
-                # Simpan juga ke akumulasi koin harian (Daily Rank)
-                save_daily_gift_data(user_name, display_name, coins)
-
-                print(f"[gift - @{client.unique_id}] {display_name} (@{user_name}) sent {gift_name} ({coins} c); total : {total_coins}")
-                await role_callback(user_name, total_coins)
-
-    return client
-
-async def run_clarissa_observer(announcement_callback, role_callback):
-    username = LOCAL_TARGET_USER
-    retry_delay = 180
+        if coins > 0:
+            total_coins = save_gift_data(user, display_name, coins)
+            save_daily_gift_data(user, display_name, coins)
+            log_gift_transaction(
+                session_id=current_session_id,
+                host_user=TIKTOK_USERNAME,
+                viewer_user=user,
+                viewer_display=display_name,
+                gift_name=gift_name,
+                gift_count=event.repeat_count,
+                coins=coins
+            )
+            
+            if role_callback:
+                await role_callback(user, total_coins)
 
     while True:
-        stop_event = asyncio.Event()
-        client = create_clarissa_client(username, stop_event, announcement_callback, role_callback)
-
         try:
-            print(f"[@{username}] Checking live status...")
-            is_currently_live = await client.is_live()
-
-            if not is_currently_live:
-                await announcement_callback(username, is_live=False)
-                print(f"[@{username}] Streamer is OFFLINE. Standby for 3 minutes...")
-                await asyncio.sleep(retry_delay)
-                continue
-
-            print(f"[@{username}] Streamer is LIVE! Connecting...")
-            asyncio.create_task(client.start())
-
-            await stop_event.wait()
-            print(f"[@{username}] Stream ended or connection lost. Waiting 30s before re-check...")
-            await asyncio.sleep(30)
-
-        except UserOfflineError:
-            await announcement_callback(username, is_live=False)
-            print(f"[@{username}] Streamer is offline (UserOfflineError). Retry in 3 minutes...")
-            await asyncio.sleep(retry_delay)
-
+            await client.start()
         except Exception as e:
-            error_msg = str(e).lower()
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
-
-            last_gift = LAST_GIFT_TIMESTAMP.get(username.lower(), time.time())
-            seconds_since_last_gift = time.time() - last_gift
-            is_high_traffic = seconds_since_last_gift <= 180
-
-            if "rate_limit" in error_msg or "too many connections" in error_msg or "429" in error_msg:
-                cooldown = 180 if is_high_traffic else 300
-                print(f"[@{username}] Rate limit detected! Cooldown {cooldown}s...")
-                await asyncio.sleep(cooldown)
-            elif "offline" in error_msg or "not live" in error_msg:
-                await announcement_callback(username, is_live=False)
-                print(f"[@{username}] Streamer offline. Cooldown 3 minutes...")
-                await asyncio.sleep(retry_delay)
-            else:
-                cooldown = 30 if is_high_traffic else 60
-                print(f"[@{username}] Disconnected: {e} (retry in {cooldown}s)")
-                await asyncio.sleep(cooldown)
+            print(f"[Clarissa] Observer error: {e}. Retrying in 15 seconds...")
+            await asyncio.sleep(15)
