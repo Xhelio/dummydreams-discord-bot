@@ -1,4 +1,4 @@
 discord.py
 TikTokLive
-libsql-experimental
+libsql-python
 python-dotenv
