@@ -53,15 +53,12 @@ NAV_HTML = """
 
 AUTO_REFRESH_JS = """
 <script>
-    // Opsi 2: Polling AJAX/Fetch setiap 5 detik untuk update data realtime tanpa reload halaman
     setInterval(function() {
         fetch(window.location.href)
             .then(response => response.text())
             .then(html => {
                 const parser = new DOMParser();
                 const doc = parser.parseFromString(html, 'text/html');
-                
-                // Update tabel-tabel utama
                 const currentCards = document.querySelectorAll('.card');
                 const newCards = doc.querySelectorAll('.card');
                 
@@ -84,7 +81,6 @@ AUTO_REFRESH_JS = """
 def home():
     return redirect('/admin/data')
 
-# 1. Dashboard Navigasi Utama
 @app.route('/admin/data', methods=['GET'])
 def view_data():
     html = """
@@ -122,7 +118,6 @@ def view_data():
     
     return render_template_string(html)
 
-# 2. Halaman Jadwal Shift Host
 @app.route('/admin/schedule', methods=['GET'])
 def view_schedule():
     try:
@@ -189,7 +184,6 @@ def view_schedule():
     
     return render_template_string(html, schedules=schedules)
 
-# 3. Halaman Viewer & Edit Koin
 @app.route('/admin/viewers', methods=['GET'])
 def view_viewers():
     try:
@@ -266,7 +260,6 @@ def view_viewers():
     
     return render_template_string(html, viewers=viewers)
 
-# 4. Halaman Monitoring Sesi Live & Target Host
 @app.route('/admin/monitor', methods=['GET'])
 def view_monitor():
     try:
@@ -285,10 +278,20 @@ def view_monitor():
             ORDER BY h.host_id ASC
         """).fetchall()
 
+        # Menggabungkan cek status live aktif ke query riwayat sesi live
         sessions = cur.execute("""
-            SELECT session_id, tiktok_username, start_time, end_time, duration_seconds, total_coins, scheduled_host 
-            FROM live_sessions 
-            ORDER BY start_time DESC
+            SELECT 
+                s.session_id, 
+                s.tiktok_username, 
+                s.start_time, 
+                s.end_time, 
+                s.duration_seconds, 
+                s.total_coins, 
+                s.scheduled_host,
+                CASE WHEN a.tiktok_username IS NOT NULL THEN 1 ELSE 0 END as is_live_now
+            FROM live_sessions s
+            LEFT JOIN active_live_announcements a ON s.tiktok_username = a.tiktok_username
+            ORDER BY s.start_time DESC
         """).fetchall()
 
         conn.close()
@@ -362,16 +365,18 @@ def view_monitor():
                     <td>{{ s[2] }}</td>
                     <td>
                         {% if s[3] %}
-                        {{ s[3] }}
+                            {{ s[3] }}
+                        {% elif s[7] == 1 %}
+                            <span class="badge badge-active">🔴 Sedang Live</span>
                         {% else %}
-                        <span class="badge badge-active">🔴 Sedang Live</span>
+                            <span style="color: #94a3b8; font-style: italic;">Tidak ada data</span>
                         {% endif %}
                     </td>
                     <td>
                         {% if s[4] > 0 %}
-                        {{ s[4] // 3600 }}j {{ (s[4] % 3600) // 60 }}m {{ s[4] % 60 }}d
+                            {{ s[4] // 3600 }}j {{ (s[4] % 3600) // 60 }}m {{ s[4] % 60 }}d
                         {% else %}
-                        -
+                            -
                         {% endif %}
                     </td>
                     <td><span class="badge">{{ s[5] }} c</span></td>
@@ -388,8 +393,6 @@ def view_monitor():
     """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
     
     return render_template_string(html, hosts=hosts, sessions=sessions)
-
-# --- Action Handlers ---
 
 @app.route('/admin/add-host', methods=['POST'])
 def add_host():
@@ -462,7 +465,6 @@ def reset_db():
     conn.close()
     return redirect('/admin/data')
 
-# API Config & Heartbeat Handlers
 @app.route('/api/config', methods=['GET'])
 def get_bot_config():
     secret_key = request.headers.get("X-API-KEY")
