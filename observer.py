@@ -7,7 +7,8 @@ from db import (
     start_live_session, 
     end_live_session, 
     log_gift_transaction,
-    get_active_hosts
+    get_active_hosts,
+    get_db_connection
 )
 
 async def _trigger_announcement(announcement_callback, username: str, is_live: bool):
@@ -37,6 +38,17 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         if current_session_id:
             end_live_session(current_session_id)
             current_session_id = None
+        
+        # Hapus record status live dari database saat disconnect
+        conn = get_db_connection()
+        try:
+            conn.execute("DELETE FROM active_live_announcements WHERE tiktok_username = ?", (username_clean,))
+            conn.commit()
+        except Exception as e:
+            print(f"[{username_clean}] Failed to clear active live status: {e}")
+        finally:
+            conn.close()
+
         await _trigger_announcement(announcement_callback, username_clean, False)
 
     @client.on(GiftEvent)
