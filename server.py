@@ -68,11 +68,34 @@ def view_data():
         conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
         cur = conn.cursor()
 
-        gifts = cur.execute("SELECT tiktok_user, display_name, total_coins FROM tiktok_gifts ORDER BY total_coins DESC LIMIT 20").fetchall()
+        # 1. Full list viewer (tiktok_gifts + status channel aktif)
+        viewers = cur.execute("""
+            SELECT 
+                g.tiktok_user, 
+                g.display_name, 
+                g.total_coins,
+                a.tiktok_username as active_channel
+            FROM tiktok_gifts g
+            LEFT JOIN active_live_announcements a ON g.tiktok_user = a.tiktok_username
+            ORDER BY g.total_coins DESC
+        """).fetchall()
+
+        # 2. Akun Target TikTok Host
         hosts = cur.execute("SELECT host_id, tiktok_username, display_name, is_active FROM hosts").fetchall()
-        sessions = cur.execute("SELECT session_id, tiktok_username, start_time, end_time, duration_seconds, total_coins FROM live_sessions ORDER BY start_time DESC LIMIT 10").fetchall()
-        top_gifts = cur.execute("SELECT gift_name, SUM(gift_count) as total_count, SUM(coins) as total_c FROM gift_logs GROUP BY gift_name ORDER BY total_c DESC LIMIT 10").fetchall()
-        schedules = cur.execute("SELECT tiktok_username, shift_date, shift_start_time, shift_end_time, status FROM host_schedules ORDER BY shift_date DESC LIMIT 10").fetchall()
+
+        # 3. Jadwal Shift Host
+        schedules = cur.execute("""
+            SELECT tiktok_username, account_name, host_name, start_hour, end_hour 
+            FROM host_schedules 
+            ORDER BY tiktok_username, start_hour
+        """).fetchall()
+
+        # 4. Sesi Live Lengkap
+        sessions = cur.execute("""
+            SELECT session_id, tiktok_username, start_time, end_time, duration_seconds, total_coins, scheduled_host 
+            FROM live_sessions 
+            ORDER BY start_time DESC
+        """).fetchall()
 
         conn.close()
     except Exception as e:
@@ -84,7 +107,7 @@ def view_data():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Turso DB Admin Panel</title>
+        <title>Database Admin Panel</title>
         <style>
             * { box-sizing: border-box; margin: 0; padding: 0; }
             body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 30px; background: #0f172a; color: #f8fafc; }
@@ -105,29 +128,133 @@ def view_data():
             button { background: #0284c7; cursor: pointer; font-weight: 600; border: none; }
             button:hover { background: #0369a1; }
             .btn-danger { background: #ef4444; }
-            .btn-danger:hover { background: #dc2626; }
             .btn-action { padding: 4px 8px; font-size: 0.75rem; text-decoration: none; border-radius: 4px; display: inline-block; }
             .btn-toggle { background: #ca8a04; color: white; }
             .btn-del { background: #dc2626; color: white; }
+            .edit-form { display: flex; gap: 6px; }
+            .edit-form input { width: 90px; padding: 4px 6px; }
+            .edit-form button { padding: 4px 8px; font-size: 0.75rem; }
         </style>
     </head>
     <body>
         <div class="header">
-            <h1>🛡️ Turso DB Admin & Analytics Panel</h1>
+            <h1>🛡️ Database Admin Panel</h1>
             <a href="/" class="btn-back">← Kembali</a>
         </div>
 
-        <!-- CRUD Host Manager -->
+        <!-- 1. Full List Viewer -->
         <div class="card">
-            <h2>🎙️ Kelola Host / Target TikTok (CRUD)</h2>
-            <form action="/admin/add-host" method="POST" class="form-grid">
+            <h2>👥 Daftar Viewer & Koin</h2>
+            <table>
+                <tr>
+                    <th>Username (@)</th>
+                    <th>Nama Viewer</th>
+                    <th>Total Koin</th>
+                    <th>Status Live</th>
+                    <th>Edit Koin</th>
+                </tr>
+                {% for v in viewers %}
+                <tr>
+                    <td>@{{ v[0] }}</td>
+                    <td>{{ v[1] or '-' }}</td>
+                    <td><span class="badge">{{ v[2] }} c</span></td>
+                    <td>
+                        {% if v[3] %}
+                        <span class="badge badge-active">Live di {{ v[3] }}</span>
+                        {% else %}
+                        -
+                        {% endif %}
+                    </td>
+                    <td>
+                        <form action="/admin/edit-coin" method="POST" class="edit-form">
+                            <input type="hidden" name="tiktok_user" value="{{ v[0] }}">
+                            <input type="number" name="new_coins" value="{{ v[2] }}" required>
+                            <button type="submit">Simpan</button>
+                        </form>
+                    </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="5">Belum ada data viewer tercatat.</td></tr>
+                {% endfor %}
+            </table>
+        </div>
+
+        <!-- 2. Sesi Live -->
+        <div class="card">
+            <h2>📹 Daftar Sesi Live</h2>
+            <table>
+                <tr>
+                    <th>Username (@)</th>
+                    <th>Mulai</th>
+                    <th>Selesai</th>
+                    <th>Durasi</th>
+                    <th>Koin</th>
+                    <th>Host Terjadwal</th>
+                </tr>
+                {% for s in sessions %}
+                <tr>
+                    <td>@{{ s[1] }}</td>
+                    <td>{{ s[2] }}</td>
+                    <td>{{ s[3] or 'Sedang Live' }}</td>
+                    <td>
+                        {% if s[4] > 0 %}
+                        {{ s[4] // 3600 }}j {{ (s[4] % 3600) // 60 }}m {{ s[4] % 60 }}d
+                        {% else %}
+                        -
+                        {% endif %}
+                    </td>
+                    <td><span class="badge">{{ s[5] }} c</span></td>
+                    <td><strong>{{ s[6] or '-' }}</strong></td>
+                </tr>
+                {% else %}
+                <tr><td colspan="6">Belum ada histori sesi live.</td></tr>
+                {% endfor %}
+            </table>
+        </div>
+
+        <!-- 3. Jadwal Shift Host -->
+        <div class="card">
+            <h2>📅 Jadwal Shift Host (Database)</h2>
+            <form action="/admin/add-schedule" method="POST" class="form-grid">
                 <input type="text" name="tiktok_username" placeholder="Username TikTok (@...)" required>
-                <input type="text" name="display_name" placeholder="Nama Host" required>
-                <button type="submit">+ Tambah Host Baru</button>
+                <input type="text" name="account_name" placeholder="Nama Akun / Channel" required>
+                <input type="text" name="host_name" placeholder="Nama Host (misal: SOLEN)" required>
+                <input type="number" name="start_hour" placeholder="Jam Mulai (0-23)" min="0" max="23" required>
+                <input type="number" name="end_hour" placeholder="Jam Selesai (0-23)" min="0" max="23" required>
+                <button type="submit">+ Tambah / Update Shift</button>
             </form>
             <br>
             <table>
-                <tr><th>ID</th><th>Username TikTok</th><th>Display Name</th><th>Status</th><th>Aksi</th></tr>
+                <tr>
+                    <th>Username Target</th>
+                    <th>Nama Akun</th>
+                    <th>Nama Host Shift</th>
+                    <th>Jam Shift</th>
+                </tr>
+                {% for sc in schedules %}
+                <tr>
+                    <td>@{{ sc[0] }}</td>
+                    <td>{{ sc[1] }}</td>
+                    <td><strong>{{ sc[2] }}</strong></td>
+                    <td>{{ "%02d:00"|format(sc[3]) }} - {{ "%02d:00"|format(sc[4]) }} WIB</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="4">Belum ada data jadwal shift host.</td></tr>
+                {% endfor %}
+            </table>
+        </div>
+
+        <!-- 4. Target Host TikTok -->
+        <div class="card">
+            <h2>🎙️ Daftar Target Akun TikTok</h2>
+            <form action="/admin/add-host" method="POST" class="form-grid">
+                <input type="text" name="tiktok_username" placeholder="Username TikTok (@...)" required>
+                <input type="text" name="display_name" placeholder="Nama Akun / Channel" required>
+                <button type="submit">+ Tambah Target</button>
+            </form>
+            <br>
+            <table>
+                <tr><th>ID</th><th>Username TikTok</th><th>Nama Asli / Channel</th><th>Status</th><th>Aksi</th></tr>
                 {% for h in hosts %}
                 <tr>
                     <td>{{ h[0] }}</td>
@@ -141,78 +268,29 @@ def view_data():
                         {% endif %}
                     </td>
                     <td>
-                        <a href="/admin/toggle-host/{{ h[0] }}" class="btn-action btn-toggle">Toggle Status</a>
-                        <a href="/admin/delete-host/{{ h[0] }}" class="btn-action btn-del" onclick="return confirm('Hapus host ini?')">Hapus</a>
+                        <a href="/admin/toggle-host/{{ h[0] }}" class="btn-action btn-toggle">Ubah Status</a>
+                        <a href="/admin/delete-host/{{ h[0] }}" class="btn-action btn-del" onclick="return confirm('Hapus target ini?')">Hapus</a>
                     </td>
                 </tr>
                 {% else %}
-                <tr><td colspan="5">Belum ada host terdaftar di database.</td></tr>
+                <tr><td colspan="5">Belum ada target terdaftar.</td></tr>
                 {% endfor %}
             </table>
         </div>
 
-        <!-- Edit Koin Viewer -->
-        <div class="card">
-            <h2>✏️ Edit Koin Viewer Manual</h2>
-            <form action="/admin/edit-coin" method="POST" class="form-grid">
-                <input type="text" name="tiktok_user" placeholder="Username TikTok Viewer" required>
-                <input type="number" name="new_coins" placeholder="Jumlah Koin Baru" required>
-                <button type="submit">Update Koin</button>
-            </form>
-        </div>
-
-        <!-- Shift Manager -->
-        <div class="card">
-            <h2>📅 Jadwal Shift Host</h2>
-            <form action="/admin/add-schedule" method="POST" class="form-grid">
-                <input type="text" name="tiktok_username" placeholder="Username Host" required>
-                <input type="date" name="shift_date" required>
-                <input type="time" name="shift_start_time">
-                <input type="time" name="shift_end_time">
-                <select name="status">
-                    <option value="WORK">Masuk (WORK)</option>
-                    <option value="OFF">Libur (OFF)</option>
-                    <option value="LEAVE">Izin (LEAVE)</option>
-                </select>
-                <button type="submit">Simpan Shift</button>
-            </form>
-            <br>
-            <table>
-                <tr><th>Host</th><th>Tanggal</th><th>Jam Kerja</th><th>Status</th></tr>
-                {% for s in schedules %}
-                <tr><td>@{{ s[0] }}</td><td>{{ s[1] }}</td><td>{{ s[2] }} - {{ s[3] }}</td><td><span class="badge">{{ s[4] }}</span></td></tr>
-                {% else %}
-                <tr><td colspan="4">Belum ada jadwal shift.</td></tr>
-                {% endfor %}
-            </table>
-        </div>
-
-        <!-- Stat Sesi Live -->
-        <div class="card">
-            <h2>📹 Statistik Sesi Live Terbaru</h2>
-            <table>
-                <tr><th>Sesi #</th><th>Host</th><th>Mulai</th><th>Selesai</th><th>Durasi (dtk)</th><th>Total Koin</th></tr>
-                {% for s in sessions %}
-                <tr><td>{{ s[0] }}</td><td>@{{ s[1] }}</td><td>{{ s[2] }}</td><td>{{ s[3] or 'Live' }}</td><td>{{ s[4] }}s</td><td><span class="badge">{{ s[5] }} c</span></td></tr>
-                {% else %}
-                <tr><td colspan="6">Belum ada histori sesi live.</td></tr>
-                {% endfor %}
-            </table>
-        </div>
-
-        <!-- Reset Database -->
+        <!-- Danger Zone -->
         <div class="card" style="border-color: #ef4444;">
             <h2 style="color: #ef4444;">⚠️ Danger Zone</h2>
-            <form action="/admin/reset-db" method="POST" onsubmit="return confirm('HAPUS SELURUH DATA GIFT?')">
+            <form action="/admin/reset-db" method="POST" onsubmit="return confirm('HAPUS SELURUH DATA GIFT DAN SESI LIVE?')">
                 <button type="submit" class="btn-danger">🔥 Reset Data Gift & Sesi Live</button>
             </form>
         </div>
     </body>
     </html>
     """
-    return render_template_string(html, gifts=gifts, hosts=hosts, sessions=sessions, top_gifts=top_gifts, schedules=schedules)
+    return render_template_string(html, viewers=viewers, hosts=hosts, schedules=schedules, sessions=sessions)
 
-# --- Endpoint CRUD Host Actions ---
+# --- Action Handlers ---
 
 @app.route('/admin/add-host', methods=['POST'])
 def add_host():
@@ -255,17 +333,20 @@ def edit_coin():
 @app.route('/admin/add-schedule', methods=['POST'])
 def add_schedule():
     username = request.form.get("tiktok_username", "").strip().lower().lstrip("@")
-    shift_date = request.form.get("shift_date")
-    start_t = request.form.get("shift_start_time")
-    end_t = request.form.get("shift_end_time")
-    status = request.form.get("status", "WORK")
+    acc_name = request.form.get("account_name", "").strip()
+    host_name = request.form.get("host_name", "").strip().upper()
+    try:
+        start_h = int(request.form.get("start_hour", 0))
+        end_h = int(request.form.get("end_hour", 0))
+    except ValueError:
+        return redirect('/admin/data')
 
-    if username and shift_date:
+    if username and host_name:
         conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
         conn.execute("""
-            INSERT OR REPLACE INTO host_schedules (tiktok_username, shift_date, shift_start_time, shift_end_time, status)
+            INSERT OR REPLACE INTO host_schedules (tiktok_username, account_name, host_name, start_hour, end_hour)
             VALUES (?, ?, ?, ?, ?)
-        """, (username, shift_date, start_t, end_t, status))
+        """, (username, acc_name, host_name, start_h, end_h))
         conn.commit()
         conn.close()
     return redirect('/admin/data')
@@ -281,8 +362,7 @@ def reset_db():
     conn.close()
     return redirect('/admin/data')
 
-# --- Existing API Endpoints ---
-
+# API Config & Heartbeat Handlers
 @app.route('/api/config', methods=['GET'])
 def get_bot_config():
     secret_key = request.headers.get("X-API-KEY")
