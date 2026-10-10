@@ -3,6 +3,7 @@ from threading import Thread
 import os
 import json
 import libsql_experimental as libsql
+from db import get_shift_name, clean_expired_schedules_and_offlines
 
 app = Flask('')
 
@@ -29,7 +30,7 @@ tr:nth-child(even) { background-color: #162032; }
 .badge-active { background: #15803d; color: #dcfce7; border: 1px solid #22c55e; transition: all 0.2s; }
 .badge-active:hover { background: #166534; transform: translateY(-1px); }
 .badge-inactive { background: #475569; color: #cbd5e1; }
-.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-top: 10px; }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 10px; }
 input, select, button { padding: 8px 12px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: white; font-size: 0.875rem; }
 button { background: #0284c7; cursor: pointer; font-weight: 600; border: none; }
 button:hover { background: #0369a1; }
@@ -37,8 +38,8 @@ button:hover { background: #0369a1; }
 .btn-action { padding: 4px 8px; font-size: 0.75rem; text-decoration: none; border-radius: 4px; display: inline-block; }
 .btn-toggle { background: #ca8a04; color: white; }
 .btn-del { background: #dc2626; color: white; }
-.edit-form { display: flex; gap: 6px; }
-.edit-form input { width: 90px; padding: 4px 6px; }
+.edit-form { display: flex; gap: 6px; align-items: center; }
+.edit-form input, .edit-form select { width: auto; padding: 4px 6px; }
 .edit-form button { padding: 4px 8px; font-size: 0.75rem; }
 """
 
@@ -118,16 +119,47 @@ def view_data():
     
     return render_template_string(html)
 
+# 2. Halaman Jadwal Shift Host (Default, Sementara, Offline)
 @app.route('/admin/schedule', methods=['GET'])
 def view_schedule():
+    clean_expired_schedules_and_offlines()
     try:
         conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
         cur = conn.cursor()
-        schedules = cur.execute("""
-            SELECT tiktok_username, account_name, host_name, start_hour, end_hour 
+
+        # Data Default Schedules
+        schedules_raw = cur.execute("""
+            SELECT schedule_id, tiktok_username, account_name, host_name, start_hour, end_hour 
             FROM host_schedules 
             ORDER BY tiktok_username, start_hour
         """).fetchall()
+
+        schedules = []
+        for s in schedules_raw:
+            schedules.append({
+                "id": s[0],
+                "username": s[1],
+                "account_name": s[2],
+                "host_name": s[3],
+                "start_hour": s[4],
+                "end_hour": s[5],
+                "shift_label": get_shift_name(s[4], s[5])
+            })
+
+        # Data Temp Schedules
+        temp_schedules = cur.execute("""
+            SELECT temp_id, schedule_date, tiktok_username, account_name, host_name, shift_num 
+            FROM temp_schedules 
+            ORDER BY schedule_date ASC, shift_num ASC
+        """).fetchall()
+
+        # Data Host Offlines
+        offlines = cur.execute("""
+            SELECT offline_id, host_name, offline_type, offline_date, offline_day, note 
+            FROM host_offlines 
+            ORDER BY offline_id DESC
+        """).fetchall()
+
         conn.close()
     except Exception as e:
         return f"<h3>Database Error: {e}</h3>", 500
@@ -147,14 +179,19 @@ def view_schedule():
         </div>
         NAV_HTML_PLACEHOLDER
 
+        <!-- Segmen 1: Jadwal Shift Default -->
         <div class="card">
-            <h2>+ Tambah / Update Shift Host</h2>
+            <h2>📌 Jadwal Shift Default (Statis)</h2>
             <form action="/admin/add-schedule" method="POST" class="form-grid">
                 <input type="text" name="tiktok_username" placeholder="Username TikTok (@...)" required>
                 <input type="text" name="account_name" placeholder="Nama Channel" required>
                 <input type="text" name="host_name" placeholder="Nama Host (misal: SOLEN)" required>
-                <input type="number" name="start_hour" placeholder="Jam Mulai (0-23)" min="0" max="23" required>
-                <input type="number" name="end_hour" placeholder="Jam Selesai (0-23)" min="0" max="23" required>
+                <select name="shift_num" required>
+                    <option value="1">Shift 1 (01:00 - 07:00 WIB)</option>
+                    <option value="2">Shift 2 (07:00 - 13:00 WIB)</option>
+                    <option value="3">Shift 3 (13:00 - 19:00 WIB)</option>
+                    <option value="4">Shift 4 (19:00 - 01:00 WIB)</option>
+                </select>
                 <button type="submit">Simpan Shift</button>
             </form>
             <br>
@@ -163,27 +200,245 @@ def view_schedule():
                     <th>Username Target</th>
                     <th>Nama Channel</th>
                     <th>Nama Host Shift</th>
-                    <th>Jam Shift</th>
+                    <th>Kelompok Shift & Jam Shift</th>
+                    <th>Aksi</th>
                 </tr>
                 {% for sc in schedules %}
                 <tr>
-                    <td>@{{ sc[0] }}</td>
-                    <td>{{ sc[1] or '@' ~ sc[0] }}</td>
-                    <td><strong>{{ sc[2] }}</strong></td>
-                    <td>{{ "%02d:00"|format(sc[3]) }} - {{ "%02d:00"|format(sc[4]) }} WIB</td>
+                    <td>@{{ sc.username }}</td>
+                    <td>{{ sc.account_name or '@' ~ sc.username }}</td>
+                    <td><strong>{{ sc.host_name }}</strong></td>
+                    <td><span class="badge">{{ sc.shift_label }}</span></td>
+                    <td>
+                        <form action="/admin/edit-schedule/{{ sc.id }}" method="POST" class="edit-form">
+                            <input type="text" name="host_name" value="{{ sc.host_name }}" style="width: 80px;" required>
+                            <select name="shift_num" required>
+                                <option value="1" {% if sc.start_hour == 1 %}selected{% endif %}>Shift 1</option>
+                                <option value="2" {% if sc.start_hour == 7 %}selected{% endif %}>Shift 2</option>
+                                <option value="3" {% if sc.start_hour == 13 %}selected{% endif %}>Shift 3</option>
+                                <option value="4" {% if sc.start_hour == 19 %}selected{% endif %}>Shift 4</option>
+                            </select>
+                            <button type="submit">Edit</button>
+                            <a href="/admin/delete-schedule/{{ sc.id }}" class="btn-action btn-del" onclick="return confirm('Hapus shift ini?')">Hapus</a>
+                        </form>
+                    </td>
                 </tr>
                 {% else %}
-                <tr><td colspan="4">Belum ada data jadwal shift host.</td></tr>
+                <tr><td colspan="5">Belum ada data jadwal shift host.</td></tr>
                 {% endfor %}
             </table>
         </div>
+
+        <!-- Segmen 2: Jadwal Sementara -->
+        <div class="card">
+            <h2>⏳ Jadwal Sementara (Penimpa Durasi Shift)</h2>
+            <form action="/admin/add-temp-schedule" method="POST" class="form-grid">
+                <input type="date" name="schedule_date" required>
+                <input type="text" name="tiktok_username" placeholder="Username TikTok (@...)" required>
+                <input type="text" name="account_name" placeholder="Nama Channel" required>
+                <input type="text" name="host_name" placeholder="Nama Host Pengganti" required>
+                <select name="shift_num" required>
+                    <option value="1">Shift 1 (01:00 - 07:00 WIB)</option>
+                    <option value="2">Shift 2 (07:00 - 13:00 WIB)</option>
+                    <option value="3">Shift 3 (13:00 - 19:00 WIB)</option>
+                    <option value="4">Shift 4 (19:00 - 01:00 WIB)</option>
+                </select>
+                <button type="submit">Simpan Jadwal Sementara</button>
+            </form>
+            <br>
+            <table>
+                <tr>
+                    <th>Tanggal</th>
+                    <th>Channel</th>
+                    <th>Host Pengganti</th>
+                    <th>Shift</th>
+                    <th>Aksi</th>
+                </tr>
+                {% for ts in temp_schedules %}
+                <tr>
+                    <td>{{ ts[1] }}</td>
+                    <td>{{ ts[3] or '@' ~ ts[2] }}</td>
+                    <td><strong>{{ ts[4] }}</strong></td>
+                    <td><span class="badge">Shift {{ ts[5] }}</span></td>
+                    <td>
+                        <a href="/admin/delete-temp-schedule/{{ ts[0] }}" class="btn-action btn-del" onclick="return confirm('Hapus jadwal sementara ini?')">Hapus</a>
+                    </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="5">Belum ada jadwal sementara aktif.</td></tr>
+                {% endfor %}
+            </table>
+        </div>
+
+        <!-- Segmen 3: Offline Host -->
+        <div class="card">
+            <h2>🚫 Status Offline Host</h2>
+            <form action="/admin/add-offline" method="POST" class="form-grid">
+                <input type="text" name="host_name" placeholder="Nama Host (misal: SOLEN)" required>
+                <select name="offline_type" id="offType" onchange="toggleOffInputs()" required>
+                    <option value="temporary">Sementara (Tanggal Tertentu)</option>
+                    <option value="routine">Rutin (Seminggu Sekali)</option>
+                </select>
+                <input type="date" name="offline_date" id="offDate">
+                <select name="offline_day" id="offDay" style="display: none;">
+                    <option value="Monday">Senin</option>
+                    <option value="Tuesday">Selasa</option>
+                    <option value="Wednesday">Rabu</option>
+                    <option value="Thursday">Kamis</option>
+                    <option value="Friday">Jumat</option>
+                    <option value="Saturday">Sabtu</option>
+                    <option value="Sunday">Minggu</option>
+                </select>
+                <input type="text" name="note" placeholder="Keterangan (misal: Sakit/Izin)">
+                <button type="submit">Simpan Status Offline</button>
+            </form>
+            <br>
+            <table>
+                <tr>
+                    <th>Nama Host</th>
+                    <th>Tipe Offline</th>
+                    <th>Waktu Offline</th>
+                    <th>Keterangan</th>
+                    <th>Aksi</th>
+                </tr>
+                {% for off in offlines %}
+                <tr>
+                    <td><strong>{{ off[1] }}</strong></td>
+                    <td><span class="badge">{{ 'Sementara' if off[2] == 'temporary' else 'Rutin Mingguan' }}</span></td>
+                    <td>{{ off[3] if off[2] == 'temporary' else off[4] }}</td>
+                    <td>{{ off[5] or '-' }}</td>
+                    <td>
+                        <a href="/admin/delete-offline/{{ off[0] }}" class="btn-action btn-del" onclick="return confirm('Hapus status offline ini?')">Hapus</a>
+                    </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="5">Belum ada catatan host offline.</td></tr>
+                {% endfor %}
+            </table>
+        </div>
+
+        <script>
+            function toggleOffInputs() {
+                var type = document.getElementById("offType").value;
+                if (type === "temporary") {
+                    document.getElementById("offDate").style.display = "block";
+                    document.getElementById("offDay").style.display = "none";
+                } else {
+                    document.getElementById("offDate").style.display = "none";
+                    document.getElementById("offDay").style.display = "block";
+                }
+            }
+            toggleOffInputs();
+        </script>
         AUTO_REFRESH_JS_PLACEHOLDER
     </body>
     </html>
     """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
     
-    return render_template_string(html, schedules=schedules)
+    return render_template_string(html, schedules=schedules, temp_schedules=temp_schedules, offlines=offlines)
 
+# --- Action Handlers untuk Shift & Offline ---
+
+@app.route('/admin/add-schedule', methods=['POST'])
+def add_schedule():
+    username = request.form.get("tiktok_username", "").strip().lower().lstrip("@")
+    acc_name = request.form.get("account_name", username).strip()
+    host_name = request.form.get("host_name", "").strip().upper()
+    shift_num = int(request.form.get("shift_num", 1))
+
+    shifts_map = {1: (1, 7), 2: (7, 13), 3: (13, 19), 4: (19, 1)}
+    start_h, end_h = shifts_map.get(shift_num, (1, 7))
+
+    if username and host_name:
+        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+        conn.execute("""
+            INSERT OR REPLACE INTO host_schedules (tiktok_username, account_name, host_name, start_hour, end_hour)
+            VALUES (?, ?, ?, ?, ?)
+        """, (username, acc_name, host_name, start_h, end_h))
+        conn.commit()
+        conn.close()
+    return redirect('/admin/schedule')
+
+@app.route('/admin/edit-schedule/<int:sched_id>', methods=['POST'])
+def edit_schedule(sched_id):
+    host_name = request.form.get("host_name", "").strip().upper()
+    shift_num = int(request.form.get("shift_num", 1))
+
+    shifts_map = {1: (1, 7), 2: (7, 13), 3: (13, 19), 4: (19, 1)}
+    start_h, end_h = shifts_map.get(shift_num, (1, 7))
+
+    if host_name:
+        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+        conn.execute("""
+            UPDATE host_schedules 
+            SET host_name = ?, start_hour = ?, end_hour = ?
+            WHERE schedule_id = ?
+        """, (host_name, start_h, end_h, sched_id))
+        conn.commit()
+        conn.close()
+    return redirect('/admin/schedule')
+
+@app.route('/admin/delete-schedule/<int:sched_id>')
+def delete_schedule(sched_id):
+    conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+    conn.execute("DELETE FROM host_schedules WHERE schedule_id = ?", (sched_id,))
+    conn.commit()
+    conn.close()
+    return redirect('/admin/schedule')
+
+@app.route('/admin/add-temp-schedule', methods=['POST'])
+def add_temp_schedule():
+    sched_date = request.form.get("schedule_date", "").strip()
+    username = request.form.get("tiktok_username", "").strip().lower().lstrip("@")
+    acc_name = request.form.get("account_name", username).strip()
+    host_name = request.form.get("host_name", "").strip().upper()
+    shift_num = int(request.form.get("shift_num", 1))
+
+    if sched_date and username and host_name:
+        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+        conn.execute("""
+            INSERT OR REPLACE INTO temp_schedules (schedule_date, tiktok_username, account_name, host_name, shift_num)
+            VALUES (?, ?, ?, ?, ?)
+        """, (sched_date, username, acc_name, host_name, shift_num))
+        conn.commit()
+        conn.close()
+    return redirect('/admin/schedule')
+
+@app.route('/admin/delete-temp-schedule/<int:temp_id>')
+def delete_temp_schedule(temp_id):
+    conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+    conn.execute("DELETE FROM temp_schedules WHERE temp_id = ?", (temp_id,))
+    conn.commit()
+    conn.close()
+    return redirect('/admin/schedule')
+
+@app.route('/admin/add-offline', methods=['POST'])
+def add_offline():
+    host_name = request.form.get("host_name", "").strip().upper()
+    off_type = request.form.get("offline_type", "temporary")
+    off_date = request.form.get("offline_date", "").strip()
+    off_day = request.form.get("offline_day", "Monday").strip()
+    note = request.form.get("note", "").strip()
+
+    if host_name:
+        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+        conn.execute("""
+            INSERT INTO host_offlines (host_name, offline_type, offline_date, offline_day, note)
+            VALUES (?, ?, ?, ?, ?)
+        """, (host_name, off_type, off_date if off_type == 'temporary' else None, off_day if off_type == 'routine' else None, note))
+        conn.commit()
+        conn.close()
+    return redirect('/admin/schedule')
+
+@app.route('/admin/delete-offline/<int:off_id>')
+def delete_offline(off_id):
+    conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+    conn.execute("DELETE FROM host_offlines WHERE offline_id = ?", (off_id,))
+    conn.commit()
+    conn.close()
+    return redirect('/admin/schedule')
+
+# 3. Halaman Viewer & Edit Koin
 @app.route('/admin/viewers', methods=['GET'])
 def view_viewers():
     try:
@@ -260,6 +515,7 @@ def view_viewers():
     
     return render_template_string(html, viewers=viewers)
 
+# 4. Halaman Monitoring Sesi Live & Target Host
 @app.route('/admin/monitor', methods=['GET'])
 def view_monitor():
     try:
@@ -278,7 +534,6 @@ def view_monitor():
             ORDER BY h.host_id ASC
         """).fetchall()
 
-        # Menggabungkan cek status live aktif ke query riwayat sesi live
         sessions = cur.execute("""
             SELECT 
                 s.session_id, 
@@ -313,7 +568,6 @@ def view_monitor():
         </div>
         NAV_HTML_PLACEHOLDER
 
-        <!-- Target Host -->
         <div class="card">
             <h2>🎙️ Akun Target TikTok</h2>
             <form action="/admin/add-host" method="POST" class="form-grid">
@@ -347,7 +601,6 @@ def view_monitor():
             </table>
         </div>
 
-        <!-- Sesi Live -->
         <div class="card">
             <h2>📹 Riwayat Sesi Live</h2>
             <table>
@@ -432,27 +685,6 @@ def edit_coin():
         conn.close()
     return redirect('/admin/viewers')
 
-@app.route('/admin/add-schedule', methods=['POST'])
-def add_schedule():
-    username = request.form.get("tiktok_username", "").strip().lower().lstrip("@")
-    acc_name = request.form.get("account_name", username).strip()
-    host_name = request.form.get("host_name", "").strip().upper()
-    try:
-        start_h = int(request.form.get("start_hour", 0))
-        end_h = int(request.form.get("end_hour", 0))
-    except ValueError:
-        return redirect('/admin/schedule')
-
-    if username and host_name:
-        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
-        conn.execute("""
-            INSERT OR REPLACE INTO host_schedules (tiktok_username, account_name, host_name, start_hour, end_hour)
-            VALUES (?, ?, ?, ?, ?)
-        """, (username, acc_name, host_name, start_h, end_h))
-        conn.commit()
-        conn.close()
-    return redirect('/admin/schedule')
-
 @app.route('/admin/reset-db', methods=['POST'])
 def reset_db():
     conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
@@ -461,6 +693,8 @@ def reset_db():
     conn.execute("DELETE FROM tiktok_gifts")
     conn.execute("DELETE FROM daily_tiktok_gifts")
     conn.execute("DELETE FROM active_live_announcements")
+    conn.execute("DELETE FROM temp_schedules")
+    conn.execute("DELETE FROM host_offlines")
     conn.commit()
     conn.close()
     return redirect('/admin/data')
