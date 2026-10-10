@@ -132,60 +132,32 @@ async def process_live_announcement(username: str, is_live: bool):
                 except Exception:
                     old_msg = None
 
-            if old_msg:
-                is_announcement_msg = "🔴" in old_msg.content or "just live!" in old_msg.content
-                is_offline_msg = "⚪" in old_msg.content or "ended the stream" in old_msg.content
+            if is_live:
+                if old_msg:
+                    if "🔴" in old_msg.content and host_name in old_msg.content:
+                        return  # Jangan kirim ulang jika pesan live sudah sesuai
+                    try:
+                        await old_msg.delete()
+                    except Exception:
+                        pass
 
-                if is_live:
-                    if is_announcement_msg:
-                        if host_name in old_msg.content:
-                            return
-                        else:
-                            try:
-                                await old_msg.delete()
-                            except Exception:
-                                pass
-                            new_msg = await channel.send(live_content)
-                            conn.execute(
-                                "INSERT OR REPLACE INTO active_live_announcements (tiktok_username, channel_id, message_id) VALUES (?, ?, ?)",
-                                (user_key, str(channel.id), str(new_msg.id))
-                            )
-                            conn.commit()
-                            return
-                    elif is_offline_msg:
-                        try:
-                            await old_msg.delete()
-                        except Exception:
-                            pass
-                        new_msg = await channel.send(live_content)
-                        conn.execute(
-                            "INSERT OR REPLACE INTO active_live_announcements (tiktok_username, channel_id, message_id) VALUES (?, ?, ?)",
-                            (user_key, str(channel.id), str(new_msg.id))
-                        )
-                        conn.commit()
-                        return
-                else:
-                    if is_offline_msg:
-                        return
-                    else:
-                        try:
-                            edited_msg = await old_msg.edit(content=offline_content)
-                            conn.execute(
-                                "INSERT OR REPLACE INTO active_live_announcements (tiktok_username, channel_id, message_id) VALUES (?, ?, ?)",
-                                (user_key, str(channel.id), str(edited_msg.id))
-                            )
-                            conn.commit()
-                        except Exception as e:
-                            print(f"[Discord] Failed to edit message for @{user_key}: {e}")
-                        return
-            else:
-                target_content = live_content if is_live else offline_content
-                new_msg = await channel.send(target_content)
+                new_msg = await channel.send(live_content)
                 conn.execute(
                     "INSERT OR REPLACE INTO active_live_announcements (tiktok_username, channel_id, message_id) VALUES (?, ?, ?)",
                     (user_key, str(channel.id), str(new_msg.id))
                 )
                 conn.commit()
+            else:
+                # Hanya edit/kirim status offline jika sebelumnya ada status live aktif di database
+                if old_msg and "🔴" in old_msg.content:
+                    try:
+                        await old_msg.edit(content=offline_content)
+                    except Exception as e:
+                        print(f"[Discord] Failed to edit message for @{user_key}: {e}")
+                    
+                    # Hapus record dari DB agar tidak memicu pengiriman pesan offline berulang
+                    conn.execute("DELETE FROM active_live_announcements WHERE tiktok_username = ?", (user_key,))
+                    conn.commit()
 
         except Exception as e:
             print(f"[Discord Error] Failed to process announcement for @{user_key}: {e}")
