@@ -190,7 +190,9 @@ def end_live_session(session_id: int):
         row = cur.execute("SELECT start_time FROM live_sessions WHERE session_id = ?", (session_id,)).fetchone()
         duration_sec = 0
         if row and row[0]:
-            start_dt = datetime.strptime(row[0], '%Y-%m-%d %H:%M:%S')
+            # Samakan menjadi offset-aware timezone WIB
+            start_dt_naive = datetime.strptime(row[0], '%Y-%m-%d %H:%M:%S')
+            start_dt = wib.localize(start_dt_naive)
             duration_sec = int((now - start_dt).total_seconds())
 
         cur.execute("""
