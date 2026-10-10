@@ -11,7 +11,6 @@ TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
 
 async_announcement_handler = None
 
-# CSS Template Bersama
 BASE_CSS = """
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 30px; background: #0f172a; color: #f8fafc; }
@@ -139,16 +138,16 @@ def view_schedule():
                     <th>Nama Host Shift</th>
                     <th>Jam Shift</th>
                 </tr>
-                {% for sc in schedules %}
+                {{% for sc in schedules %}}
                 <tr>
-                    <td>@{sc[0]}</td>
-                    <td>@{sc[0]}</td>
-                    <td><strong>{sc[2]}</strong></td>
-                    <td>{"%02d:00"|format(sc[3])} - {"%02d:00"|format(sc[4])} WIB</td>
+                    <td>@{{ sc[0] }}</td>
+                    <td>@{{ sc[0] }}</td>
+                    <td><strong>{{ sc[2] }}</strong></td>
+                    <td>{{ "%02d:00"|format(sc[3]) }} - {{ "%02d:00"|format(sc[4]) }} WIB</td>
                 </tr>
-                {% else %}
+                {{% else %}}
                 <tr><td colspan="4">Belum ada data jadwal shift host.</td></tr>
-                {% endfor %}
+                {{% endfor %}}
             </table>
         </div>
     </body>
@@ -201,29 +200,29 @@ def view_viewers():
                     <th>Status Live Realtime</th>
                     <th>Edit Koin</th>
                 </tr>
-                {% for v in viewers %}
+                {{% for v in viewers %}}
                 <tr>
-                    <td>@{v[0]}</td>
-                    <td>{v[1] or '-'}</td>
-                    <td><span class="badge">{v[2]} c</span></td>
+                    <td>@{{ v[0] }}</td>
+                    <td>{{ v[1] or '-' }}</td>
+                    <td><span class="badge">{{ v[2] }} c</span></td>
                     <td>
-                        {% if v[3] %}
-                        <span class="badge badge-active">🔴 Live di @{v[3]}</span>
-                        {% else %}
+                        {{% if v[3] %}}
+                        <span class="badge badge-active">🔴 Live di @{{ v[3] }}</span>
+                        {{% else %}}
                         <span class="badge badge-inactive">Offline</span>
-                        {% endif %}
+                        {{% endif %}}
                     </td>
                     <td>
                         <form action="/admin/edit-coin" method="POST" class="edit-form">
-                            <input type="hidden" name="tiktok_user" value="{v[0]}">
-                            <input type="number" name="new_coins" value="{v[2]}" required>
+                            <input type="hidden" name="tiktok_user" value="{{ v[0] }}">
+                            <input type="number" name="new_coins" value="{{ v[2] }}" required>
                             <button type="submit">Simpan</button>
                         </form>
                     </td>
                 </tr>
-                {% else %}
+                {{% else %}}
                 <tr><td colspan="5">Belum ada data viewer tercatat.</td></tr>
-                {% endfor %}
+                {{% endfor %}}
             </table>
         </div>
     </body>
@@ -284,26 +283,26 @@ def view_monitor():
             <br>
             <table>
                 <tr><th>ID</th><th>Username TikTok</th><th>Nama Channel</th><th>Status Realtime</th><th>Aksi</th></tr>
-                {% for h in hosts %}
+                {{% for h in hosts %}}
                 <tr>
-                    <td>{h[0]}</td>
-                    <td>@{h[1]}</td>
-                    <td>@{h[1]}</td>
+                    <td>{{ h[0] }}</td>
+                    <td>@{{ h[1] }}</td>
+                    <td>@{{ h[1] }}</td>
                     <td>
-                        {% if h[3] == 1 %}
+                        {{% if h[3] == 1 %}}
                         <span class="badge badge-active">🔴 Sedang Live</span>
-                        {% else %}
+                        {{% else %}}
                         <span class="badge badge-inactive">Offline</span>
-                        {% endif %}
+                        {{% endif %}}
                     </td>
                     <td>
-                        <a href="/admin/toggle-host/{h[0]}" class="btn-action btn-toggle">Ubah Status Active</a>
-                        <a href="/admin/delete-host/{h[0]}" class="btn-action btn-del" onclick="return confirm('Hapus target ini?')">Hapus</a>
+                        <a href="/admin/toggle-host/{{ h[0] }}" class="btn-action btn-toggle">Ubah Status Active</a>
+                        <a href="/admin/delete-host/{{ h[0] }}" class="btn-action btn-del" onclick="return confirm('Hapus target ini?')">Hapus</a>
                     </td>
                 </tr>
-                {% else %}
+                {{% else %}}
                 <tr><td colspan="5">Belum ada target terdaftar.</td></tr>
-                {% endfor %}
+                {{% endfor %}}
             </table>
         </div>
 
@@ -319,24 +318,24 @@ def view_monitor():
                     <th>Koin</th>
                     <th>Host Terjadwal</th>
                 </tr>
-                {% for s in sessions %}
+                {{% for s in sessions %}}
                 <tr>
-                    <td>@{s[1]}</td>
-                    <td>{s[2]}</td>
-                    <td>{s[3] or '🔴 Sedang Live'}</td>
+                    <td>@{{ s[1] }}</td>
+                    <td>{{ s[2] }}</td>
+                    <td>{{ s[3] or '🔴 Sedang Live' }}</td>
                     <td>
-                        {% if s[4] > 0 %}
-                        {s[4] // 3600}j {(s[4] % 3600) // 60}m {s[4] % 60}d
-                        {% else %}
+                        {{% if s[4] > 0 %}}
+                        {{ s[4] // 3600 }}j {{ (s[4] % 3600) // 60 }}m {{ s[4] % 60 }}d
+                        {{% else %}}
                         -
-                        {% endif %}
+                        {{% endif %}}
                     </td>
-                    <td><span class="badge">{s[5]} c</span></td>
-                    <td><strong>{s[6] or '-'}</strong></td>
+                    <td><span class="badge">{{ s[5] }} c</span></td>
+                    <td><strong>{{ s[6] or '-' }}</strong></td>
                 </tr>
-                {% else %}
+                {{% else %}}
                 <tr><td colspan="6">Belum ada histori sesi live.</td></tr>
-                {% endfor %}
+                {{% endfor %}}
             </table>
         </div>
     </body>
