@@ -143,7 +143,7 @@ def view_schedule():
                 {% for sc in schedules %}
                 <tr>
                     <td>@{{ sc[0] }}</td>
-                    <td>@{{ sc[0] }}</td>
+                    <td>{{ sc[1] or '@' ~ sc[0] }}</td>
                     <td><strong>{{ sc[2] }}</strong></td>
                     <td>{{ "%02d:00"|format(sc[3]) }} - {{ "%02d:00"|format(sc[4]) }} WIB</td>
                 </tr>
@@ -245,6 +245,7 @@ def view_monitor():
             SELECT 
                 h.host_id, 
                 h.tiktok_username, 
+                h.display_name,
                 h.is_active,
                 CASE WHEN a.tiktok_username IS NOT NULL THEN 1 ELSE 0 END as is_currently_live
             FROM hosts h
@@ -282,6 +283,7 @@ def view_monitor():
             <h2>🎙️ Akun Target TikTok</h2>
             <form action="/admin/add-host" method="POST" class="form-grid">
                 <input type="text" name="tiktok_username" placeholder="Username TikTok (@...)" required>
+                <input type="text" name="display_name" placeholder="Nama Channel (misal: George Vilora)" required>
                 <button type="submit">+ Tambah Target Host</button>
             </form>
             <br>
@@ -291,9 +293,9 @@ def view_monitor():
                 <tr>
                     <td>{{ h[0] }}</td>
                     <td>@{{ h[1] }}</td>
-                    <td>@{{ h[1] }}</td>
+                    <td>{{ h[2] or h[1] }}</td>
                     <td>
-                        {% if h[3] == 1 %}
+                        {% if h[4] == 1 %}
                         <a href="https://www.tiktok.com/@{{ h[1] }}/live" target="_blank" class="badge badge-active" title="Klik untuk nonton Live">🔴 Sedang Live ↗</a>
                         {% else %}
                         <span class="badge badge-inactive">Offline</span>
@@ -330,7 +332,7 @@ def view_monitor():
                         {% if s[3] %}
                         {{ s[3] }}
                         {% else %}
-                        <a href="https://www.tiktok.com/@{{ s[1] }}/live" target="_blank" class="badge badge-active">🔴 Sedang Live ↗</a>
+                        <span class="badge badge-active">🔴 Sedang Live</span>
                         {% endif %}
                     </td>
                     <td>
@@ -359,9 +361,10 @@ def view_monitor():
 @app.route('/admin/add-host', methods=['POST'])
 def add_host():
     username = request.form.get("tiktok_username", "").strip().lower().lstrip("@")
+    display_name = request.form.get("display_name", username).strip()
     if username:
         conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
-        conn.execute("INSERT OR REPLACE INTO hosts (tiktok_username, display_name, is_active) VALUES (?, ?, 1)", (username, username))
+        conn.execute("INSERT OR REPLACE INTO hosts (tiktok_username, display_name, is_active) VALUES (?, ?, 1)", (username, display_name))
         conn.commit()
         conn.close()
     return redirect('/admin/monitor')
@@ -421,6 +424,7 @@ def reset_db():
     conn.execute("DELETE FROM live_sessions")
     conn.execute("DELETE FROM tiktok_gifts")
     conn.execute("DELETE FROM daily_tiktok_gifts")
+    conn.execute("DELETE FROM active_live_announcements")
     conn.commit()
     conn.close()
     return redirect('/admin/data')
