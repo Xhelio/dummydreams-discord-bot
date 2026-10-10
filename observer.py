@@ -6,13 +6,11 @@ from db import (
     save_daily_gift_data, 
     start_live_session, 
     end_live_session, 
-    log_gift_transaction
+    log_gift_transaction,
+    get_active_hosts
 )
 
 async def start_single_observer(tiktok_username: str, announcement_callback, role_callback):
-    """
-    Fungsi dasar pengawas (observer) untuk 1 username TikTok.
-    """
     username_clean = tiktok_username.lower().lstrip("@")
     current_session_id = None
     client = TikTokLiveClient(unique_id=username_clean)
@@ -57,7 +55,6 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 gift_count=event.repeat_count,
                 coins=coins
             )
-            
             if role_callback:
                 await role_callback(user, total_coins)
 
@@ -68,10 +65,11 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             print(f"[{username_clean}] Observer error: {e}. Retrying in 15 seconds...")
             await asyncio.sleep(15)
 
-async def run_all_observers(target_users: list, announcement_callback, role_callback):
-    """
-    Menjalankan observer secara paralel untuk seluruh username dalam daftar.
-    """
+async def run_all_observers(announcement_callback, role_callback):
+    """Membaca daftar host aktif dari DB dan menjalankan observer secara paralel."""
+    target_users = get_active_hosts()
+    print(f"[Observer System] Initializing observers for hosts in DB: {target_users}")
+    
     tasks = []
     for username in target_users:
         tasks.append(
