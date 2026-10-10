@@ -7,8 +7,7 @@ TURSO_URL = os.environ.get("TURSO_DATABASE_URL")
 TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
 
 def get_db_connection():
-    # Perbaikan: gunakan url=TURSO_URL, bukan database=TURSO_URL
-    return libsql.connect(url=TURSO_URL, auth_token=TURSO_TOKEN)
+    return libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
 
 def init_db():
     conn = get_db_connection()
