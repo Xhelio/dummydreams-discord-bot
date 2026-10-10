@@ -3,7 +3,7 @@ from threading import Thread
 import os
 import json
 import libsql_experimental as libsql
-from db import get_shift_name, clean_expired_schedules_and_offlines
+from db import get_shift_name, clean_expired_schedules_and_offlines, get_all_host_names
 
 app = Flask('')
 
@@ -123,6 +123,8 @@ def view_data():
 @app.route('/admin/schedule', methods=['GET'])
 def view_schedule():
     clean_expired_schedules_and_offlines()
+    host_vars = get_all_host_names()
+
     try:
         conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
         cur = conn.cursor()
@@ -185,7 +187,12 @@ def view_schedule():
             <form action="/admin/add-schedule" method="POST" class="form-grid">
                 <input type="text" name="tiktok_username" placeholder="Username TikTok (@...)" required>
                 <input type="text" name="account_name" placeholder="Nama Channel" required>
-                <input type="text" name="host_name" placeholder="Nama Host (misal: SOLEN)" required>
+                <select name="host_name" required>
+                    <option value="" disabled selected>-- Pilih Variabel Host --</option>
+                    {% for hvar in host_vars %}
+                    <option value="{{ hvar }}">{{ hvar }}</option>
+                    {% endfor %}
+                </select>
                 <select name="shift_num" required>
                     <option value="1">Shift 1 (01:00 - 07:00 WIB)</option>
                     <option value="2">Shift 2 (07:00 - 13:00 WIB)</option>
@@ -211,7 +218,11 @@ def view_schedule():
                     <td><span class="badge">{{ sc.shift_label }}</span></td>
                     <td>
                         <form action="/admin/edit-schedule/{{ sc.id }}" method="POST" class="edit-form">
-                            <input type="text" name="host_name" value="{{ sc.host_name }}" style="width: 80px;" required>
+                            <select name="host_name" required>
+                                {% for hvar in host_vars %}
+                                <option value="{{ hvar }}" {% if hvar == sc.host_name %}selected{% endif %}>{{ hvar }}</option>
+                                {% endfor %}
+                            </select>
                             <select name="shift_num" required>
                                 <option value="1" {% if sc.start_hour == 1 %}selected{% endif %}>Shift 1</option>
                                 <option value="2" {% if sc.start_hour == 7 %}selected{% endif %}>Shift 2</option>
@@ -236,7 +247,12 @@ def view_schedule():
                 <input type="date" name="schedule_date" required>
                 <input type="text" name="tiktok_username" placeholder="Username TikTok (@...)" required>
                 <input type="text" name="account_name" placeholder="Nama Channel" required>
-                <input type="text" name="host_name" placeholder="Nama Host Pengganti" required>
+                <select name="host_name" required>
+                    <option value="" disabled selected>-- Pilih Host Pengganti --</option>
+                    {% for hvar in host_vars %}
+                    <option value="{{ hvar }}">{{ hvar }}</option>
+                    {% endfor %}
+                </select>
                 <select name="shift_num" required>
                     <option value="1">Shift 1 (01:00 - 07:00 WIB)</option>
                     <option value="2">Shift 2 (07:00 - 13:00 WIB)</option>
@@ -274,7 +290,12 @@ def view_schedule():
         <div class="card">
             <h2>🚫 Status Offline Host</h2>
             <form action="/admin/add-offline" method="POST" class="form-grid">
-                <input type="text" name="host_name" placeholder="Nama Host (misal: SOLEN)" required>
+                <select name="host_name" required>
+                    <option value="" disabled selected>-- Pilih Host Offline --</option>
+                    {% for hvar in host_vars %}
+                    <option value="{{ hvar }}">{{ hvar }}</option>
+                    {% endfor %}
+                </select>
                 <select name="offline_type" id="offType" onchange="toggleOffInputs()" required>
                     <option value="temporary">Sementara (Tanggal Tertentu)</option>
                     <option value="routine">Rutin (Seminggu Sekali)</option>
@@ -335,7 +356,7 @@ def view_schedule():
     </html>
     """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
     
-    return render_template_string(html, schedules=schedules, temp_schedules=temp_schedules, offlines=offlines)
+    return render_template_string(html, schedules=schedules, temp_schedules=temp_schedules, offlines=offlines, host_vars=host_vars)
 
 # --- Action Handlers untuk Shift & Offline ---
 
@@ -585,192 +606,4 @@ def view_monitor():
                     <td>{{ h[2] or h[1] }}</td>
                     <td>
                         {% if h[4] == 1 %}
-                        <a href="https://www.tiktok.com/@{{ h[1] }}/live" target="_blank" class="badge badge-active" title="Klik untuk nonton Live">🔴 Sedang Live ↗</a>
-                        {% else %}
-                        <span class="badge badge-inactive">Offline</span>
-                        {% endif %}
-                    </td>
-                    <td>
-                        <a href="/admin/toggle-host/{{ h[0] }}" class="btn-action btn-toggle">Ubah Status Active</a>
-                        <a href="/admin/delete-host/{{ h[0] }}" class="btn-action btn-del" onclick="return confirm('Hapus target ini?')">Hapus</a>
-                    </td>
-                </tr>
-                {% else %}
-                <tr><td colspan="5">Belum ada target terdaftar.</td></tr>
-                {% endfor %}
-            </table>
-        </div>
-
-        <div class="card">
-            <h2>📹 Riwayat Sesi Live</h2>
-            <table>
-                <tr>
-                    <th>Username (@)</th>
-                    <th>Mulai</th>
-                    <th>Selesai</th>
-                    <th>Durasi</th>
-                    <th>Koin</th>
-                    <th>Host Terjadwal</th>
-                </tr>
-                {% for s in sessions %}
-                <tr>
-                    <td>@{{ s[1] }}</td>
-                    <td>{{ s[2] }}</td>
-                    <td>
-                        {% if s[3] %}
-                            {{ s[3] }}
-                        {% elif s[7] == 1 %}
-                            <span class="badge badge-active">🔴 Sedang Live</span>
-                        {% else %}
-                            <span style="color: #94a3b8; font-style: italic;">Tidak ada data</span>
-                        {% endif %}
-                    </td>
-                    <td>
-                        {% if s[4] > 0 %}
-                            {{ s[4] // 3600 }}j {{ (s[4] % 3600) // 60 }}m {{ s[4] % 60 }}d
-                        {% else %}
-                            -
-                        {% endif %}
-                    </td>
-                    <td><span class="badge">{{ s[5] }} c</span></td>
-                    <td><strong>{{ s[6] or '-' }}</strong></td>
-                </tr>
-                {% else %}
-                <tr><td colspan="6">Belum ada histori sesi live.</td></tr>
-                {% endfor %}
-            </table>
-        </div>
-        AUTO_REFRESH_JS_PLACEHOLDER
-    </body>
-    </html>
-    """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
-    
-    return render_template_string(html, hosts=hosts, sessions=sessions)
-
-@app.route('/admin/add-host', methods=['POST'])
-def add_host():
-    username = request.form.get("tiktok_username", "").strip().lower().lstrip("@")
-    display_name = request.form.get("display_name", username).strip()
-    if username:
-        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
-        conn.execute("INSERT OR REPLACE INTO hosts (tiktok_username, display_name, is_active) VALUES (?, ?, 1)", (username, display_name))
-        conn.commit()
-        conn.close()
-    return redirect('/admin/monitor')
-
-@app.route('/admin/toggle-host/<int:host_id>')
-def toggle_host(host_id):
-    conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
-    conn.execute("UPDATE hosts SET is_active = CASE WHEN is_active = 1 THEN 0 ELSE 1 END WHERE host_id = ?", (host_id,))
-    conn.commit()
-    conn.close()
-    return redirect('/admin/monitor')
-
-@app.route('/admin/delete-host/<int:host_id>')
-def delete_host(host_id):
-    conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
-    conn.execute("DELETE FROM hosts WHERE host_id = ?", (host_id,))
-    conn.commit()
-    conn.close()
-    return redirect('/admin/monitor')
-
-@app.route('/admin/edit-coin', methods=['POST'])
-def edit_coin():
-    username = request.form.get("tiktok_user", "").strip().lower().lstrip("@")
-    new_coins = int(request.form.get("new_coins", 0))
-    if username:
-        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
-        conn.execute("UPDATE tiktok_gifts SET total_coins = ? WHERE tiktok_user = ?", (new_coins, username))
-        conn.commit()
-        conn.close()
-    return redirect('/admin/viewers')
-
-@app.route('/admin/reset-db', methods=['POST'])
-def reset_db():
-    conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
-    conn.execute("DELETE FROM gift_logs")
-    conn.execute("DELETE FROM live_sessions")
-    conn.execute("DELETE FROM tiktok_gifts")
-    conn.execute("DELETE FROM daily_tiktok_gifts")
-    conn.execute("DELETE FROM active_live_announcements")
-    conn.execute("DELETE FROM temp_schedules")
-    conn.execute("DELETE FROM host_offlines")
-    conn.commit()
-    conn.close()
-    return redirect('/admin/data')
-
-@app.route('/api/config', methods=['GET'])
-def get_bot_config():
-    secret_key = request.headers.get("X-API-KEY")
-    expected_key = os.environ.get("API_SECRET_KEY")
-
-    if expected_key and secret_key != expected_key:
-        return jsonify({"status": "error", "message": "Unauthorized"}), 401
-
-    target_username = request.args.get("username", "").lower()
-
-    try:
-        with open("config/config.json", "r") as f:
-            config_data = json.load(f)
-
-        accounts = config_data.get("accounts", [])
-
-        if target_username:
-            matched_acc = next((acc for acc in accounts if acc["tiktok_username"].lower() == target_username), None)
-            if matched_acc:
-                return jsonify({
-                    "account_name": matched_acc["account_name"],
-                    "tiktok_username": matched_acc["tiktok_username"],
-                    "default_name": config_data.get("default_name", "Host"),
-                    "summary_channel_id": config_data.get("summary_channel_id", 0),
-                    "overwrite_summary": config_data.get("overwrite_summary", True)
-                }), 200
-            return jsonify({"status": "error", "message": "Account not found"}), 404
-
-        return jsonify(config_data), 200
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@app.route('/api/heartbeat', methods=['POST'])
-def handle_heartbeat():
-    secret_key = request.headers.get("X-API-KEY")
-    expected_key = os.environ.get("API_SECRET_KEY")
-
-    if expected_key and secret_key != expected_key:
-        return jsonify({"status": "error", "message": "Unauthorized"}), 401
-
-    data = request.get_json() or {}
-    username = data.get("username", "unknown")
-    print(f"[API] Received heartbeat from worker for @{username}")
-    return jsonify({"status": "ok"}), 200
-
-@app.route('/api/announcement', methods=['POST'])
-def trigger_announcement():
-    data = request.get_json() or {}
-    secret_key = request.headers.get("X-API-KEY")
-    expected_key = os.environ.get("API_SECRET_KEY")
-
-    if expected_key and secret_key != expected_key:
-        return jsonify({"status": "error", "message": "Unauthorized"}), 401
-
-    username = data.get("username")
-    is_live = data.get("is_live")
-
-    if not username or is_live is None:
-        return jsonify({"status": "error", "message": "Missing username or is_live status"}), 400
-
-    if async_announcement_handler:
-        async_announcement_handler(username, is_live)
-        return jsonify({"status": "success", "message": f"Announcement triggered for @{username}"}), 200
-
-    return jsonify({"status": "error", "message": "Bot handler not ready"}), 500
-
-def run():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port, threaded=True)
-
-def keep_alive(handler_callback=None):
-    global async_announcement_handler
-    async_announcement_handler = handler_callback
-    t = Thread(target=run, daemon=True)
-    t.start()
+                        <a href="https://www.tiktok.com/@{{ h[1] }}/live" target="_blank" class="badge badge-active" title="Klik untuk nonton Live">
