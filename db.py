@@ -1,4 +1,5 @@
 import os
+import json
 import libsql_experimental as libsql
 from datetime import datetime
 import pytz
@@ -57,7 +58,8 @@ def init_db():
                 start_time TIMESTAMP NOT NULL,
                 end_time TIMESTAMP,
                 duration_seconds INTEGER DEFAULT 0,
-                total_coins INTEGER DEFAULT 0
+                total_coins INTEGER DEFAULT 0,
+                scheduled_host TEXT
             )
         """)
         conn.execute("""
@@ -77,27 +79,71 @@ def init_db():
             CREATE TABLE IF NOT EXISTS host_schedules (
                 schedule_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 tiktok_username TEXT NOT NULL,
-                shift_date TEXT NOT NULL,
-                shift_start_time TEXT,
-                shift_end_time TEXT,
-                status TEXT DEFAULT 'WORK',
-                UNIQUE(tiktok_username, shift_date)
+                account_name TEXT,
+                host_name TEXT NOT NULL,
+                start_hour INTEGER NOT NULL,
+                end_hour INTEGER NOT NULL,
+                UNIQUE(tiktok_username, host_name, start_hour)
             )
         """)
-        
-        # Masukkan data default jika tabel hosts masih kosong
+
         cur = conn.cursor()
+        
+        # Inisialisasi Akun TikTok Target
         cur.execute("SELECT COUNT(*) FROM hosts")
         if cur.fetchone()[0] == 0:
-            cur.execute("INSERT INTO hosts (tiktok_username, display_name) VALUES ('calissadreams', 'Clarissa')")
-            cur.execute("INSERT INTO hosts (tiktok_username, display_name) VALUES ('georgevilora', 'George')")
-        
+            cur.execute("INSERT INTO hosts (tiktok_username, display_name) VALUES ('clarissadreams', 'Jeremy Jeans')")
+            cur.execute("INSERT INTO hosts (tiktok_username, display_name) VALUES ('georgevilora', 'George Vilora')")
+
+        # Migrasi schedule.json ke Database jika host_schedules masih kosong
+        cur.execute("SELECT COUNT(*) FROM host_schedules")
+        if cur.fetchone()[0] == 0 and os.path.exists("schedule.json"):
+            try:
+                with open("schedule.json", "r") as f:
+                    sched_data = json.load(f)
+                for account_key, info in sched_data.items():
+                    acc_name = info.get("account_name", account_key)
+                    for h in info.get("hosts", []):
+                        cur.execute("""
+                            INSERT INTO host_schedules (tiktok_username, account_name, host_name, start_hour, end_hour)
+                            VALUES (?, ?, ?, ?, ?)
+                        """, (account_key.lower(), acc_name, h["name"], h["start_hour"], h["end_hour"]))
+            except Exception as e:
+                print(f"[DB Warning] Gagal migrasi schedule.json: {e}")
+
         conn.commit()
     finally:
         conn.close()
 
+def get_scheduled_host_name(tiktok_username: str, dt_obj: datetime = None) -> str:
+    """Mendapatkan nama host yang bertugas berdasarkan jam."""
+    if not dt_obj:
+        wib = pytz.timezone('Asia/Jakarta')
+        dt_obj = datetime.now(wib)
+    
+    current_hour = dt_obj.hour
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        rows = cur.execute("""
+            SELECT host_name, start_hour, end_hour 
+            FROM host_schedules 
+            WHERE tiktok_username = ?
+        """, (tiktok_username.lower(),)).fetchall()
+
+        for host_name, start_h, end_h in rows:
+            if start_h < end_h:
+                if start_h <= current_hour < end_h:
+                    return host_name
+            else:
+                # Menangani shift malam yang melewati tengah malam (misal 19.00 - 01.00)
+                if current_hour >= start_h or current_hour < end_h:
+                    return host_name
+        return "Host"
+    finally:
+        conn.close()
+
 def get_active_hosts() -> list:
-    """Mengambil daftar username TikTok aktif dari database."""
     conn = get_db_connection()
     try:
         cur = conn.cursor()
@@ -108,14 +154,17 @@ def get_active_hosts() -> list:
 
 def start_live_session(tiktok_username: str) -> int:
     wib = pytz.timezone('Asia/Jakarta')
-    now = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
+    now_dt = datetime.now(wib)
+    now_str = now_dt.strftime('%Y-%m-%d %H:%M:%S')
+    scheduled_host = get_scheduled_host_name(tiktok_username, now_dt)
+
     conn = get_db_connection()
     try:
         cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO live_sessions (tiktok_username, start_time) VALUES (?, ?)",
-            (tiktok_username.lower(), now)
-        )
+        cur.execute("""
+            INSERT INTO live_sessions (tiktok_username, start_time, scheduled_host) 
+            VALUES (?, ?, ?)
+        """, (tiktok_username.lower(), now_str, scheduled_host))
         conn.commit()
         return cur.lastrowid
     finally:
