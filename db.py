@@ -43,7 +43,6 @@ def get_all_host_names() -> list:
         conn.close()
 
 def get_active_hosts() -> list:
-    """Mendapatkan daftar username TikTok host yang berstatus aktif di database."""
     conn = get_db_connection()
     try:
         cur = conn.cursor()
@@ -104,16 +103,22 @@ def init_db():
                 scheduled_host TEXT
             )
         """)
+        
+        # Tabel log gift diperbarui sesuai kolom spesifik yang diminta
         conn.execute("""
             CREATE TABLE IF NOT EXISTS gift_logs (
                 log_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id INTEGER,
-                tiktok_username TEXT NOT NULL,
                 viewer_username TEXT NOT NULL,
                 viewer_display_name TEXT,
                 gift_name TEXT NOT NULL,
                 gift_count INTEGER DEFAULT 1,
                 coins INTEGER NOT NULL,
+                log_date TEXT NOT NULL,
+                log_time TEXT NOT NULL,
+                log_datetime TEXT NOT NULL,
+                target_username TEXT NOT NULL,
+                scheduled_host TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -153,10 +158,18 @@ def init_db():
             )
         """)
 
-        try:
-            conn.execute("ALTER TABLE live_sessions ADD COLUMN scheduled_host TEXT")
-        except Exception:
-            pass
+        # Migrasi kolom jika tabel lama sudah ada
+        for col, dtype in [
+            ("log_date", "TEXT"),
+            ("log_time", "TEXT"),
+            ("log_datetime", "TEXT"),
+            ("target_username", "TEXT"),
+            ("scheduled_host", "TEXT")
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE gift_logs ADD COLUMN {col} {dtype}")
+            except Exception:
+                pass
 
         cur = conn.cursor()
         
@@ -164,45 +177,6 @@ def init_db():
         if cur.fetchone()[0] == 0:
             cur.execute("INSERT INTO hosts (tiktok_username, display_name) VALUES ('clarissadreams', 'Jeremy Jeans')")
             cur.execute("INSERT INTO hosts (tiktok_username, display_name) VALUES ('georgevilora', 'George Vilora')")
-
-        cur.execute("SELECT COUNT(*) FROM host_schedules")
-        if cur.fetchone()[0] == 0:
-            schedule_path = os.path.join("config", "schedule.json")
-            if not os.path.exists(schedule_path):
-                schedule_path = "schedule.json"
-
-            loaded_from_json = False
-            if os.path.exists(schedule_path):
-                try:
-                    with open(schedule_path, "r") as f:
-                        sched_data = json.load(f)
-                    for account_key, info in sched_data.items():
-                        acc_name = info.get("account_name", account_key)
-                        for h in info.get("hosts", []):
-                            cur.execute("""
-                                INSERT OR IGNORE INTO host_schedules (tiktok_username, account_name, host_name, start_hour, end_hour)
-                                VALUES (?, ?, ?, ?, ?)
-                            """, (account_key.lower(), acc_name, h["name"], h["start_hour"], h["end_hour"]))
-                    loaded_from_json = True
-                except Exception:
-                    pass
-
-            if not loaded_from_json:
-                default_schedules = [
-                    ("clarissadreams", "Jeremy Jeans", "SOLEN", 1, 7),
-                    ("clarissadreams", "Jeremy Jeans", "ZIZE", 7, 13),
-                    ("clarissadreams", "Jeremy Jeans", "YOSA", 13, 19),
-                    ("clarissadreams", "Jeremy Jeans", "IELYA", 19, 1),
-                    ("georgevilora", "George Vilora", "YUCA", 1, 7),
-                    ("georgevilora", "George Vilora", "SINTA", 7, 13),
-                    ("georgevilora", "George Vilora", "COLE", 13, 19),
-                    ("georgevilora", "George Vilora", "LUNA", 19, 1),
-                ]
-                for username, acc_name, host_name, start_h, end_h in default_schedules:
-                    cur.execute("""
-                        INSERT OR IGNORE INTO host_schedules (tiktok_username, account_name, host_name, start_hour, end_hour)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (username, acc_name, host_name, start_h, end_h))
 
         conn.commit()
     finally:
@@ -230,8 +204,6 @@ def clean_expired_schedules_and_offlines():
                     cur.execute("DELETE FROM temp_schedules WHERE temp_id = ?", (temp_id,))
 
         cur.execute("DELETE FROM host_offlines WHERE offline_type = 'temporary' AND offline_date < ?", (today_str,))
-        
-        # Bersihkan otomatis sesi-sesi usang tanpa koin
         cur.execute("DELETE FROM live_sessions WHERE end_time IS NULL AND total_coins = 0 AND datetime(start_time) < datetime('now', '-30 minutes')")
         
         conn.commit()
@@ -371,14 +343,50 @@ def end_live_session(session_id: int):
     finally:
         conn.close()
 
-def log_gift_transaction(session_id: int, host_user: str, viewer_user: str, viewer_display: str, gift_name: str, gift_count: int, coins: int):
+def log_gift_transaction(session_id: int, target_user: str, viewer_user: str, viewer_display: str, gift_name: str, gift_count: int, coins: int):
+    """Mencatat log gift secara terperinci sesuai waktu WIB & host terjadwal."""
+    wib = pytz.timezone('Asia/Jakarta')
+    now_dt = datetime.now(wib)
+    
+    log_date = now_dt.strftime('%Y-%m-%d')
+    log_time = now_dt.strftime('%H:%M:%S')
+    log_datetime = now_dt.strftime('%Y-%m-%d %H:%M:%S')
+    
+    target_clean = target_user.lower()
+    scheduled_host = get_scheduled_host_name(target_clean, now_dt)
+
     conn = get_db_connection()
     try:
         cur = conn.cursor()
         cur.execute("""
-            INSERT INTO gift_logs (session_id, tiktok_username, viewer_username, viewer_display_name, gift_name, gift_count, coins)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (session_id, host_user.lower(), viewer_user.lower(), viewer_display, gift_name, gift_count, coins))
+            INSERT INTO gift_logs (
+                session_id, 
+                viewer_username, 
+                viewer_display_name, 
+                gift_name, 
+                gift_count, 
+                coins, 
+                log_date, 
+                log_time, 
+                log_datetime, 
+                target_username, 
+                scheduled_host
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            session_id, 
+            viewer_user.lower(), 
+            viewer_display, 
+            gift_name, 
+            gift_count, 
+            coins, 
+            log_date, 
+            log_time, 
+            log_datetime, 
+            target_clean, 
+            scheduled_host
+        ))
+        
         if session_id:
             cur.execute("UPDATE live_sessions SET total_coins = total_coins + ? WHERE session_id = ?", (coins, session_id))
         conn.commit()
