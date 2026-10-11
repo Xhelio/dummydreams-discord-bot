@@ -510,13 +510,21 @@ def view_viewer_detail(tiktok_user):
             ORDER BY date DESC
         """, (user_clean,)).fetchall()
 
+        # Query log gift diperbarui sesuai kolom-kolom baru
         gift_logs = cur.execute("""
-            SELECT gift_name, gift_count, coins, created_at, tiktok_username
+            SELECT 
+                COALESCE(log_date, created_at) as log_date,
+                COALESCE(log_time, '') as log_time,
+                gift_name, 
+                gift_count, 
+                coins, 
+                COALESCE(target_username, '-') as target_username, 
+                COALESCE(scheduled_host, '-') as scheduled_host
             FROM gift_logs
-            WHERE tiktok_username = ? OR viewer_username = ?
-            ORDER BY created_at DESC
+            WHERE viewer_username = ?
+            ORDER BY log_datetime DESC, created_at DESC
             LIMIT 50
-        """, (user_clean, user_clean)).fetchall()
+        """, (user_clean,)).fetchall()
 
         conn.close()
     except Exception as e:
@@ -571,22 +579,30 @@ def view_viewer_detail(tiktok_user):
             <h2>🎁 Log Kiriman Gift Terbaru</h2>
             <table>
                 <tr>
-                    <th>Waktu</th>
+                    <th>Tanggal & Waktu</th>
                     <th>Nama Gift</th>
                     <th>Jumlah</th>
                     <th>Koin</th>
-                    <th>Channel Live</th>
+                    <th>Akun Target Spent</th>
+                    <th>Host Terjadwal</th>
                 </tr>
                 {% for g in gift_logs %}
                 <tr>
-                    <td>{{ g[3] }}</td>
-                    <td><strong>{{ g[0] }}</strong></td>
-                    <td>{{ g[1] }}x</td>
-                    <td><span class="badge">{{ g[2] }} c</span></td>
-                    <td>@{{ g[4] }}</td>
+                    <td>{{ g[0] }} {{ g[1] }}</td>
+                    <td><strong>{{ g[2] }}</strong></td>
+                    <td>{{ g[3] }}x</td>
+                    <td><span class="badge">{{ g[4] }} c</span></td>
+                    <td>@{{ g[5] }}</td>
+                    <td>
+                        {% if g[6] != '-' and g[6] != 'Host' %}
+                            <a href="/admin/host/{{ g[6] }}" class="host-link" title="Klik untuk lihat riwayat shift">{{ g[6] }} ↗</a>
+                        {% else %}
+                            <strong>{{ g[6] }}</strong>
+                        {% endif %}
+                    </td>
                 </tr>
                 {% else %}
-                <tr><td colspan="5">Belum ada histori gift tercatat.</td></tr>
+                <tr><td colspan="6">Belum ada histori gift tercatat.</td></tr>
                 {% endfor %}
             </table>
         </div>
