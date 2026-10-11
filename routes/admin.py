@@ -407,9 +407,10 @@ def view_viewers():
                 g.tiktok_user, 
                 g.display_name, 
                 g.total_coins,
-                a.tiktok_username as active_channel
+                COALESCE(a.tiktok_username, s.tiktok_username) as active_channel
             FROM tiktok_gifts g
-            LEFT JOIN active_live_announcements a ON g.tiktok_user = a.tiktok_username
+            LEFT JOIN active_live_announcements a ON LOWER(g.tiktok_user) = LOWER(a.tiktok_username)
+            LEFT JOIN live_sessions s ON LOWER(g.tiktok_user) = LOWER(s.tiktok_username) AND s.end_time IS NULL
             ORDER BY g.total_coins DESC
         """).fetchall()
         conn.close()
@@ -489,7 +490,7 @@ def view_viewer_detail(tiktok_user):
         viewer_row = cur.execute("""
             SELECT display_name, total_coins 
             FROM tiktok_gifts 
-            WHERE tiktok_user = ?
+            WHERE LOWER(tiktok_user) = ?
         """, (user_clean,)).fetchone()
 
         display_name = viewer_row[0] if viewer_row and viewer_row[0] else user_clean
@@ -498,7 +499,7 @@ def view_viewer_detail(tiktok_user):
         today_row = cur.execute("""
             SELECT coins 
             FROM daily_tiktok_gifts 
-            WHERE tiktok_user = ? AND date = ?
+            WHERE LOWER(tiktok_user) = ? AND date = ?
         """, (user_clean, today_str)).fetchone()
 
         today_coins = today_row[0] if today_row else 0
@@ -506,11 +507,10 @@ def view_viewer_detail(tiktok_user):
         daily_history = cur.execute("""
             SELECT date, coins 
             FROM daily_tiktok_gifts 
-            WHERE tiktok_user = ?
+            WHERE LOWER(tiktok_user) = ?
             ORDER BY date DESC
         """, (user_clean,)).fetchall()
 
-        # Query log gift diperbarui sesuai kolom-kolom baru
         gift_logs = cur.execute("""
             SELECT 
                 COALESCE(log_date, created_at) as log_date,
@@ -521,7 +521,7 @@ def view_viewer_detail(tiktok_user):
                 COALESCE(target_username, '-') as target_username, 
                 COALESCE(scheduled_host, '-') as scheduled_host
             FROM gift_logs
-            WHERE viewer_username = ?
+            WHERE LOWER(viewer_username) = ?
             ORDER BY log_datetime DESC, created_at DESC
             LIMIT 50
         """, (user_clean,)).fetchall()
@@ -634,9 +634,13 @@ def view_monitor():
                 h.tiktok_username, 
                 h.display_name,
                 h.is_active,
-                CASE WHEN a.tiktok_username IS NOT NULL THEN 1 ELSE 0 END as is_currently_live
+                CASE 
+                    WHEN a.tiktok_username IS NOT NULL OR s.session_id IS NOT NULL THEN 1 
+                    ELSE 0 
+                END as is_currently_live
             FROM hosts h
-            LEFT JOIN active_live_announcements a ON h.tiktok_username = a.tiktok_username
+            LEFT JOIN active_live_announcements a ON LOWER(h.tiktok_username) = LOWER(a.tiktok_username)
+            LEFT JOIN live_sessions s ON LOWER(h.tiktok_username) = LOWER(s.tiktok_username) AND s.end_time IS NULL
             ORDER BY h.host_id ASC
         """).fetchall()
 
@@ -649,9 +653,12 @@ def view_monitor():
                 s.duration_seconds, 
                 s.total_coins, 
                 s.scheduled_host,
-                CASE WHEN a.tiktok_username IS NOT NULL THEN 1 ELSE 0 END as is_live_now
+                CASE 
+                    WHEN a.tiktok_username IS NOT NULL OR s.end_time IS NULL THEN 1 
+                    ELSE 0 
+                END as is_live_now
             FROM live_sessions s
-            LEFT JOIN active_live_announcements a ON s.tiktok_username = a.tiktok_username
+            LEFT JOIN active_live_announcements a ON LOWER(s.tiktok_username) = LOWER(a.tiktok_username)
             ORDER BY s.start_time DESC
         """).fetchall()
 
@@ -794,7 +801,7 @@ def edit_coin():
     new_coins = int(request.form.get("new_coins", 0))
     if username:
         conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
-        conn.execute("UPDATE tiktok_gifts SET total_coins = ? WHERE tiktok_user = ?", (new_coins, username))
+        conn.execute("UPDATE tiktok_gifts SET total_coins = ? WHERE LOWER(tiktok_user) = ?", (new_coins, username))
         conn.commit()
         conn.close()
     return redirect('/admin/viewers')
