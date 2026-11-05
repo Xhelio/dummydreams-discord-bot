@@ -1,12 +1,24 @@
 {
   "accounts": [
     {
+      "account_name": "Jeremy Jean",
+      "tiktok_username": "clarissadreams"
+    },
+    {
       "account_name": "George Vilora",
       "tiktok_username": "georgevilora"
     },
     {
-      "account_name": "Jeremy Jenas",
-      "tiktok_username": "clarissadreams"
+      "account_name": "Stefanny Alisha",
+      "tiktok_username": "steffannyalisha"
+    },
+    {
+      "account_name": "Julianne",
+      "tiktok_username": "juliannedreams"
+    },
+    {
+      "account_name": "Frank Lynn",
+      "tiktok_username": "franklyndreams"
     }
   ],
   "default_name": "Host",

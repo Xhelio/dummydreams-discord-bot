@@ -1,9 +1,12 @@
 from flask import Blueprint, render_template_string, request, redirect
 import os
-import libsql_experimental as libsql
+try:
+    import libsql_experimental as libsql
+except ImportError:
+    import sqlite3 as libsql
 import pytz
 from datetime import datetime
-from db import get_shift_name, clean_expired_schedules_and_offlines, get_all_host_names
+from db import get_shift_name, clean_expired_schedules_and_offlines, get_all_host_names, get_activity_logs, clear_activity_logs, get_active_hosts
 from styles import BASE_CSS, NAV_HTML, AUTO_REFRESH_JS
 
 admin_bp = Blueprint('admin', __name__, url_prefix='/admin')
@@ -905,6 +908,91 @@ def delete_offline(off_id):
     conn.close()
     return redirect('/admin/schedule')
 
+
+@admin_bp.route('/activity', methods=['GET'])
+def view_activity():
+    channel_filter = request.args.get("channel", "").strip().lower().lstrip("@")
+    logs = get_activity_logs(limit=250, channel_filter=channel_filter)
+    all_hosts = get_active_hosts()
+    if not all_hosts:
+        all_hosts = ['clarissadreams', 'georgevilora', 'steffannyalisha', 'juliannedreams', 'franklyndreams']
+
+    html = """
+    <!DOCTYPE html>
+    <html lang="id">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Log Activity Realtime</title>
+        <style>BASE_CSS_PLACEHOLDER</style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>📊 Log Activity Realtime</h1>
+            <div style="display: flex; gap: 10px; align-items: center;">
+                <form action="/admin/clear-activity-logs" method="POST" onsubmit="return confirm('Bersihkan seluruh log activity?');" style="margin: 0;">
+                    <button type="submit" class="btn-danger" style="padding: 6px 12px; font-size: 0.8rem;">🗑️ Bersihkan Log</button>
+                </form>
+            </div>
+        </div>
+        NAV_HTML_PLACEHOLDER
+
+        <div class="card" style="margin-bottom: 16px; padding: 14px 20px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                <form method="GET" action="/admin/activity" style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                    <label for="channel_filter" style="font-size: 0.875rem; color: #94a3b8; font-weight: 500;">Filter Akun Channel:</label>
+                    <select name="channel" id="channel_filter" onchange="this.form.submit()" style="padding: 6px 10px; min-width: 220px;">
+                        <option value="" {% if not current_filter %}selected{% endif %}>🌐 Semua Akun (5 Target)</option>
+                        {% for h in all_hosts %}
+                        <option value="{{ h }}" {% if current_filter == h %}selected{% endif %}>@{{ h }}</option>
+                        {% endfor %}
+                    </select>
+                    {% if current_filter %}
+                    <a href="/admin/activity" class="btn-action" style="background: #334155; color: white;">Reset Filter</a>
+                    {% endif %}
+                </form>
+                <div style="color: #94a3b8; font-size: 0.85rem;">
+                    Menampilkan <strong>{{ logs|length }}</strong> baris aktivitas terbaru
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>📜 Live Activity Feed</h2>
+            <div class="terminal-container" id="terminal-feed">
+                {% for log in logs %}
+                <div class="terminal-row">
+                    <span style="color: #64748b; font-size: 0.75rem; min-width: 140px;">[{{ log[4] }}]</span>
+                    {% if log[1] == 'connect' %}
+                        <span class="log-tag-connect">CONNECT</span>
+                        <span style="color: #4ade80; font-weight: 600;">{{ log[3] }}</span>
+                    {% elif log[1] == 'disconnect' %}
+                        <span class="log-tag-disconnect">DISCONNECT</span>
+                        <span style="color: #f87171; font-weight: 600;">{{ log[3] }}</span>
+                    {% else %}
+                        <span class="log-tag-gift">🎁 GIFT</span>
+                        <span style="color: #f8fafc;">{{ log[3] }}</span>
+                    {% endif %}
+                </div>
+                {% else %}
+                <div style="color: #64748b; font-style: italic; padding: 24px; text-align: center;">
+                    Belum ada aktivitas yang tercatat. Sistem standby memantau 5 akun target: @clarissadreams, @georgevilora, @steffannyalisha, @juliannedreams, @franklyndreams.
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        AUTO_REFRESH_JS_PLACEHOLDER
+    </body>
+    </html>
+    """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
+    return render_template_string(html, logs=logs, all_hosts=all_hosts, current_filter=channel_filter)
+
+@admin_bp.route('/clear-activity-logs', methods=['POST'])
+def clear_activity():
+    clear_activity_logs()
+    return redirect('/admin/activity')
+
 @admin_bp.route('/reset-db', methods=['POST'])
 def reset_db():
     conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
@@ -915,6 +1003,7 @@ def reset_db():
     conn.execute("DELETE FROM active_live_announcements")
     conn.execute("DELETE FROM temp_schedules")
     conn.execute("DELETE FROM host_offlines")
+    conn.execute("DELETE FROM activity_logs")
     conn.commit()
     conn.close()
     return redirect('/admin/data')

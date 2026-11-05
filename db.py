@@ -1,14 +1,35 @@
 import os
 import json
-import libsql_experimental as libsql
-from datetime import datetime, timedelta
-import pytz
+try:
+    import libsql_experimental as libsql
+    HAS_LIBSQL = True
+except ImportError:
+    import sqlite3 as libsql
+    HAS_LIBSQL = False
 
 TURSO_URL = os.environ.get("TURSO_DATABASE_URL")
 TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
 
 def get_db_connection():
-    return libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+    if HAS_LIBSQL and TURSO_URL:
+        return libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+    import sqlite3
+    db_file = os.environ.get("LOCAL_DB_PATH", "database.db")
+    return sqlite3.connect(db_file)
+from datetime import datetime, timedelta
+import pytz
+
+def check_database_health() -> bool:
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        row = cur.fetchone()
+        conn.close()
+        return bool(row and row[0] == 1)
+    except Exception as e:
+        print(f"[HealthCheck Error] {e}")
+        return False
 
 def get_shift_hours(shift_num: int):
     shifts = {
@@ -158,6 +179,17 @@ def init_db():
             )
         """)
 
+        # Tabel Log Activity untuk event koneksi, diskoneksi, dan gift
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS activity_logs (
+                log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                tiktok_username TEXT NOT NULL,
+                message TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+
         # Migrasi kolom jika tabel lama sudah ada
         for col, dtype in [
             ("log_date", "TEXT"),
@@ -173,11 +205,119 @@ def init_db():
 
         cur = conn.cursor()
         
-        cur.execute("SELECT COUNT(*) FROM hosts")
-        if cur.fetchone()[0] == 0:
-            cur.execute("INSERT INTO hosts (tiktok_username, display_name) VALUES ('clarissadreams', 'Jeremy Jeans')")
-            cur.execute("INSERT INTO hosts (tiktok_username, display_name) VALUES ('georgevilora', 'George Vilora')")
+        # 5 Target Hosts Default:
+        # @clarissadreams(Jeremy Jean)
+        # @georgevilora(George Vilora)
+        # @steffannyalisha(Stefanny Alisha)
+        # @juliannedreams(Julianne)
+        # @franklyndreams(Frank Lynn)
+        default_targets = [
+            ('clarissadreams', 'Jeremy Jean'),
+            ('georgevilora', 'George Vilora'),
+            ('steffannyalisha', 'Stefanny Alisha'),
+            ('juliannedreams', 'Julianne'),
+            ('franklyndreams', 'Frank Lynn')
+        ]
+        for uname, dname in default_targets:
+            cur.execute("""
+                INSERT INTO hosts (tiktok_username, display_name, is_active)
+                VALUES (?, ?, 1)
+                ON CONFLICT(tiktok_username) DO UPDATE SET 
+                    display_name = excluded.display_name,
+                    is_active = 1
+            """, (uname, dname))
 
+        conn.commit()
+    finally:
+        conn.close()
+
+def log_activity_event(event_type: str, message: str, tiktok_username: str = ""):
+    """Mencatat aktivitas koneksi / diskoneksi / gift ke tabel activity_logs."""
+    wib = pytz.timezone('Asia/Jakarta')
+    now_dt = datetime.now(wib)
+    now_str = now_dt.strftime('%Y-%m-%d %H:%M:%S')
+    user_clean = tiktok_username.lower().lstrip("@")
+    
+    conn = get_db_connection()
+    try:
+        conn.execute("""
+            INSERT INTO activity_logs (event_type, tiktok_username, message, created_at)
+            VALUES (?, ?, ?, ?)
+        """, (event_type, user_clean, message, now_str))
+        conn.commit()
+    except Exception as e:
+        print(f"[ActivityLog Error] Failed to log event: {e}")
+    finally:
+        conn.close()
+
+def get_user_channel_spent(viewer_user: str, target_user: str) -> int:
+    """Menghitung total koin yang sudah di-spent oleh viewer di target channel ini."""
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        row = cur.execute("""
+            SELECT COALESCE(SUM(coins), 0) FROM gift_logs 
+            WHERE LOWER(viewer_username) = ? AND LOWER(target_username) = ?
+        """, (viewer_user.lower().lstrip("@"), target_user.lower().lstrip("@"))).fetchone()
+        return row[0] if row else 0
+    finally:
+        conn.close()
+
+def get_user_today_spent(viewer_user: str, date_str: str = "") -> int:
+    """Menghitung total koin yang sudah di-spent oleh viewer hari ini."""
+    if not date_str:
+        wib = pytz.timezone('Asia/Jakarta')
+        date_str = datetime.now(wib).strftime('%Y-%m-%d')
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        row = cur.execute("""
+            SELECT COALESCE(coins, 0) FROM daily_tiktok_gifts 
+            WHERE LOWER(tiktok_user) = ? AND date = ?
+        """, (viewer_user.lower().lstrip("@"), date_str)).fetchone()
+        return row[0] if row else 0
+    finally:
+        conn.close()
+
+def get_user_total_spent(viewer_user: str) -> int:
+    """Menghitung total koin keseluruhan yang sudah di-spent oleh viewer di database."""
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        row = cur.execute("""
+            SELECT COALESCE(total_coins, 0) FROM tiktok_gifts 
+            WHERE LOWER(tiktok_user) = ?
+        """, (viewer_user.lower().lstrip("@"),)).fetchone()
+        return row[0] if row else 0
+    finally:
+        conn.close()
+
+def get_activity_logs(limit: int = 150, channel_filter: str = "") -> list:
+    """Mengambil riwayat log aktivitas terbaru."""
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        if channel_filter:
+            rows = cur.execute("""
+                SELECT log_id, event_type, tiktok_username, message, created_at 
+                FROM activity_logs 
+                WHERE LOWER(tiktok_username) = ? 
+                ORDER BY log_id DESC LIMIT ?
+            """, (channel_filter.lower().lstrip("@"), limit)).fetchall()
+        else:
+            rows = cur.execute("""
+                SELECT log_id, event_type, tiktok_username, message, created_at 
+                FROM activity_logs 
+                ORDER BY log_id DESC LIMIT ?
+            """, (limit,)).fetchall()
+        return rows
+    finally:
+        conn.close()
+
+def clear_activity_logs():
+    conn = get_db_connection()
+    try:
+        conn.execute("DELETE FROM activity_logs")
         conn.commit()
     finally:
         conn.close()

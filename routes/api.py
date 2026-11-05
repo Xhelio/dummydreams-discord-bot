@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify
 import os
 import json
+from db import check_database_health
 
 api_bp = Blueprint('api', __name__, url_prefix='/api')
 async_announcement_handler = None
@@ -8,6 +9,23 @@ async_announcement_handler = None
 def set_announcement_handler(handler):
     global async_announcement_handler
     async_announcement_handler = handler
+
+@api_bp.route('/health', methods=['GET'])
+def health_check():
+    """Endpoint status kesehatan untuk indikator website stabil."""
+    db_ok = check_database_health()
+    if db_ok:
+        return jsonify({
+            "status": "ok",
+            "message": "Website Stabil",
+            "database": "connected"
+        }), 200
+    else:
+        return jsonify({
+            "status": "warning",
+            "message": "Website Terhubung (Database Reconnecting)",
+            "database": "error"
+        }), 200
 
 @api_bp.route('/config', methods=['GET'])
 def get_bot_config():
