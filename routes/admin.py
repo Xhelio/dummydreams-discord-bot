@@ -6,7 +6,7 @@ except ImportError:
     import sqlite3 as libsql
 import pytz
 from datetime import datetime
-from db import get_shift_name, clean_expired_schedules_and_offlines, get_all_host_names, get_activity_logs, clear_activity_logs, get_active_hosts
+from db import get_db_connection, get_shift_name, clean_expired_schedules_and_offlines, get_all_host_names, get_activity_logs, clear_activity_logs, get_active_hosts
 from styles import BASE_CSS, NAV_HTML, AUTO_REFRESH_JS
 
 admin_bp = Blueprint('admin', __name__, url_prefix='/admin')
@@ -56,7 +56,7 @@ def view_schedule():
     host_vars = get_all_host_names()
 
     try:
-        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+        conn = get_db_connection()
         cur = conn.cursor()
 
         schedules_raw = cur.execute("""
@@ -291,7 +291,7 @@ def view_schedule():
 def view_host_detail(host_name):
     host_name_upper = host_name.strip().upper()
     try:
-        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+        conn = get_db_connection()
         cur = conn.cursor()
 
         stats = cur.execute("""
@@ -403,7 +403,7 @@ def view_host_detail(host_name):
 @admin_bp.route('/viewers', methods=['GET'])
 def view_viewers():
     try:
-        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+        conn = get_db_connection()
         cur = conn.cursor()
         viewers = cur.execute("""
             SELECT 
@@ -487,7 +487,7 @@ def view_viewer_detail(tiktok_user):
     today_str = datetime.now(wib).strftime('%Y-%m-%d')
 
     try:
-        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+        conn = get_db_connection()
         cur = conn.cursor()
 
         viewer_row = cur.execute("""
@@ -628,7 +628,7 @@ def view_viewer_detail(tiktok_user):
 @admin_bp.route('/monitor', methods=['GET'])
 def view_monitor():
     try:
-        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+        conn = get_db_connection()
         cur = conn.cursor()
 
         hosts = cur.execute("""
@@ -776,7 +776,7 @@ def add_host():
     username = request.form.get("tiktok_username", "").strip().lower().lstrip("@")
     display_name = request.form.get("display_name", username).strip()
     if username:
-        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+        conn = get_db_connection()
         conn.execute("INSERT OR REPLACE INTO hosts (tiktok_username, display_name, is_active) VALUES (?, ?, 1)", (username, display_name))
         conn.commit()
         conn.close()
@@ -784,7 +784,7 @@ def add_host():
 
 @admin_bp.route('/toggle-host/<int:host_id>')
 def toggle_host(host_id):
-    conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+    conn = get_db_connection()
     conn.execute("UPDATE hosts SET is_active = CASE WHEN is_active = 1 THEN 0 ELSE 1 END WHERE host_id = ?", (host_id,))
     conn.commit()
     conn.close()
@@ -792,7 +792,7 @@ def toggle_host(host_id):
 
 @admin_bp.route('/delete-host/<int:host_id>')
 def delete_host(host_id):
-    conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+    conn = get_db_connection()
     conn.execute("DELETE FROM hosts WHERE host_id = ?", (host_id,))
     conn.commit()
     conn.close()
@@ -803,7 +803,7 @@ def edit_coin():
     username = request.form.get("tiktok_user", "").strip().lower().lstrip("@")
     new_coins = int(request.form.get("new_coins", 0))
     if username:
-        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+        conn = get_db_connection()
         conn.execute("UPDATE tiktok_gifts SET total_coins = ? WHERE LOWER(tiktok_user) = ?", (new_coins, username))
         conn.commit()
         conn.close()
@@ -820,7 +820,7 @@ def add_schedule():
     start_h, end_h = shifts_map.get(shift_num, (1, 7))
 
     if username and host_name:
-        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+        conn = get_db_connection()
         conn.execute("""
             INSERT OR REPLACE INTO host_schedules (tiktok_username, account_name, host_name, start_hour, end_hour)
             VALUES (?, ?, ?, ?, ?)
@@ -838,7 +838,7 @@ def edit_schedule(sched_id):
     start_h, end_h = shifts_map.get(shift_num, (1, 7))
 
     if host_name:
-        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+        conn = get_db_connection()
         conn.execute("""
             UPDATE host_schedules 
             SET host_name = ?, start_hour = ?, end_hour = ?
@@ -850,7 +850,7 @@ def edit_schedule(sched_id):
 
 @admin_bp.route('/delete-schedule/<int:sched_id>')
 def delete_schedule(sched_id):
-    conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+    conn = get_db_connection()
     conn.execute("DELETE FROM host_schedules WHERE schedule_id = ?", (sched_id,))
     conn.commit()
     conn.close()
@@ -865,7 +865,7 @@ def add_temp_schedule():
     shift_num = int(request.form.get("shift_num", 1))
 
     if sched_date and username and host_name:
-        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+        conn = get_db_connection()
         conn.execute("""
             INSERT OR REPLACE INTO temp_schedules (schedule_date, tiktok_username, account_name, host_name, shift_num)
             VALUES (?, ?, ?, ?, ?)
@@ -876,7 +876,7 @@ def add_temp_schedule():
 
 @admin_bp.route('/delete-temp-schedule/<int:temp_id>')
 def delete_temp_schedule(temp_id):
-    conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+    conn = get_db_connection()
     conn.execute("DELETE FROM temp_schedules WHERE temp_id = ?", (temp_id,))
     conn.commit()
     conn.close()
@@ -891,7 +891,7 @@ def add_offline():
     note = request.form.get("note", "").strip()
 
     if host_name:
-        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+        conn = get_db_connection()
         conn.execute("""
             INSERT INTO host_offlines (host_name, offline_type, offline_date, offline_day, note)
             VALUES (?, ?, ?, ?, ?)
@@ -902,7 +902,7 @@ def add_offline():
 
 @admin_bp.route('/delete-offline/<int:off_id>')
 def delete_offline(off_id):
-    conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+    conn = get_db_connection()
     conn.execute("DELETE FROM host_offlines WHERE offline_id = ?", (off_id,))
     conn.commit()
     conn.close()
@@ -995,7 +995,7 @@ def clear_activity():
 
 @admin_bp.route('/reset-db', methods=['POST'])
 def reset_db():
-    conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+    conn = get_db_connection()
     conn.execute("DELETE FROM gift_logs")
     conn.execute("DELETE FROM live_sessions")
     conn.execute("DELETE FROM tiktok_gifts")

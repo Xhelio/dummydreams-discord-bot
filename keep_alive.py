@@ -1,7 +1,7 @@
 from flask import Flask, render_template_string, request, jsonify
 from threading import Thread
 import os
-import libsql_experimental as libsql
+from db import get_db_connection
 
 app = Flask('')
 
@@ -19,7 +19,7 @@ def home():
 @app.route('/admin/data', methods=['GET'])
 def view_data():
     try:
-        conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+        conn = get_db_connection()
         cur = conn.cursor()
 
         gifts = cur.execute("SELECT tiktok_user, display_name, total_coins FROM tiktok_gifts ORDER BY total_coins DESC").fetchall()

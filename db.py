@@ -190,6 +190,26 @@ def init_db():
             )
         """)
 
+        # Tabel Verifikasi Akun TikTok Pending
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pending_verifications (
+                discord_id INTEGER PRIMARY KEY,
+                tiktok_user TEXT NOT NULL,
+                code TEXT NOT NULL,
+                method TEXT DEFAULT 'bio',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP NOT NULL
+            )
+        """)
+
+        # Tabel Pengaturan Bot & Role
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
+
         # Migrasi kolom jika tabel lama sudah ada
         for col, dtype in [
             ("log_date", "TEXT"),
@@ -585,5 +605,203 @@ def get_discord_id_from_tiktok(tiktok_user: str):
         res = conn.execute("SELECT discord_id FROM user_mappings WHERE tiktok_user = ?", (tiktok_user.lower(),))
         row = res.fetchone()
         return row[0] if row else None
+    finally:
+        conn.close()
+
+import random
+
+def get_setting(key: str, default: str = None) -> str:
+    """Mengambil nilai setting dari tabel bot_settings."""
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        row = cur.execute("SELECT value FROM bot_settings WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else default
+    finally:
+        conn.close()
+
+def set_setting(key: str, value: str):
+    """Menyimpan atau memperbarui nilai setting ke tabel bot_settings."""
+    conn = get_db_connection()
+    try:
+        conn.execute("""
+            INSERT INTO bot_settings (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """, (key, str(value)))
+        conn.commit()
+    finally:
+        conn.close()
+
+def is_tiktok_user_in_db(tiktok_user: str) -> tuple:
+    """
+    Memeriksa apakah akun TikTok ada di database (pernah gift / tercatat).
+    Mengembalikan (exists: bool, total_coins: int, display_name: str).
+    """
+    u_clean = tiktok_user.lower().lstrip("@")
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        row = cur.execute("SELECT total_coins, display_name FROM tiktok_gifts WHERE LOWER(tiktok_user) = ?", (u_clean,)).fetchone()
+        if row:
+            return True, int(row[0] or 0), row[1] or u_clean
+
+        row_log = cur.execute("""
+            SELECT COALESCE(SUM(coins), 0), viewer_display_name 
+            FROM gift_logs 
+            WHERE LOWER(viewer_username) = ?
+            GROUP BY viewer_username
+        """, (u_clean,)).fetchone()
+        if row_log:
+            return True, int(row_log[0] or 0), row_log[1] or u_clean
+
+        return False, 0, ""
+    finally:
+        conn.close()
+
+def is_user_already_claimed(tiktok_user: str) -> tuple:
+    """
+    Memeriksa apakah akun TikTok sudah terikat (claimed) ke akun Discord lain.
+    Mengembalikan (is_claimed: bool, discord_id: int).
+    """
+    u_clean = tiktok_user.lower().lstrip("@")
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        row = cur.execute("SELECT discord_id FROM user_mappings WHERE LOWER(tiktok_user) = ?", (u_clean,)).fetchone()
+        if row:
+            return True, int(row[0])
+        return False, 0
+    finally:
+        conn.close()
+
+def get_user_mapping(discord_id: int) -> str:
+    """Mengambil username TikTok yang terikat ke akun Discord."""
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        row = cur.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (discord_id,)).fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+def bind_user_mapping(discord_id: int, tiktok_user: str) -> bool:
+    """
+    Mengikat (binding) akun TikTok dengan Discord user ID.
+    Menghapus verifikasi pending jika ada.
+    """
+    u_clean = tiktok_user.lower().lstrip("@")
+    conn = get_db_connection()
+    try:
+        conn.execute("""
+            INSERT INTO user_mappings (discord_id, tiktok_user)
+            VALUES (?, ?)
+            ON CONFLICT(discord_id) DO UPDATE SET tiktok_user = excluded.tiktok_user
+        """, (discord_id, u_clean))
+        conn.execute("DELETE FROM pending_verifications WHERE discord_id = ?", (discord_id,))
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"[DB Error] Failed to bind user mapping: {e}")
+        return False
+    finally:
+        conn.close()
+
+def create_pending_verification(discord_id: int, tiktok_user: str, method: str = 'bio') -> str:
+    """
+    Membuat kode verifikasi acak unik (contoh: DM-8392) dan menyimpannya di DB (berlaku 15 menit).
+    """
+    u_clean = tiktok_user.lower().lstrip("@")
+    rand_num = random.randint(1000, 9999)
+    code = f"DM-{rand_num}"
+    
+    wib = pytz.timezone('Asia/Jakarta')
+    now = datetime.now(wib)
+    expires = now + timedelta(minutes=15)
+    now_str = now.strftime('%Y-%m-%d %H:%M:%S')
+    expires_str = expires.strftime('%Y-%m-%d %H:%M:%S')
+
+    conn = get_db_connection()
+    try:
+        conn.execute("""
+            INSERT INTO pending_verifications (discord_id, tiktok_user, code, method, created_at, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(discord_id) DO UPDATE SET
+                tiktok_user = excluded.tiktok_user,
+                code = excluded.code,
+                method = excluded.method,
+                created_at = excluded.created_at,
+                expires_at = excluded.expires_at
+        """, (discord_id, u_clean, code, method, now_str, expires_str))
+        conn.commit()
+        return code
+    finally:
+        conn.close()
+
+def get_pending_verification(discord_id: int) -> dict:
+    """Mengambil status verifikasi pending untuk Discord ID tertentu."""
+    wib = pytz.timezone('Asia/Jakarta')
+    now_str = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        conn.execute("DELETE FROM pending_verifications WHERE expires_at < ?", (now_str,))
+        conn.commit()
+
+        row = cur.execute("""
+            SELECT discord_id, tiktok_user, code, method, created_at, expires_at 
+            FROM pending_verifications 
+            WHERE discord_id = ?
+        """, (discord_id,)).fetchone()
+        if row:
+            return {
+                "discord_id": row[0],
+                "tiktok_user": row[1],
+                "code": row[2],
+                "method": row[3],
+                "created_at": row[4],
+                "expires_at": row[5]
+            }
+        return None
+    finally:
+        conn.close()
+
+def find_pending_live_verification(tiktok_user: str, comment_text: str) -> dict:
+    """
+    Mencari apakah ada verifikasi live pending untuk username ini yang kodenya terkandung di comment_text.
+    """
+    u_clean = tiktok_user.lower().lstrip("@")
+    wib = pytz.timezone('Asia/Jakarta')
+    now_str = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        conn.execute("DELETE FROM pending_verifications WHERE expires_at < ?", (now_str,))
+        conn.commit()
+
+        rows = cur.execute("""
+            SELECT discord_id, tiktok_user, code, method 
+            FROM pending_verifications 
+            WHERE LOWER(tiktok_user) = ?
+        """, (u_clean,)).fetchall()
+
+        for r in rows:
+            code = r[2]
+            if code.lower() in comment_text.lower():
+                return {
+                    "discord_id": r[0],
+                    "tiktok_user": r[1],
+                    "code": r[2],
+                    "method": r[3]
+                }
+        return None
+    finally:
+        conn.close()
+
+def cancel_pending_verification(discord_id: int):
+    """Membatalkan verifikasi yang sedang pending."""
+    conn = get_db_connection()
+    try:
+        conn.execute("DELETE FROM pending_verifications WHERE discord_id = ?", (discord_id,))
+        conn.commit()
     finally:
         conn.close()
