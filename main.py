@@ -89,11 +89,11 @@ async def grant_verified_access(member: discord.Member, tiktok_user: str, total_
     role_info = f" Role **{', '.join(roles_added_names)}** telah diberikan." if roles_added_names else " Role telah diaktifkan."
     return True, role_info
 
-def handle_api_announcement(username: str, is_live: bool):
+def handle_api_announcement(username: str, is_live: bool, host_name: str = None):
     try:
         loop = bot.loop if bot.is_ready() else asyncio.get_event_loop()
         asyncio.run_coroutine_threadsafe(
-            process_live_announcement(username, is_live),
+            process_live_announcement(username, is_live, host_name),
             loop
         )
     except Exception as e:
@@ -168,7 +168,7 @@ async def auto_assign_role(tiktok_user: str, total_coins: int):
             except Exception as e:
                 print(f"[Discord] Error removing previous tier roles: {e}")
 
-async def process_live_announcement(username: str, is_live: bool):
+async def process_live_announcement(username: str, is_live: bool, host_name: str = None):
     user_key = username.lower()
     async with NOTIFICATION_LOCK:
         if not ANNOUNCEMENT_CHANNEL_ID:
@@ -184,14 +184,14 @@ async def process_live_announcement(username: str, is_live: bool):
                 print(f"[Discord] Notification failed: Channel ID {ANNOUNCEMENT_CHANNEL_ID} not found ({e}).")
                 return
 
-        host_name, account_name = get_schedule_info(user_key)
+        sched_host, account_name = get_schedule_info(user_key)
+        final_host_name = host_name or sched_host or account_name or "Host"
         live_url = f"https://www.tiktok.com/@{user_key}/live"
         live_content = (
-            f"🔴 **{host_name} just live!**\n"
+            f"🔴 **{final_host_name} just live!**\n"
             f"Currently streaming on **{account_name}** (@{user_key})\n\n"
             f"Watch here:\n{live_url}"
         )
-        offline_content = f"⚪ **@{user_key}** has ended the stream / disconnected from TikTok Live."
 
         conn = get_db_connection()
         try:
@@ -210,14 +210,16 @@ async def process_live_announcement(username: str, is_live: bool):
                     old_msg = None
 
             if is_live:
+                # Batasi hanya mengirim terbatas 1 kali per akun track ke discord. Jika update, edit postingan
                 if old_msg:
-                    # Cegah spam: jika pesan live sudah aktif dan sesuai, jangan kirim ulang pesan baru
-                    if "🔴" in old_msg.content:
-                        return
-                    try:
-                        await old_msg.delete()
-                    except Exception:
-                        pass
+                    if old_msg.content != live_content:
+                        try:
+                            await old_msg.edit(content=live_content)
+                            print(f"[Discord] Edited/updated live announcement for @{user_key} (Host: {final_host_name})")
+                        except Exception as e:
+                            print(f"[Discord] Failed to edit live announcement for @{user_key}: {e}")
+                    # Jangan pernah kirim pesan baru berulang kali jika pesan lama sudah ada
+                    return
 
                 new_msg = await channel.send(live_content)
                 conn.execute(
@@ -225,15 +227,18 @@ async def process_live_announcement(username: str, is_live: bool):
                     (user_key, str(channel.id), str(new_msg.id))
                 )
                 conn.commit()
+                print(f"[Discord] Sent 1-time live announcement for @{user_key} (Msg ID: {new_msg.id})")
             else:
-                if old_msg and "🔴" in old_msg.content:
+                # "jika offline maka hapus pesan, jadi bot tidak mengirim pesan baru terus menerus"
+                if old_msg:
                     try:
-                        await old_msg.edit(content=offline_content)
+                        await old_msg.delete()
+                        print(f"[Discord] Deleted live announcement message for @{user_key} because stream is offline.")
                     except Exception as e:
-                        print(f"[Discord] Failed to edit message for @{user_key}: {e}")
-                    
-                    conn.execute("DELETE FROM active_live_announcements WHERE tiktok_username = ?", (user_key,))
-                    conn.commit()
+                        print(f"[Discord] Failed to delete message for @{user_key}: {e}")
+
+                conn.execute("DELETE FROM active_live_announcements WHERE tiktok_username = ?", (user_key,))
+                conn.commit()
 
         except Exception as e:
             print(f"[Discord Error] Failed to process announcement for @{user_key}: {e}")

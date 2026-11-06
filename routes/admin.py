@@ -6,7 +6,17 @@ except ImportError:
     import sqlite3 as libsql
 import pytz
 from datetime import datetime
-from db import get_db_connection, get_shift_name, clean_expired_schedules_and_offlines, get_all_host_names, get_activity_logs, clear_activity_logs, get_active_hosts
+from db import (
+    get_db_connection, 
+    get_shift_name, 
+    clean_expired_schedules_and_offlines, 
+    get_all_host_names, 
+    get_activity_logs, 
+    clear_activity_logs, 
+    get_active_hosts,
+    get_setting,
+    set_setting
+)
 from styles import BASE_CSS, NAV_HTML, AUTO_REFRESH_JS
 
 admin_bp = Blueprint('admin', __name__, url_prefix='/admin')
@@ -976,7 +986,7 @@ def view_activity():
                 </div>
                 {% else %}
                 <div style="color: #64748b; font-style: italic; padding: 24px; text-align: center;">
-                    Belum ada aktivitas yang tercatat. Sistem standby memantau 5 akun target: @clarissadreams, @georgevilora, @steffannyalisha, @juliannedreams, @franklyndreams.
+                    Belum ada aktivitas yang tercatat. Sistem standby memantau target akun: @clarissadreams, @georgevilora, @stefannyalisha, @julliannedreams, @dummydreamsentertaiment, @franklyndreams.
                 </div>
                 {% endfor %}
             </div>
@@ -987,6 +997,145 @@ def view_activity():
     </html>
     """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
     return render_template_string(html, logs=logs, all_hosts=all_hosts, current_filter=channel_filter)
+
+@admin_bp.route('/verifications', methods=['GET'])
+def view_verifications():
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        users = cur.execute("""
+            SELECT u.discord_id, u.tiktok_user, COALESCE(g.total_coins, 0), g.display_name
+            FROM user_mappings u
+            LEFT JOIN tiktok_gifts g ON LOWER(u.tiktok_user) = LOWER(g.tiktok_user)
+            ORDER BY g.total_coins DESC
+        """).fetchall()
+
+        pending = cur.execute("""
+            SELECT discord_id, tiktok_user, code, method, created_at, expires_at 
+            FROM pending_verifications 
+            ORDER BY created_at DESC
+        """).fetchall()
+
+        conn.close()
+    except Exception as e:
+        return f"<h3>Database Error: {e}</h3>", 500
+
+    verified_role_id = get_setting("verified_role_id", "")
+    verification_channel_id = get_setting("verification_channel_id", "")
+
+    html = """
+    <!DOCTYPE html>
+    <html lang="id">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Kelola Verifikasi Akun TikTok</title>
+        <style>BASE_CSS_PLACEHOLDER</style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>🔐 Pengelolaan Verifikasi Akun TikTok & Discord</h1>
+        </div>
+        NAV_HTML_PLACEHOLDER
+
+        <div class="card">
+            <h2>⚙️ Konfigurasi Role & Channel Verifikasi</h2>
+            <form action="/admin/save-verification-settings" method="POST" class="form-grid" style="grid-template-columns: 1fr 1fr auto; align-items: end;">
+                <div>
+                    <label style="font-size: 0.8rem; color: #94a3b8;">Verified Role ID (Discord Role ID):</label>
+                    <input type="text" name="verified_role_id" value="{{ verified_role_id }}" placeholder="Contoh: 1554883561759187105" required>
+                </div>
+                <div>
+                    <label style="font-size: 0.8rem; color: #94a3b8;">Verification Channel ID:</label>
+                    <input type="text" name="verification_channel_id" value="{{ verification_channel_id }}" placeholder="Contoh: 123456789012345678">
+                </div>
+                <button type="submit">💾 Simpan Konfigurasi</button>
+            </form>
+        </div>
+
+        <div class="card">
+            <h2>✅ Akun Terverifikasi (Discord &lt;-&gt; TikTok)</h2>
+            <p style="color: #94a3b8; font-size: 0.85rem; margin-bottom: 12px;">
+                Daftar akun Discord yang telah sukses di-binding ke akun TikTok. Satu akun hanya dapat diklaim oleh satu pengguna.
+            </p>
+            <table>
+                <tr>
+                    <th>Discord ID</th>
+                    <th>TikTok Username</th>
+                    <th>Display Name</th>
+                    <th>Total Koin</th>
+                    <th>Aksi</th>
+                </tr>
+                {% for u in users %}
+                <tr>
+                    <td><code>{{ u[0] }}</code></td>
+                    <td><strong>@{{ u[1] }}</strong></td>
+                    <td>{{ u[3] or '-' }}</td>
+                    <td><span class="badge">{{ u[2] }} c</span></td>
+                    <td>
+                        <form action="/admin/unclaim-user/{{ u[0] }}" method="POST" onsubmit="return confirm('Batalkan ikatan akun untuk Discord ID {{ u[0] }}?');" style="display:inline;">
+                            <button type="submit" class="btn-action btn-del">Batal Claim</button>
+                        </form>
+                    </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="5" style="text-align:center; color:#64748b;">Belum ada akun yang terverifikasi.</td></tr>
+                {% endfor %}
+            </table>
+        </div>
+
+        <div class="card">
+            <h2>⏳ Verifikasi Pending (Sedang Berjalan)</h2>
+            <table>
+                <tr>
+                    <th>Discord ID</th>
+                    <th>TikTok Username</th>
+                    <th>Kode Verifikasi</th>
+                    <th>Metode</th>
+                    <th>Waktu Dibuat</th>
+                    <th>Batas Waktu (WIB)</th>
+                </tr>
+                {% for p in pending %}
+                <tr>
+                    <td><code>{{ p[0] }}</code></td>
+                    <td><strong>@{{ p[1] }}</strong></td>
+                    <td><span class="badge" style="background:#f59e0b; color:black;">{{ p[2] }}</span></td>
+                    <td><span class="badge">{{ p[3]|upper }}</span></td>
+                    <td>{{ p[4] }}</td>
+                    <td>{{ p[5] }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="6" style="text-align:center; color:#64748b;">Tidak ada verifikasi yang sedang pending saat ini.</td></tr>
+                {% endfor %}
+            </table>
+        </div>
+
+        AUTO_REFRESH_JS_PLACEHOLDER
+    </body>
+    </html>
+    """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
+    return render_template_string(html, users=users, pending=pending, verified_role_id=verified_role_id, verification_channel_id=verification_channel_id)
+
+@admin_bp.route('/save-verification-settings', methods=['POST'])
+def save_verification_settings():
+    v_role = request.form.get('verified_role_id', '').strip()
+    v_chan = request.form.get('verification_channel_id', '').strip()
+    if v_role:
+        set_setting('verified_role_id', v_role)
+    if v_chan:
+        set_setting('verification_channel_id', v_chan)
+    return redirect('/admin/verifications')
+
+@admin_bp.route('/unclaim-user/<int:discord_id>', methods=['POST'])
+def unclaim_user_admin(discord_id):
+    conn = get_db_connection()
+    try:
+        conn.execute("DELETE FROM user_mappings WHERE discord_id = ?", (discord_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    return redirect('/admin/verifications')
 
 @admin_bp.route('/clear-activity-logs', methods=['POST'])
 def clear_activity():

@@ -121,6 +121,7 @@ NAV_HTML = """
         <a href="/admin/viewers" class="nav-btn">👥 Viewer & Koin</a>
         <a href="/admin/monitor" class="nav-btn">📹 Monitor Live</a>
         <a href="/admin/activity" class="nav-btn">📊 Log Activity</a>
+        <a href="/admin/verifications" class="nav-btn">🔐 Verifikasi Akun</a>
     </div>
     <div id="website-status-box" class="status-indicator-pill" title="Indikator Sistem Realtime">
         <span class="status-pulse-dot" id="status-pulse-dot"></span>

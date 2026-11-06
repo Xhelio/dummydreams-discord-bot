@@ -1,5 +1,6 @@
 import os
 import json
+import re
 try:
     import libsql_experimental as libsql
     HAS_LIBSQL = True
@@ -225,17 +226,21 @@ def init_db():
 
         cur = conn.cursor()
         
-        # 5 Target Hosts Default:
-        # @clarissadreams(Jeremy Jean)
-        # @georgevilora(George Vilora)
-        # @steffannyalisha(Stefanny Alisha)
-        # @juliannedreams(Julianne)
-        # @franklyndreams(Frank Lynn)
+        # Target Hosts Default:
+        # @clarissadreams (Jeremy Jean)
+        # @georgevilora (George Vilora)
+        # @stefannyalisha (Steffany Alisha)
+        # @julliannedreams (Julianne)
+        # @dummydreamsentertaiment (Dummy Dreams Entertaiment)
+        # @franklyndreams (Frank Lynn)
         default_targets = [
             ('clarissadreams', 'Jeremy Jean'),
             ('georgevilora', 'George Vilora'),
-            ('steffannyalisha', 'Stefanny Alisha'),
+            ('stefannyalisha', 'Steffany Alisha'),
+            ('steffannyalisha', 'Steffany Alisha'),
+            ('julliannedreams', 'Julianne'),
             ('juliannedreams', 'Julianne'),
+            ('dummydreamsentertaiment', 'Dummy Dreams Entertaiment'),
             ('franklyndreams', 'Frank Lynn')
         ]
         for uname, dname in default_targets:
@@ -370,76 +375,104 @@ def clean_expired_schedules_and_offlines():
     finally:
         conn.close()
 
-def get_scheduled_host_name(tiktok_username: str, dt_obj: datetime = None) -> str:
-    clean_expired_schedules_and_offlines()
+HOST_ALIASES = {
+    # Sinta / Mommy
+    "mommy": "Sinta",
+    "momy": "Sinta",
+    "sinta": "Sinta",
+    "shinta": "Sinta",
+    # Zize
+    "zize": "Zize",
+    # Solen
+    "solen": "Solen",
+    # Yosa
+    "yosa": "Yosa",
+    # Ielya
+    "ielya": "Ielya",
+    "ilya": "Ielya",
+    # Yuca
+    "yuca": "Yuca",
+    "yuka": "Yuca",
+    # Cole
+    "cole": "Cole",
+    # Luna
+    "luna": "Luna",
+    # New accounts
+    "steffany": "Steffany Alisha",
+    "stefanny": "Steffany Alisha",
+    "alisha": "Steffany Alisha",
+    "julianne": "Julianne",
+    "julian": "Julianne",
+    "frank": "Frank Lynn",
+    "franklyn": "Frank Lynn",
+    "dummy": "Dummy Dreams",
+}
 
-    if not dt_obj:
-        wib = pytz.timezone('Asia/Jakarta')
-        dt_obj = datetime.now(wib)
-    
-    current_hour = dt_obj.hour
-    today_str = dt_obj.strftime('%Y-%m-%d')
-    day_name = dt_obj.strftime('%A')
-    user_clean = tiktok_username.lower()
+def detect_host_from_welcome_message(text: str):
+    """
+    Mendeteksi nama host dari welcome message / chat / intro di TikTok.
+    Case-insensitive dan membaca di sela-sela teks (misal: ZIZE's here -> Zize).
+    Keyword 'Mommy' adalah alias dari Sinta.
+    """
+    if not text:
+        return None
+    for kw, host_name in HOST_ALIASES.items():
+        pattern = rf"(?:^|[\s\W_]){re.escape(kw)}(?:[\x27\u2019]s|s)?(?:$|[\s\W_])"
+        if re.search(pattern, text, re.IGNORECASE):
+            return host_name
+    return None
 
-    current_shift = 1
-    if 1 <= current_hour < 7: current_shift = 1
-    elif 7 <= current_hour < 13: current_shift = 2
-    elif 13 <= current_hour < 19: current_shift = 3
-    else: current_shift = 4
+def get_current_host_for_account(tiktok_username: str) -> str:
+    """Mengambil nama host yang sedang atau terakhir terdeteksi untuk akun TikTok ini."""
+    u_clean = tiktok_username.lower().lstrip("@")
+    val = get_setting(f"current_host_{u_clean}")
+    if val:
+        return val
 
     conn = get_db_connection()
     try:
         cur = conn.cursor()
+        row = cur.execute("""
+            SELECT scheduled_host FROM live_sessions 
+            WHERE tiktok_username = ? AND end_time IS NULL 
+            ORDER BY session_id DESC LIMIT 1
+        """, (u_clean,)).fetchone()
+        if row and row[0] and row[0] != "Host":
+            return row[0]
 
-        temp_row = cur.execute("""
-            SELECT host_name FROM temp_schedules 
-            WHERE tiktok_username = ? AND schedule_date = ? AND shift_num = ?
-        """, (user_clean, today_str, current_shift)).fetchone()
+        h_row = cur.execute("SELECT display_name FROM hosts WHERE tiktok_username = ?", (u_clean,)).fetchone()
+        if h_row and h_row[0]:
+            return h_row[0]
+    finally:
+        conn.close()
+    return "Host"
 
-        candidate_host = temp_row[0] if temp_row else None
+def set_current_host_for_account(tiktok_username: str, host_name: str):
+    """Menyimpan nama host yang terdeteksi untuk akun TikTok ini."""
+    u_clean = tiktok_username.lower().lstrip("@")
+    set_setting(f"current_host_{u_clean}", host_name)
 
-        if not candidate_host:
-            default_rows = cur.execute("""
-                SELECT host_name, start_hour, end_hour 
-                FROM host_schedules 
-                WHERE tiktok_username = ?
-            """, (user_clean,)).fetchall()
-
-            for h_name, start_h, end_h in default_rows:
-                if start_h < end_h:
-                    if start_h <= current_hour < end_h:
-                        candidate_host = h_name
-                        break
-                else:
-                    if current_hour >= start_h or current_hour < end_h:
-                        candidate_host = h_name
-                        break
-
-        if not candidate_host:
-            return "Host"
-
-        off_row = cur.execute("""
-            SELECT note FROM host_offlines 
-            WHERE UPPER(host_name) = UPPER(?) AND (
-                (offline_type = 'temporary' AND offline_date = ?) OR
-                (offline_type = 'routine' AND UPPER(offline_day) = UPPER(?))
-            )
-        """, (candidate_host, today_str, day_name)).fetchone()
-
-        if off_row:
-            return f"{candidate_host} (OFFLINE)"
-
-        return candidate_host
+def update_live_session_host(session_id: int, host_name: str):
+    """Memperbarui nama host di live_sessions saat terdeteksi dari welcome message."""
+    if not session_id:
+        return
+    conn = get_db_connection()
+    try:
+        conn.execute("UPDATE live_sessions SET scheduled_host = ? WHERE session_id = ?", (host_name, session_id))
+        conn.commit()
     finally:
         conn.close()
 
-def start_live_session(tiktok_username: str) -> int:
+def get_scheduled_host_name(tiktok_username: str, dt_obj: datetime = None) -> str:
+    """Mengambil nama host akun TikTok (berdasarkan welcome message yang terdeteksi)."""
+    return get_current_host_for_account(tiktok_username)
+
+def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
     wib = pytz.timezone('Asia/Jakarta')
     now_dt = datetime.now(wib)
     now_str = now_dt.strftime('%Y-%m-%d %H:%M:%S')
-    user_clean = tiktok_username.lower()
-    scheduled_host = get_scheduled_host_name(user_clean, now_dt)
+    user_clean = tiktok_username.lower().lstrip("@")
+    current_host = initial_host or get_current_host_for_account(user_clean)
 
     conn = get_db_connection()
     try:
@@ -447,34 +480,37 @@ def start_live_session(tiktok_username: str) -> int:
 
         active_row = cur.execute("""
             SELECT session_id FROM live_sessions 
-            WHERE tiktok_username = ? AND scheduled_host = ? AND end_time IS NULL
+            WHERE tiktok_username = ? AND end_time IS NULL
             ORDER BY session_id DESC LIMIT 1
-        """, (user_clean, scheduled_host)).fetchone()
+        """, (user_clean,)).fetchone()
 
         if active_row:
+            if initial_host and initial_host != "Host":
+                cur.execute("UPDATE live_sessions SET scheduled_host = ? WHERE session_id = ?", (initial_host, active_row[0]))
+                conn.commit()
             return active_row[0]
 
         recent_row = cur.execute("""
             SELECT session_id FROM live_sessions 
-            WHERE tiktok_username = ? AND scheduled_host = ? AND end_time IS NOT NULL 
+            WHERE tiktok_username = ? AND end_time IS NOT NULL 
             AND datetime(end_time) >= datetime('now', '-1 hour')
             ORDER BY session_id DESC LIMIT 1
-        """, (user_clean, scheduled_host)).fetchone()
+        """, (user_clean,)).fetchone()
 
         if recent_row:
             recent_id = recent_row[0]
             cur.execute("""
                 UPDATE live_sessions 
-                SET end_time = NULL, duration_seconds = 0 
+                SET end_time = NULL, duration_seconds = 0, scheduled_host = ? 
                 WHERE session_id = ?
-            """, (recent_id,))
+            """, (current_host, recent_id))
             conn.commit()
             return recent_id
 
         cur.execute("""
             INSERT INTO live_sessions (tiktok_username, start_time, scheduled_host) 
             VALUES (?, ?, ?)
-        """, (user_clean, now_str, scheduled_host))
+        """, (user_clean, now_str, current_host))
         conn.commit()
         return cur.lastrowid
     finally:

@@ -2,7 +2,16 @@ import asyncio
 from datetime import datetime
 import pytz
 from TikTokLive import TikTokLiveClient
-from TikTokLive.events import ConnectEvent, DisconnectEvent, GiftEvent, CommentEvent
+from TikTokLive.events import (
+    ConnectEvent, 
+    DisconnectEvent, 
+    GiftEvent, 
+    CommentEvent,
+    GreetingEvent,
+    LiveIntroEvent,
+    NoticeEvent,
+    RoomPinEvent
+)
 from db import (
     save_gift_data, 
     save_daily_gift_data, 
@@ -14,7 +23,11 @@ from db import (
     log_activity_event,
     get_user_channel_spent,
     get_user_today_spent,
-    get_user_total_spent
+    get_user_total_spent,
+    detect_host_from_welcome_message,
+    get_current_host_for_account,
+    set_current_host_for_account,
+    update_live_session_host
 )
 
 # Set global untuk melacak host yang saat ini sedang LIVE
@@ -28,14 +41,20 @@ def is_any_host_live() -> bool:
     """Mengecek apakah ada minimal 1 host yang sedang live saat ini."""
     return len(CURRENT_LIVE_HOSTS) > 0
 
-async def _trigger_announcement(announcement_callback, username: str, is_live: bool):
+async def _trigger_announcement(announcement_callback, username: str, is_live: bool, host_name: str = None):
     if not announcement_callback:
         return
     try:
         if asyncio.iscoroutinefunction(announcement_callback):
-            await announcement_callback(username, is_live)
+            try:
+                await announcement_callback(username, is_live, host_name)
+            except TypeError:
+                await announcement_callback(username, is_live)
         else:
-            announcement_callback(username, is_live)
+            try:
+                announcement_callback(username, is_live, host_name)
+            except TypeError:
+                announcement_callback(username, is_live)
     except Exception as e:
         print(f"[{username}] Error triggering announcement callback: {e}")
 
@@ -55,6 +74,24 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
     current_session_id = None
     is_connected = False
     disconnect_timer_task = None
+    current_host = get_current_host_for_account(username_clean) or "Host"
+
+    async def check_and_update_host_from_text(text: str):
+        """Membaca teks welcome message / chat / intro, mendeteksi nama host, dan meng-edit postingan Discord jika berubah."""
+        nonlocal current_host, current_session_id
+        if not text:
+            return
+        detected = detect_host_from_welcome_message(text)
+        if detected and detected != current_host:
+            current_host = detected
+            print(f"[{username_clean}] 🎯 Host detected from welcome message: {detected} (from text: {text!r})")
+            if current_session_id:
+                update_live_session_host(current_session_id, detected)
+            set_current_host_for_account(username_clean, detected)
+            log_activity_event("host_detected", f"Host terdeteksi: {detected} di @{username_clean} ('{text}')", username_clean)
+            
+            # Update/edit pesan pengumuman yang sudah ada di Discord
+            await _trigger_announcement(announcement_callback, username_clean, True, host_name=detected)
 
     async def delayed_disconnect_handler(session_to_close):
         """Menunggu grace period 60 detik sebelum benar-benar menyatakan live berakhir di Discord."""
@@ -65,10 +102,11 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             if session_to_close:
                 end_live_session(session_to_close)
             clear_active_live_status(username_clean)
+            # Saat offline, bot Discord akan MENGHAPUS pesan pengumuman
             await _trigger_announcement(announcement_callback, username_clean, False)
-            print(f"[{username_clean}] Live confirmed offline after grace period.")
+            print(f"[{username_clean}] Live confirmed offline after grace period. Announcement message deleted.")
         except asyncio.CancelledError:
-            # Reconnected before grace period expired
+            # Reconnected within grace period
             pass
 
     while True:
@@ -76,7 +114,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
 
         @client.on(ConnectEvent)
         async def on_connect(event: ConnectEvent):
-            nonlocal current_session_id, is_connected, disconnect_timer_task
+            nonlocal current_session_id, is_connected, disconnect_timer_task, current_host
             
             # Jika sebelumnya ada pending disconnect timer, batalkan karena sudah terhubung kembali
             if disconnect_timer_task and not disconnect_timer_task.done():
@@ -87,12 +125,20 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             is_connected = True
             CURRENT_LIVE_HOSTS.add(username_clean)
             print(f"[{username_clean}] Connected to live stream.")
-            current_session_id = start_live_session(username_clean)
             
-            connect_msg = f"terhubung ke akun @{username_clean} channel"
+            # Cek apakah judul / room_info memuat nama host dari welcome message
+            if hasattr(client, 'room_info') and client.room_info:
+                title = getattr(client.room_info, 'title', '')
+                if title:
+                    await check_and_update_host_from_text(title)
+
+            current_session_id = start_live_session(username_clean, initial_host=current_host)
+            
+            connect_msg = f"terhubung ke akun @{username_clean} channel (Host: {current_host})"
             log_activity_event("connect", connect_msg, username_clean)
             
-            await _trigger_announcement(announcement_callback, username_clean, True)
+            # Kirim pengumuman (hanya 1 kali per sesi live)
+            await _trigger_announcement(announcement_callback, username_clean, True, host_name=current_host)
 
         @client.on(DisconnectEvent)
         async def on_disconnect(event: DisconnectEvent):
@@ -104,7 +150,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 disconnect_msg = f"terputus dari akun @{username_clean} channel"
                 log_activity_event("disconnect", disconnect_msg, username_clean)
 
-                # Jalankan grace period agar tidak spam pengumuman offline jika hanya reconnect singkat
+                # Jalankan grace period agar tidak spam hapus/buat pengumuman jika hanya reconnect singkat
                 if current_session_id and (not disconnect_timer_task or disconnect_timer_task.done()):
                     disconnect_timer_task = asyncio.create_task(delayed_disconnect_handler(current_session_id))
                     current_session_id = None
@@ -114,13 +160,50 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             try:
                 user = event.user.unique_id.lower()
                 comment_text = event.comment
+                
+                # 1. Cek verifikasi live chat akun Discord
                 if comment_callback:
                     if asyncio.iscoroutinefunction(comment_callback):
                         await comment_callback(user, comment_text, username_clean)
                     else:
                         comment_callback(user, comment_text, username_clean)
+
+                # 2. Cek apakah komentar memuat welcome message atau nama host (misal: "ZIZE's here", "welcome Mommy", dsb.)
+                await check_and_update_host_from_text(comment_text)
             except Exception as e:
                 print(f"[{username_clean}] Error in on_comment handler: {e}")
+
+        @client.on(GreetingEvent)
+        async def on_greeting(event: GreetingEvent):
+            try:
+                greeting_text = getattr(event, 'greeting_text', '') or getattr(event, 'guide_text', '')
+                await check_and_update_host_from_text(greeting_text)
+            except Exception as e:
+                print(f"[{username_clean}] Error in on_greeting handler: {e}")
+
+        @client.on(LiveIntroEvent)
+        async def on_live_intro(event: LiveIntroEvent):
+            try:
+                content = getattr(event, 'content', '')
+                await check_and_update_host_from_text(content)
+            except Exception as e:
+                print(f"[{username_clean}] Error in on_live_intro handler: {e}")
+
+        @client.on(NoticeEvent)
+        async def on_notice(event: NoticeEvent):
+            try:
+                notice_text = getattr(event, 'content', '') or getattr(event, 'notice_content', '')
+                await check_and_update_host_from_text(notice_text)
+            except Exception as e:
+                print(f"[{username_clean}] Error in on_notice handler: {e}")
+
+        @client.on(RoomPinEvent)
+        async def on_room_pin(event: RoomPinEvent):
+            try:
+                chat_msg = getattr(event, 'chat_message', '')
+                await check_and_update_host_from_text(chat_msg)
+            except Exception as e:
+                print(f"[{username_clean}] Error in on_room_pin handler: {e}")
 
         @client.on(GiftEvent)
         async def on_gift(event: GiftEvent):
@@ -141,7 +224,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 if coins > 0:
                     nonlocal current_session_id
                     if not current_session_id:
-                        current_session_id = start_live_session(username_clean)
+                        current_session_id = start_live_session(username_clean, initial_host=current_host)
 
                     total_coins = save_gift_data(user, display_name, coins)
                     save_daily_gift_data(user, display_name, coins)
