@@ -117,7 +117,6 @@ NAV_HTML = """
 <div class="nav-bar-container">
     <div class="nav-links">
         <a href="/admin/data" class="nav-btn">🏠 Main Menu</a>
-        <a href="/admin/schedule" class="nav-btn">📅 Jadwal Shift</a>
         <a href="/admin/viewers" class="nav-btn">👥 Viewer & Koin</a>
         <a href="/admin/monitor" class="nav-btn">📹 Monitor Live</a>
         <a href="/admin/activity" class="nav-btn">📊 Log Activity</a>

@@ -32,44 +32,94 @@ def check_database_health() -> bool:
         print(f"[HealthCheck Error] {e}")
         return False
 
-def get_shift_hours(shift_num: int):
-    shifts = {
-        1: (1, 7),
-        2: (7, 13),
-        3: (13, 19),
-        4: (19, 1)
-    }
-    return shifts.get(shift_num, (1, 7))
+VALID_TARGET_ACCOUNTS = [
+    (1, "georgevilora", "George Vilora"),
+    (2, "clarissadreams", "Jeremy Jean"),
+    (3, "juliannedreams", "Julianne"),
+    (4, "franklyndreams", "Frank Lynn"),
+    (5, "stefannyalisha", "Steffanny Alisha"),
+    (6, "dummydreamsentertaiment", "Dummy Dreams Entertaiment")
+]
 
-def get_shift_name(start_hour: int, end_hour: int) -> str:
-    if start_hour == 1 and end_hour == 7:
-        return "Shift 1 (01:00 - 07:00)"
-    elif start_hour == 7 and end_hour == 13:
-        return "Shift 2 (07:00 - 13:00)"
-    elif start_hour == 13 and end_hour == 19:
-        return "Shift 3 (13:00 - 19:00)"
-    elif start_hour == 19 and end_hour == 1:
-        return "Shift 4 (19:00 - 01:00)"
-    return f"Custom ({start_hour:02d}:00 - {end_hour:02d}:00)"
-
-def get_all_host_names() -> list:
+def get_channel_display_name(tiktok_username: str) -> str:
+    """Mengembalikan nama channel resmi dari akun target TikTok."""
+    u_clean = tiktok_username.lower().lstrip("@")
+    for _, u, name in VALID_TARGET_ACCOUNTS:
+        if u == u_clean:
+            return name
     conn = get_db_connection()
     try:
         cur = conn.cursor()
-        rows = cur.execute("SELECT DISTINCT host_name FROM host_schedules ORDER BY host_name ASC").fetchall()
-        hosts = [r[0] for r in rows if r[0]]
-        if not hosts:
-            hosts = ["SOLEN", "ZIZE", "YOSA", "IELYA", "YUCA", "SINTA", "COLE", "LUNA"]
-        return hosts
+        row = cur.execute("SELECT display_name FROM hosts WHERE LOWER(tiktok_username) = ?", (u_clean,)).fetchone()
+        if row and row[0]:
+            return row[0]
+    except Exception:
+        pass
     finally:
         conn.close()
+    return u_clean
+
+def sync_valid_hosts():
+    """Merapikan ID (1-6) dan sinkronisasi 6 akun target resmi di database."""
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        # Bersihkan tabel hosts agar ID 1-6 dapat diisi rapi berurutan
+        cur.execute("DELETE FROM hosts")
+        for host_id, uname, dname in VALID_TARGET_ACCOUNTS:
+            cur.execute("""
+                INSERT INTO hosts (host_id, tiktok_username, display_name, is_active)
+                VALUES (?, ?, ?, 1)
+            """, (host_id, uname, dname))
+        conn.commit()
+    except Exception as e:
+        print(f"[Hosts Sync Error] {e}")
+    finally:
+        conn.close()
+
+def get_recent_gift_activities(limit: int = 100, channel_filter: str = "") -> list:
+    """Mengambil riwayat aktivitas gift: tanggal, nama akun, user, nama gift, jumlah koin, total koin saat ini."""
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        sql = """
+            SELECT 
+                g.log_id,
+                g.log_datetime,
+                g.target_username,
+                COALESCE(h.display_name, g.target_username) as channel_name,
+                g.viewer_username,
+                COALESCE(g.viewer_display_name, g.viewer_username) as viewer_display,
+                g.gift_name,
+                g.gift_count,
+                g.coins,
+                COALESCE(u.total_coins, 0) as current_total_coins
+            FROM gift_logs g
+            LEFT JOIN hosts h ON LOWER(g.target_username) = LOWER(h.tiktok_username)
+            LEFT JOIN tiktok_gifts u ON LOWER(g.viewer_username) = LOWER(u.tiktok_user)
+        """
+        params = []
+        if channel_filter:
+            sql += " WHERE LOWER(g.target_username) = ?"
+            params.append(channel_filter.lower().lstrip("@"))
+        sql += " ORDER BY g.log_id DESC LIMIT ?"
+        params.append(limit)
+        return cur.execute(sql, tuple(params)).fetchall()
+    finally:
+        conn.close()
+
+def get_all_host_names() -> list:
+    return ["George Vilora", "Jeremy Jean", "Julianne", "Frank Lynn", "Steffanny Alisha", "Dummy Dreams Entertaiment", "SOLEN", "ZIZE", "YOSA", "IELYA", "YUCA", "SINTA", "COLE", "LUNA"]
 
 def get_active_hosts() -> list:
     conn = get_db_connection()
     try:
         cur = conn.cursor()
-        rows = cur.execute("SELECT tiktok_username FROM hosts WHERE is_active = 1").fetchall()
-        return [r[0] for r in rows]
+        rows = cur.execute("SELECT tiktok_username FROM hosts WHERE is_active = 1 ORDER BY host_id ASC").fetchall()
+        hosts = [r[0] for r in rows if r[0]]
+        if not hosts:
+            hosts = [t[1] for t in VALID_TARGET_ACCOUNTS]
+        return hosts
     finally:
         conn.close()
 
@@ -145,40 +195,14 @@ def init_db():
             )
         """)
 
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS host_schedules (
-                schedule_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                tiktok_username TEXT NOT NULL,
-                account_name TEXT,
-                host_name TEXT NOT NULL,
-                start_hour INTEGER NOT NULL,
-                end_hour INTEGER NOT NULL,
-                UNIQUE(tiktok_username, start_hour)
-            )
-        """)
+                # Hapus tabel shift lama karena beralih ke dynamic welcome message tracking
+        conn.execute("DROP TABLE IF EXISTS host_schedules")
+        conn.execute("DROP TABLE IF EXISTS temp_schedules")
+        conn.execute("DROP TABLE IF EXISTS host_offlines")
 
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS temp_schedules (
-                temp_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                schedule_date TEXT NOT NULL,
-                tiktok_username TEXT NOT NULL,
-                account_name TEXT,
-                host_name TEXT NOT NULL,
-                shift_num INTEGER NOT NULL,
-                UNIQUE(schedule_date, tiktok_username, shift_num)
-            )
-        """)
+        
 
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS host_offlines (
-                offline_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                host_name TEXT NOT NULL,
-                offline_type TEXT NOT NULL,
-                offline_date TEXT,
-                offline_day TEXT,
-                note TEXT
-            )
-        """)
+        
 
         # Tabel Log Activity untuk event koneksi, diskoneksi, dan gift
         conn.execute("""
@@ -233,24 +257,8 @@ def init_db():
         # @julliannedreams (Julianne)
         # @dummydreamsentertaiment (Dummy Dreams Entertaiment)
         # @franklyndreams (Frank Lynn)
-        default_targets = [
-            ('clarissadreams', 'Jeremy Jean'),
-            ('georgevilora', 'George Vilora'),
-            ('stefannyalisha', 'Steffany Alisha'),
-            ('steffannyalisha', 'Steffany Alisha'),
-            ('julliannedreams', 'Julianne'),
-            ('juliannedreams', 'Julianne'),
-            ('dummydreamsentertaiment', 'Dummy Dreams Entertaiment'),
-            ('franklyndreams', 'Frank Lynn')
-        ]
-        for uname, dname in default_targets:
-            cur.execute("""
-                INSERT INTO hosts (tiktok_username, display_name, is_active)
-                VALUES (?, ?, 1)
-                ON CONFLICT(tiktok_username) DO UPDATE SET 
-                    display_name = excluded.display_name,
-                    is_active = 1
-            """, (uname, dname))
+        # Sinkronisasi 6 akun target resmi dengan ID 1-6
+        sync_valid_hosts()
 
         conn.commit()
     finally:
@@ -347,33 +355,6 @@ def clear_activity_logs():
     finally:
         conn.close()
 
-def clean_expired_schedules_and_offlines():
-    wib = pytz.timezone('Asia/Jakarta')
-    now_dt = datetime.now(wib)
-    today_str = now_dt.strftime('%Y-%m-%d')
-    current_hour = now_dt.hour
-
-    conn = get_db_connection()
-    try:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM temp_schedules WHERE schedule_date < ?", (today_str,))
-        
-        temp_today = cur.execute("SELECT temp_id, shift_num FROM temp_schedules WHERE schedule_date = ?", (today_str,)).fetchall()
-        for temp_id, shift_num in temp_today:
-            start_h, end_h = get_shift_hours(shift_num)
-            if start_h < end_h:
-                if current_hour >= end_h:
-                    cur.execute("DELETE FROM temp_schedules WHERE temp_id = ?", (temp_id,))
-            else:
-                if 1 <= current_hour < 19:
-                    cur.execute("DELETE FROM temp_schedules WHERE temp_id = ?", (temp_id,))
-
-        cur.execute("DELETE FROM host_offlines WHERE offline_type = 'temporary' AND offline_date < ?", (today_str,))
-        cur.execute("DELETE FROM live_sessions WHERE end_time IS NULL AND total_coins = 0 AND datetime(start_time) < datetime('now', '-30 minutes')")
-        
-        conn.commit()
-    finally:
-        conn.close()
 
 HOST_ALIASES = {
     # Sinta / Mommy
@@ -383,6 +364,7 @@ HOST_ALIASES = {
     "shinta": "Sinta",
     # Zize
     "zize": "Zize",
+    "zeze": "Zize",
     # Solen
     "solen": "Solen",
     # Yosa
@@ -392,20 +374,26 @@ HOST_ALIASES = {
     "ilya": "Ielya",
     # Yuca
     "yuca": "Yuca",
-    "yuka": "Yuca",
+    "yuc": "Yuca",
     # Cole
     "cole": "Cole",
     # Luna
     "luna": "Luna",
-    # New accounts
-    "steffany": "Steffany Alisha",
-    "stefanny": "Steffany Alisha",
-    "alisha": "Steffany Alisha",
+    # Target Accounts Aliases
+    "george": "George Vilora",
+    "vilora": "George Vilora",
+    "jeremy": "Jeremy Jean",
+    "jean": "Jeremy Jean",
+    "clarissa": "Jeremy Jean",
+    "stefanny": "Steffanny Alisha",
+    "steffany": "Steffanny Alisha",
+    "alisha": "Steffanny Alisha",
     "julianne": "Julianne",
     "julian": "Julianne",
     "frank": "Frank Lynn",
     "franklyn": "Frank Lynn",
-    "dummy": "Dummy Dreams",
+    "dummy": "Dummy Dreams Entertaiment",
+    "dummydreams": "Dummy Dreams Entertaiment",
 }
 
 def detect_host_from_welcome_message(text: str):

@@ -44,7 +44,8 @@ from db import (
     detect_host_from_welcome_message,
     get_current_host_for_account,
     set_current_host_for_account,
-    update_live_session_host
+    update_live_session_host,
+    get_channel_display_name
 )
 
 # Set global untuk melacak host yang saat ini sedang LIVE
@@ -261,20 +262,22 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                         coins=coins
                     )
 
-                    # Format Waktu: [jj:mm:dd] (WIB: HH:MM:SS)
+                    # Format Waktu WIB
                     wib = pytz.timezone('Asia/Jakarta')
                     now_wib = datetime.now(wib)
-                    time_jj_mm_dd = now_wib.strftime('%H:%M:%S')
+                    full_datetime = now_wib.strftime('%Y-%m-%d %H:%M:%S')
                     today_str = now_wib.strftime('%Y-%m-%d')
 
                     channel_spent = get_user_channel_spent(user, username_clean)
                     today_spent = get_user_today_spent(user, today_str)
                     total_all = get_user_total_spent(user)
+                    channel_name = get_channel_display_name(username_clean)
 
-                    # Format log activity: [@user channel] [jj:mm:dd] @namapengguna - Nama gift - jumlah koin [(jumlah)c]- [(total koin spent di channel ini) c] - [today (total koin di spent hari ini)c] - [total (total koin keseluruhan)c]
+                    # Log activity gift lengkap: tanggal, nama akun, user, nama gift, jumlah koin, total koin saat ini
                     gift_msg = (
-                        f"[@{username_clean} channel] [{time_jj_mm_dd}] @{user} - {gift_name} - "
-                        f"{coins} koin [{coins}c]- [{channel_spent} c] - [today {today_spent}c] - [total {total_all}c]"
+                        f"[{full_datetime}] [{channel_name} (@{username_clean})] "
+                        f"User: @{user} - {gift_name} - {coins} koin [{coins}c] - "
+                        f"[channel {channel_spent} c] - [today {today_spent} c] - [total saat ini: {total_all} c]"
                     )
                     log_activity_event("gift", gift_msg, username_clean)
                     print(f"[Activity] {gift_msg}")

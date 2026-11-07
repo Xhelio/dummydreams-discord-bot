@@ -1,19 +1,13 @@
 import json
 import os
-from db import get_db_connection, get_scheduled_host_name
+from db import get_db_connection, get_current_host_for_account, get_channel_display_name
 
 def get_schedule_info(tiktok_username: str):
+    """Mengembalikan nama host (berbasis welcome message) dan nama channel resmi."""
     u_clean = tiktok_username.lower().lstrip("@")
-    host_name = get_scheduled_host_name(u_clean)
-    
-    conn = get_db_connection()
-    try:
-        cur = conn.cursor()
-        row = cur.execute("SELECT display_name FROM hosts WHERE tiktok_username = ?", (u_clean,)).fetchone()
-        account_name = row[0] if row and row[0] else u_clean
-        return host_name, account_name
-    finally:
-        conn.close()
+    host_name = get_current_host_for_account(u_clean)
+    account_name = get_channel_display_name(u_clean)
+    return host_name, account_name
 
 def load_role_config():
     if os.path.exists("config/roles.json"):

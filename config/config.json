@@ -1,36 +1,28 @@
 {
   "accounts": [
     {
-      "account_name": "Jeremy Jean",
-      "tiktok_username": "clarissadreams"
-    },
-    {
       "account_name": "George Vilora",
       "tiktok_username": "georgevilora"
     },
     {
-      "account_name": "Steffany Alisha",
-      "tiktok_username": "stefannyalisha"
-    },
-    {
-      "account_name": "Steffany Alisha",
-      "tiktok_username": "steffannyalisha"
-    },
-    {
-      "account_name": "Julianne",
-      "tiktok_username": "julliannedreams"
+      "account_name": "Jeremy Jean",
+      "tiktok_username": "clarissadreams"
     },
     {
       "account_name": "Julianne",
       "tiktok_username": "juliannedreams"
     },
     {
-      "account_name": "Dummy Dreams Entertaiment",
-      "tiktok_username": "dummydreamsentertaiment"
-    },
-    {
       "account_name": "Frank Lynn",
       "tiktok_username": "franklyndreams"
+    },
+    {
+      "account_name": "Steffanny Alisha",
+      "tiktok_username": "stefannyalisha"
+    },
+    {
+      "account_name": "Dummy Dreams Entertaiment",
+      "tiktok_username": "dummydreamsentertaiment"
     }
   ],
   "default_name": "Host",
