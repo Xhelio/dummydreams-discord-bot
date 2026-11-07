@@ -123,6 +123,104 @@ def get_active_hosts() -> list:
     finally:
         conn.close()
 
+def get_active_live_announcement(tiktok_username: str):
+    """Mengambil sesi pengumuman live yang tersimpan untuk satu akun TikTok.
+
+    Sesi ini menyimpan channel & message Discord yang sudah dikirim, sehingga
+    notifikasi berikutnya cukup di-EDIT (tidak mengirim pesan baru).
+    """
+    u_clean = tiktok_username.lower().lstrip("@")
+    conn = get_db_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT tiktok_username, channel_id, message_id, host_name, created_at
+            FROM active_live_announcements
+            WHERE tiktok_username = ?
+            """,
+            (u_clean,),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "tiktok_username": row[0],
+            "channel_id": str(row[1]) if row[1] is not None else None,
+            "message_id": str(row[2]) if row[2] is not None else None,
+            "host_name": row[3] if len(row) > 3 else None,
+            "created_at": row[4] if len(row) > 4 else None,
+        }
+    finally:
+        conn.close()
+
+def get_all_active_live_announcements() -> list:
+    """Mengambil semua sesi pengumuman live aktif (untuk rekonsiliasi saat startup)."""
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT tiktok_username, channel_id, message_id, host_name, created_at
+            FROM active_live_announcements
+            """
+        ).fetchall()
+        return [
+            {
+                "tiktok_username": r[0],
+                "channel_id": str(r[1]) if r[1] is not None else None,
+                "message_id": str(r[2]) if r[2] is not None else None,
+                "host_name": r[3] if len(r) > 3 else None,
+                "created_at": r[4] if len(r) > 4 else None,
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+def save_active_live_announcement(tiktok_username: str, channel_id, message_id, host_name: str = None):
+    """Menyimpan / memperbarui sesi pengumuman live (1 pesan per akun TikTok)."""
+    u_clean = tiktok_username.lower().lstrip("@")
+    conn = get_db_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO active_live_announcements (tiktok_username, channel_id, message_id, host_name)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(tiktok_username) DO UPDATE SET
+                channel_id = excluded.channel_id,
+                message_id = excluded.message_id,
+                host_name = COALESCE(excluded.host_name, active_live_announcements.host_name)
+            """,
+            (u_clean, str(channel_id), str(message_id), host_name),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+def update_active_live_announcement_host(tiktok_username: str, host_name: str):
+    """Memperbarui nama host pada sesi pengumuman live (mis. saat jadwal/host berubah)."""
+    u_clean = tiktok_username.lower().lstrip("@")
+    conn = get_db_connection()
+    try:
+        conn.execute(
+            "UPDATE active_live_announcements SET host_name = ? WHERE tiktok_username = ?",
+            (host_name, u_clean),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+def delete_active_live_announcement(tiktok_username: str):
+    """Menghapus sesi pengumuman live setelah live berakhir."""
+    u_clean = tiktok_username.lower().lstrip("@")
+    conn = get_db_connection()
+    try:
+        conn.execute(
+            "DELETE FROM active_live_announcements WHERE tiktok_username = ?",
+            (u_clean,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
 def init_db():
     conn = get_db_connection()
     try:
@@ -144,6 +242,7 @@ def init_db():
                 tiktok_username TEXT PRIMARY KEY,
                 channel_id TEXT NOT NULL,
                 message_id TEXT NOT NULL,
+                host_name TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -247,6 +346,12 @@ def init_db():
                 conn.execute(f"ALTER TABLE gift_logs ADD COLUMN {col} {dtype}")
             except Exception:
                 pass
+
+        # Migrasi kolom host_name pada sesi pengumuman live (database lama)
+        try:
+            conn.execute("ALTER TABLE active_live_announcements ADD COLUMN host_name TEXT")
+        except Exception:
+            pass
 
         cur = conn.cursor()
         

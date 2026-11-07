@@ -13,6 +13,11 @@ from db import (
     save_daily_gift_data,
     get_setting,
     set_setting,
+    get_active_live_announcement,
+    get_all_active_live_announcements,
+    save_active_live_announcement,
+    update_active_live_announcement_host,
+    delete_active_live_announcement,
     is_tiktok_user_in_db,
     is_user_already_claimed,
     get_user_mapping,
@@ -168,21 +173,77 @@ async def auto_assign_role(tiktok_user: str, total_coins: int):
             except Exception as e:
                 print(f"[Discord] Error removing previous tier roles: {e}")
 
+async def _resolve_announcement_channel(announcement_session: dict = None):
+    """Menentukan channel Discord tempat sesi pengumuman tersimpan (fallback ke env)."""
+    channel_id = None
+    if announcement_session and announcement_session.get("channel_id"):
+        try:
+            channel_id = int(announcement_session["channel_id"])
+        except (TypeError, ValueError):
+            channel_id = None
+    if not channel_id:
+        channel_id = ANNOUNCEMENT_CHANNEL_ID
+    if not channel_id:
+        return None
+
+    channel = bot.get_channel(channel_id)
+    if channel:
+        return channel
+    try:
+        return await bot.fetch_channel(channel_id)
+    except Exception as e:
+        print(f"[Discord] Notification failed: Channel ID {channel_id} not found ({e}).")
+        return None
+
+async def _fetch_announcement_message(channel, message_id):
+    """Mengambil pesan pengumuman lama dari sesi yang tersimpan."""
+    if not channel or not message_id:
+        return None
+    try:
+        return await channel.fetch_message(int(message_id))
+    except Exception as e:
+        print(f"[Discord] Stored announcement message {message_id} is no longer available ({e}).")
+        return None
+
 async def process_live_announcement(username: str, is_live: bool, host_name: str = None):
-    user_key = username.lower()
+    """Kelola 1 pesan pengumuman per akun TikTok berdasarkan sesi yang tersimpan.
+
+    - Live mulai  : kirim 1x, lalu simpan channel/message/host ke active_live_announcements.
+    - Masih live  : jangan kirim pesan baru. Jika host/jadwal berubah, EDIT pesan lama.
+    - Live berhenti: hapus pesan Discord lama, lalu hapus sesinya dari database.
+    """
+    user_key = username.lower().lstrip("@")
     async with NOTIFICATION_LOCK:
-        if not ANNOUNCEMENT_CHANNEL_ID:
-            print("[Discord] Notification failed: ANNOUNCEMENT_CHANNEL_ID is not set.")
+        if not bot.is_ready():
+            await bot.wait_until_ready()
+
+        # Ambil sesi pengumuman yang tersimpan (jika ada)
+        announcement_session = get_active_live_announcement(user_key)
+
+        # --- LIVE BERHENTI: hapus pesan lewat sesi tersimpan, lalu hapus sesi ---
+        if not is_live:
+            if not announcement_session:
+                return
+
+            channel = await _resolve_announcement_channel(announcement_session)
+            old_msg = await _fetch_announcement_message(
+                channel, announcement_session.get("message_id")
+            )
+            if old_msg:
+                try:
+                    await old_msg.delete()
+                    print(f"[Discord] Deleted live announcement message for @{user_key} because stream is offline.")
+                except Exception as e:
+                    print(f"[Discord] Failed to delete message for @{user_key}: {e}")
+
+            delete_active_live_announcement(user_key)
+            print(f"[Discord] Announcement session cleared for @{user_key}.")
             return
 
-        await bot.wait_until_ready()
-        channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
-        if not channel:
-            try:
-                channel = await bot.fetch_channel(ANNOUNCEMENT_CHANNEL_ID)
-            except Exception as e:
-                print(f"[Discord] Notification failed: Channel ID {ANNOUNCEMENT_CHANNEL_ID} not found ({e}).")
-                return
+        # --- LIVE MULAI / MASIH LIVE ---
+        if not ANNOUNCEMENT_CHANNEL_ID and not announcement_session:
+            print("[Discord] Notification failed: ANNOUNCEMENT_CHANNEL_ID is not set.")
+            return
 
         sched_host, account_name = get_schedule_info(user_key)
         final_host_name = host_name or sched_host or account_name or "Host"
@@ -193,57 +254,53 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
             f"Watch here:\n{live_url}"
         )
 
-        conn = get_db_connection()
-        try:
-            res = conn.execute(
-                "SELECT channel_id, message_id FROM active_live_announcements WHERE tiktok_username = ?",
-                (user_key,)
+        channel = await _resolve_announcement_channel(announcement_session)
+        if not channel:
+            return
+
+        # Jika sesi sudah ada: edit pesan lama (termasuk saat host/jadwal berubah)
+        if announcement_session:
+            old_msg = await _fetch_announcement_message(
+                channel, announcement_session.get("message_id")
             )
-            row = res.fetchone()
-
-            old_msg = None
-            if row:
-                old_message_id = int(row[1])
-                try:
-                    old_msg = await channel.fetch_message(old_message_id)
-                except Exception:
-                    old_msg = None
-
-            if is_live:
-                # Batasi hanya mengirim terbatas 1 kali per akun track ke discord. Jika update, edit postingan
-                if old_msg:
-                    if old_msg.content != live_content:
-                        try:
-                            await old_msg.edit(content=live_content)
-                            print(f"[Discord] Edited/updated live announcement for @{user_key} (Host: {final_host_name})")
-                        except Exception as e:
-                            print(f"[Discord] Failed to edit live announcement for @{user_key}: {e}")
-                    # Jangan pernah kirim pesan baru berulang kali jika pesan lama sudah ada
-                    return
-
-                new_msg = await channel.send(live_content)
-                conn.execute(
-                    "INSERT OR REPLACE INTO active_live_announcements (tiktok_username, channel_id, message_id) VALUES (?, ?, ?)",
-                    (user_key, str(channel.id), str(new_msg.id))
-                )
-                conn.commit()
-                print(f"[Discord] Sent 1-time live announcement for @{user_key} (Msg ID: {new_msg.id})")
-            else:
-                # "jika offline maka hapus pesan, jadi bot tidak mengirim pesan baru terus menerus"
-                if old_msg:
+            if old_msg:
+                if old_msg.content != live_content:
                     try:
-                        await old_msg.delete()
-                        print(f"[Discord] Deleted live announcement message for @{user_key} because stream is offline.")
+                        await old_msg.edit(content=live_content)
+                        print(f"[Discord] Edited/updated live announcement for @{user_key} (Host: {final_host_name})")
                     except Exception as e:
-                        print(f"[Discord] Failed to delete message for @{user_key}: {e}")
+                        print(f"[Discord] Failed to edit live announcement for @{user_key}: {e}")
+                if announcement_session.get("host_name") != final_host_name:
+                    update_active_live_announcement_host(user_key, final_host_name)
+                return
+            # Pesan lama sudah tidak ada (dihapus manual) -> kirim ulang & perbarui sesi
+            print(f"[Discord] Announcement message for @{user_key} missing, sending a new one.")
 
-                conn.execute("DELETE FROM active_live_announcements WHERE tiktok_username = ?", (user_key,))
-                conn.commit()
+        # Kirim 1x lalu simpan sesinya agar update berikutnya cukup edit pesan ini
+        new_msg = await channel.send(live_content)
+        save_active_live_announcement(user_key, channel.id, new_msg.id, final_host_name)
+        print(f"[Discord] Sent 1-time live announcement for @{user_key} (Msg ID: {new_msg.id})")
 
-        except Exception as e:
-            print(f"[Discord Error] Failed to process announcement for @{user_key}: {e}")
-        finally:
-            conn.close()
+async def reconcile_announcement_sessions(delay_seconds: int = 120):
+    """Bersihkan sesi/pesan pengumuman basi setelah bot restart.
+
+    Sesi yang tersimpan tetapi akunnya tidak sedang live (tidak ada observer yang
+    terhubung) akan dihapus beserta pesan Discord-nya, supaya tidak ada pesan
+    "just live" yang menggantung.
+    """
+    await asyncio.sleep(delay_seconds)
+    try:
+        sessions = get_all_active_live_announcements()
+        if not sessions:
+            return
+        live_now = set(get_current_live_hosts())
+        for item in sessions:
+            username = (item.get("tiktok_username") or "").lower()
+            if username and username not in live_now:
+                print(f"[Discord] Stale announcement session for @{username} found after restart, cleaning up.")
+                await process_live_announcement(username, False)
+    except Exception as e:
+        print(f"[Discord] Announcement reconciliation failed: {e}")
 
 # --- Discord UI Components (Modals & Views) ---
 
@@ -583,6 +640,10 @@ async def on_ready():
     print(f"[Discord] Bot logged in as {bot.user}")
     # Daftarkan persistent view agar tombol verifikasi selalu aktif
     bot.add_view(VerificationChannelView())
+    # Setelah restart, bersihkan sesi pengumuman yang sudah tidak live (pesan ikut dihapus)
+    if not getattr(bot, "_announcement_reconcile_started", False):
+        bot._announcement_reconcile_started = True
+        asyncio.create_task(reconcile_announcement_sessions())
 
 @bot.event
 async def on_member_join(member: discord.Member):
@@ -819,6 +880,64 @@ async def livesessions(ctx, host_username: str = None):
         await ctx.send(msg)
     finally:
         conn.close()
+
+@bot.command(name="help", aliases=["commands", "bantuan"])
+async def help_command(ctx):
+    """Menampilkan daftar command bot beserta kegunaannya."""
+    embed = discord.Embed(
+        title="📖 Bantuan Dummy Dream Bot",
+        description=(
+            f"Halo {ctx.author.mention}! Berikut daftar command yang tersedia.\n"
+            f"Prefix: `!` • Contoh: `!mycoins`"
+        ),
+        color=discord.Color.from_rgb(0, 168, 255)
+    )
+    embed.add_field(
+        name="🔑 Verifikasi & Akun",
+        value=(
+            "`!claim` — mulai verifikasi akun TikTok (tombol, privat via DM)\n"
+            "`!claim <username>` — verifikasi langsung dengan username TikTok\n"
+            "`!mycoins` — lihat total koin kamu (`!check`, `!coins`)\n"
+            "`!myhistory` — 5 riwayat gift terakhir kamu"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="🏆 Statistik & Live",
+        value=(
+            "`!topsupporter` — leaderboard supporter (`!leaderboard`, `!koin`)\n"
+            "`!dailyrank` — ranking koin hari ini (`!daily`, `!harini`)\n"
+            "`!livesessions` — riwayat sesi live terakhir (`!sessions`)\n"
+            "`!livesessions <username>` — riwayat sesi live akun tertentu\n"
+            "`!help` — tampilkan pesan bantuan ini"
+        ),
+        inline=False
+    )
+
+    is_admin = isinstance(ctx.author, discord.Member) and ctx.author.guild_permissions.administrator
+    if is_admin:
+        embed.add_field(
+            name="🛡️ Admin",
+            value=(
+                "`!setup_verification` — kirim panel verifikasi ke channel ini\n"
+                "`!set_verified_role @role` — atur role setelah verifikasi\n"
+                "`!unclaim @member` — hapus ikatan akun TikTok member"
+            ),
+            inline=False
+        )
+
+    live_hosts = get_current_live_hosts()
+    if live_hosts:
+        embed.add_field(
+            name="🟢 Sedang Live",
+            value="\n".join(
+                [f"• @{h} — https://www.tiktok.com/@{h}/live" for h in live_hosts]
+            ),
+            inline=False
+        )
+
+    embed.set_footer(text="Dummy Dream Bot • Ketik !help kapan saja")
+    await ctx.send(embed=embed)
 
 async def main():
     init_db()
