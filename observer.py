@@ -6,12 +6,29 @@ from TikTokLive.events import (
     ConnectEvent, 
     DisconnectEvent, 
     GiftEvent, 
-    CommentEvent,
-    GreetingEvent,
-    LiveIntroEvent,
-    NoticeEvent,
-    RoomPinEvent
+    CommentEvent
 )
+
+# Optional events (beberapa event mungkin tidak tersedia di versi TikTokLive tertentu, misal v7+)
+try:
+    from TikTokLive.events import GreetingEvent
+except ImportError:
+    GreetingEvent = None
+
+try:
+    from TikTokLive.events import LiveIntroEvent
+except ImportError:
+    LiveIntroEvent = None
+
+try:
+    from TikTokLive.events import NoticeEvent
+except ImportError:
+    NoticeEvent = None
+
+try:
+    from TikTokLive.events import RoomPinEvent
+except ImportError:
+    RoomPinEvent = None
 from db import (
     save_gift_data, 
     save_daily_gift_data, 
@@ -173,37 +190,43 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             except Exception as e:
                 print(f"[{username_clean}] Error in on_comment handler: {e}")
 
-        @client.on(GreetingEvent)
-        async def on_greeting(event: GreetingEvent):
-            try:
-                greeting_text = getattr(event, 'greeting_text', '') or getattr(event, 'guide_text', '')
-                await check_and_update_host_from_text(greeting_text)
-            except Exception as e:
-                print(f"[{username_clean}] Error in on_greeting handler: {e}")
+        if GreetingEvent:
+            @client.on(GreetingEvent)
+            async def on_greeting(event):
+                try:
+                    greeting_text = getattr(event, 'greeting_text', '') or getattr(event, 'guide_text', '')
+                    await check_and_update_host_from_text(greeting_text)
+                except Exception as e:
+                    print(f"[{username_clean}] Error in on_greeting handler: {e}")
 
-        @client.on(LiveIntroEvent)
-        async def on_live_intro(event: LiveIntroEvent):
-            try:
-                content = getattr(event, 'content', '')
-                await check_and_update_host_from_text(content)
-            except Exception as e:
-                print(f"[{username_clean}] Error in on_live_intro handler: {e}")
+        if LiveIntroEvent:
+            @client.on(LiveIntroEvent)
+            async def on_live_intro(event):
+                try:
+                    content = getattr(event, 'content', '')
+                    await check_and_update_host_from_text(content)
+                except Exception as e:
+                    print(f"[{username_clean}] Error in on_live_intro handler: {e}")
 
-        @client.on(NoticeEvent)
-        async def on_notice(event: NoticeEvent):
-            try:
-                notice_text = getattr(event, 'content', '') or getattr(event, 'notice_content', '')
-                await check_and_update_host_from_text(notice_text)
-            except Exception as e:
-                print(f"[{username_clean}] Error in on_notice handler: {e}")
+        if NoticeEvent:
+            @client.on(NoticeEvent)
+            async def on_notice(event):
+                try:
+                    notice_text = getattr(event, 'content', '') or getattr(event, 'notice_content', '')
+                    await check_and_update_host_from_text(notice_text)
+                except Exception as e:
+                    print(f"[{username_clean}] Error in on_notice handler: {e}")
 
-        @client.on(RoomPinEvent)
-        async def on_room_pin(event: RoomPinEvent):
-            try:
-                chat_msg = getattr(event, 'chat_message', '')
-                await check_and_update_host_from_text(chat_msg)
-            except Exception as e:
-                print(f"[{username_clean}] Error in on_room_pin handler: {e}")
+        if RoomPinEvent:
+            @client.on(RoomPinEvent)
+            async def on_room_pin(event):
+                try:
+                    chat_msg = getattr(event, 'chat_message', '')
+                    if hasattr(chat_msg, 'content'):
+                        chat_msg = chat_msg.content
+                    await check_and_update_host_from_text(str(chat_msg or ''))
+                except Exception as e:
+                    print(f"[{username_clean}] Error in on_room_pin handler: {e}")
 
         @client.on(GiftEvent)
         async def on_gift(event: GiftEvent):
