@@ -789,18 +789,18 @@ def view_verifications():
         NAV_HTML_PLACEHOLDER
 
         <div class="card">
-            <h2>⚙️ Verification Role & Channel Configuration</h2>
-            <form action="/admin/save-verification-settings" method="POST" class="form-grid" style="grid-template-columns: 1fr 1fr auto; align-items: end;">
-                <div>
-                    <label style="font-size: 0.8rem; color: #94a3b8;">Verified Role ID:</label>
-                    <input type="text" name="verified_role_id" value="{{ verified_role_id }}" placeholder="Example: 1554883561759187105" required>
-                </div>
-                <div>
-                    <label style="font-size: 0.8rem; color: #94a3b8;">Verification Channel ID:</label>
-                    <input type="text" name="verification_channel_id" value="{{ verification_channel_id }}" placeholder="Example: 123456789012345678">
-                </div>
-                <button type="submit">💾 Save Configuration</button>
-            </form>
+            <h2>⚙️ Verification Configuration</h2>
+            <p class="muted" style="margin-bottom: 10px;">
+                Verified role and verification channel settings are managed in <strong>Bot Settings</strong> to keep all bot controls in one place.
+            </p>
+            <table>
+                <tr><th>Setting</th><th>Value</th></tr>
+                <tr><td>Verified Role ID</td><td><code>{{ verified_role_id or '-' }}</code></td></tr>
+                <tr><td>Verification Channel ID</td><td><code>{{ verification_channel_id or '-' }}</code></td></tr>
+            </table>
+            <p style="margin-top: 12px;">
+                <a href="/admin/settings" class="nav-btn" style="display:inline-flex;">⚙️ Open Bot Settings</a>
+            </p>
         </div>
 
         <div class="card">
@@ -868,13 +868,8 @@ def view_verifications():
 
 @admin_bp.route('/save-verification-settings', methods=['POST'])
 def save_verification_settings():
-    v_role = request.form.get('verified_role_id', '').strip()
-    v_chan = request.form.get('verification_channel_id', '').strip()
-    if v_role:
-        set_setting('verified_role_id', v_role)
-    if v_chan:
-        set_setting('verification_channel_id', v_chan)
-    return redirect('/admin/verifications')
+    # Consolidated into /admin/settings to avoid duplicate/conflicting config.
+    return redirect('/admin/settings')
 
 @admin_bp.route('/unclaim-user/<int:discord_id>', methods=['POST'])
 def unclaim_user_admin(discord_id):
