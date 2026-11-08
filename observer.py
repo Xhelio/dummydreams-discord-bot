@@ -29,6 +29,11 @@ try:
     from TikTokLive.events import RoomPinEvent
 except ImportError:
     RoomPinEvent = None
+
+try:
+    from TikTokLive.client.web.web_client import FetchRoomIdAPIRoute
+except Exception:
+    FetchRoomIdAPIRoute = None
 from db import (
     save_gift_data, 
     save_daily_gift_data, 
@@ -78,6 +83,50 @@ async def _trigger_announcement(announcement_callback, username: str, is_live: b
     except Exception as e:
         print(f"[{username}] Error triggering announcement callback: {e}")
 
+
+async def probe_room_live(username: str):
+    """Best-effort probe for TikTok live status. Returns True/False/None."""
+    username = (username or "").lower().lstrip("@")
+    if not username or FetchRoomIdAPIRoute is None:
+        return None
+    try:
+        client = TikTokLiveClient(unique_id=username)
+        web = getattr(client, "web", None)
+        if web is None:
+            return None
+        fetch = getattr(FetchRoomIdAPIRoute, "fetch_user_room_data", None)
+        if fetch is None:
+            return None
+        data = await fetch(web, username)
+        payload = data or {}
+        root = payload.get("data") if isinstance(payload, dict) else {}
+        if not isinstance(root, dict):
+            root = payload if isinstance(payload, dict) else {}
+
+        user = root.get("user") if isinstance(root.get("user"), dict) else {}
+        room = root.get("liveRoom") or root.get("live_room") or user.get("liveRoom") or user.get("live_room") or {}
+        if not isinstance(room, dict):
+            room = {}
+
+        status = user.get("status")
+        if status in (2, "2"):
+            return True
+        for key in ("roomId", "room_id", "roomIdStr", "id_str", "id"):
+            value = room.get(key) or root.get(key)
+            if value and str(value) not in ("0", "", "None"):
+                # A room ID alone is not always proof of live; combine with status hints when present.
+                if room.get("status") in (2, "2") or root.get("status") in (2, "2"):
+                    return True
+        if room.get("status") in (2, "2"):
+            return True
+        # Conservative default when structure is recognized but no live signal found.
+        if user or room or root:
+            return False
+    except Exception as e:
+        print(f"[{username}] Live probe error: {e}")
+        return None
+    return None
+
 def clear_active_live_status(username: str):
     """Menghapus status live akun dari database."""
     conn = get_db_connection()
@@ -114,12 +163,16 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             # Update/edit pesan pengumuman yang sudah ada di Discord
             await _trigger_announcement(announcement_callback, username_clean, True, host_name=detected)
 
+    consecutive_failures = 0
+    probed_live = False
+
     async def delayed_disconnect_handler(session_to_close):
         """Menunggu grace period 30 detik sebelum benar-benar menyatakan live berakhir di Discord."""
         try:
             await asyncio.sleep(30)
-            nonlocal is_connected, current_session_id
+            nonlocal is_connected, current_session_id, probed_live
             runtime_status.clear_live(username_clean)
+            probed_live = False
             if session_to_close:
                 end_live_session(session_to_close)
             # Saat offline, bot Discord akan MENGHAPUS pesan pengumuman lewat sesi tersimpan.
@@ -134,10 +187,11 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
 
     while True:
         client = TikTokLiveClient(unique_id=username_clean)
+        connected_this_cycle = False
 
         @client.on(ConnectEvent)
         async def on_connect(event: ConnectEvent):
-            nonlocal current_session_id, is_connected, disconnect_timer_task, current_host
+            nonlocal current_session_id, is_connected, disconnect_timer_task, current_host, connected_this_cycle, consecutive_failures, probed_live
             try:
                 # Jika sebelumnya ada pending disconnect timer, batalkan karena sudah terhubung kembali
                 if disconnect_timer_task and not disconnect_timer_task.done():
@@ -146,7 +200,16 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     print(f"[{username_clean}] Reconnected within grace period. Live status maintained.")
 
                 is_connected = True
-                runtime_status.set_live(username_clean, current_host)
+                connected_this_cycle = True
+                consecutive_failures = 0
+                probed_live = False
+                runtime_status.set_live(username_clean, current_host, source="event")
+                runtime_status.update_observer_diag(
+                    username_clean,
+                    status="connected",
+                    consecutive_failures=0,
+                    last_error=None,
+                )
                 print(f"[{username_clean}] Connected to live stream.")
 
                 # Cek apakah judul / room_info memuat nama host dari welcome message
@@ -155,7 +218,8 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     if title:
                         await check_and_update_host_from_text(title)
 
-                current_session_id = start_live_session(username_clean, initial_host=current_host)
+                if not current_session_id:
+                    current_session_id = start_live_session(username_clean, initial_host=current_host)
 
                 connect_msg = f"Connected to @{username_clean}'s live (Host: {current_host})"
                 log_activity_event("connect", connect_msg, username_clean)
@@ -164,14 +228,15 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 await _trigger_announcement(announcement_callback, username_clean, True, host_name=current_host)
             except Exception as e:
                 # Keep runtime live status even if DB/announcement side effects fail.
-                runtime_status.set_live(username_clean, current_host)
+                runtime_status.set_live(username_clean, current_host, source="event")
+                runtime_status.update_observer_diag(username_clean, status="connected_with_handler_error", last_error=str(e))
                 print(f"[{username_clean}] Connect handler error (live status preserved): {e}")
 
         @client.on(DisconnectEvent)
         async def on_disconnect(event: DisconnectEvent):
             nonlocal current_session_id, is_connected, disconnect_timer_task
             print(f"[{username_clean}] Disconnected from live stream.")
-            
+
             if is_connected:
                 is_connected = False
                 disconnect_msg = f"Disconnected from @{username_clean}'s live"
@@ -303,6 +368,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             except Exception as e:
                 print(f"[{username_clean}] Error handling GiftEvent: {e}")
 
+        cycle_error = None
         try:
             # Jalankan client koneksi TikTok Live
             await client.start()
@@ -316,14 +382,22 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 except Exception:
                     pass
             runtime_status.clear_live(username_clean)
+            runtime_status.update_observer_diag(username_clean, status="stopped")
             raise
         except Exception as e:
-            # Log santai jika stream offline
+            cycle_error = e
             err = str(e)
-            if "LIVE" in err.upper() or "offline" in err.lower() or "not found" in err.lower():
+            consecutive_failures += 1
+            runtime_status.update_observer_diag(
+                username_clean,
+                status="error",
+                consecutive_failures=consecutive_failures,
+                last_error=err[:300],
+            )
+            if "offline" in err.lower() or "not found" in err.lower():
                 print(f"[{username_clean}] Not live/offline check: {e}")
             else:
-                print(f"[{username_clean}] Observer error while checking live: {e}")
+                print(f"[{username_clean}] Observer error while checking live (failures={consecutive_failures}): {e}")
         finally:
             if is_connected:
                 is_connected = False
@@ -334,8 +408,57 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     disconnect_timer_task = asyncio.create_task(delayed_disconnect_handler(current_session_id))
                     current_session_id = None
 
-        # Interval jeda sebelum cek rutin ulang status live berikutnya
-        await asyncio.sleep(30)
+        # Secondary probe: if the event client didn't connect but TikTok reports live,
+        # mark status/announcement so the dashboard is not stuck on "No Live Now".
+        grace_pending = bool(disconnect_timer_task and not disconnect_timer_task.done())
+        if not connected_this_cycle:
+            probe = await probe_room_live(username_clean)
+            runtime_status.update_observer_diag(
+                username_clean,
+                probe_live=probe,
+                last_probe_at=datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%Y-%m-%d %H:%M:%S'),
+            )
+            if probe is True:
+                if grace_pending and disconnect_timer_task and not disconnect_timer_task.done():
+                    disconnect_timer_task.cancel()
+                    disconnect_timer_task = None
+                    print(f"[{username_clean}] Probe confirms live during grace period; keeping live status.")
+                if not probed_live and username_clean not in get_current_live_hosts():
+                    probed_live = True
+                    runtime_status.set_live(username_clean, current_host, source="probe")
+                    if not current_session_id:
+                        current_session_id = start_live_session(username_clean, initial_host=current_host)
+                    await _trigger_announcement(announcement_callback, username_clean, True, host_name=current_host)
+                    print(f"[{username_clean}] Live detected by probe fallback (event client not connected).")
+                else:
+                    runtime_status.set_live(username_clean, current_host, source=runtime_status.get_live_snapshot().get(username_clean, {}).get("source", "probe"))
+                    runtime_status.touch_live(username_clean)
+                consecutive_failures = 0
+            elif probe is False and not grace_pending:
+                if probed_live:
+                    runtime_status.clear_live(username_clean)
+                    if current_session_id:
+                        try:
+                            end_live_session(current_session_id)
+                        except Exception:
+                            pass
+                        current_session_id = None
+                    await _trigger_announcement(announcement_callback, username_clean, False)
+                    probed_live = False
+                if cycle_error is None:
+                    runtime_status.update_observer_diag(username_clean, status="offline", consecutive_failures=0, last_error=None)
+            elif probe is None and cycle_error is None and not grace_pending:
+                runtime_status.update_observer_diag(username_clean, status="checking")
+        else:
+            consecutive_failures = 0
+
+        # Adaptive retry: back off slightly on repeated failures, but keep checking.
+        wait_seconds = 30
+        if not connected_this_cycle and consecutive_failures >= 5:
+            wait_seconds = 60
+        if not connected_this_cycle and consecutive_failures >= 10:
+            wait_seconds = 120
+        await asyncio.sleep(wait_seconds)
 
 async def run_all_observers(announcement_callback, role_callback, comment_callback=None):
     """Supervise one observer task per active host, refreshing from the DB.

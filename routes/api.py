@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify
 import os
 import json
 from db import check_database_health, get_bool_setting
-from runtime_status import get_bot_status, get_live_snapshot
+from runtime_status import get_bot_status, get_live_snapshot, get_observer_diag
 
 api_bp = Blueprint('api', __name__, url_prefix='/api')
 async_announcement_handler = None
@@ -30,6 +30,7 @@ def health_check():
         "tiktok_live": {
             "count": len(live_accounts),
             "accounts": live_accounts,
+            "observer": get_observer_diag(),
         },
         "master_enabled": get_bool_setting("master_enabled", True),
     }

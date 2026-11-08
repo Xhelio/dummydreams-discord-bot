@@ -14,6 +14,7 @@ _BOT = {
     "ready_at": None,
 }
 _LIVE = {}
+_OBSERVER = {}
 
 
 def set_bot_ready(user_name: str):
@@ -34,7 +35,7 @@ def get_bot_status() -> dict:
         return dict(_BOT)
 
 
-def set_live(username: str, host_name: str = None):
+def set_live(username: str, host_name: str = None, source: str = "event"):
     username = (username or "").lower().lstrip("@")
     if not username:
         return
@@ -43,6 +44,7 @@ def set_live(username: str, host_name: str = None):
         item["host"] = host_name or item.get("host") or "Host"
         item["since"] = item.get("since") or datetime.now(timezone.utc).isoformat()
         item["last_event"] = datetime.now(timezone.utc).isoformat()
+        item["source"] = source
         _LIVE[username] = item
 
 
@@ -67,3 +69,19 @@ def get_live_usernames() -> list:
 def get_live_snapshot() -> dict:
     with _LOCK:
         return {username: dict(data) for username, data in _LIVE.items()}
+
+
+def update_observer_diag(username: str, **fields):
+    username = (username or "").lower().lstrip("@")
+    if not username:
+        return
+    with _LOCK:
+        item = _OBSERVER.get(username, {})
+        item.update(fields)
+        item["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _OBSERVER[username] = item
+
+
+def get_observer_diag() -> dict:
+    with _LOCK:
+        return {username: dict(data) for username, data in _OBSERVER.items()}
