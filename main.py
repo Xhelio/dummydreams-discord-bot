@@ -734,8 +734,16 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        # Defer before DB lookups to avoid Discord "didn't respond in time".
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except discord.InteractionResponded:
+            pass
+        except Exception:
+            return
+
         if not is_feature_enabled("verification"):
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "⛔ Verification is currently disabled. Please try again later.",
                 ephemeral=True
             )
@@ -745,7 +753,7 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
         # 1. Discord user already linked?
         existing_tiktok = get_user_mapping(interaction.user.id)
         if existing_tiktok:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"ℹ️ Your Discord account is already verified with TikTok **@{existing_tiktok}**.\n"
                 f"You do not need to verify again.",
                 ephemeral=True
@@ -755,7 +763,7 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
         # 2. TikTok account claimed by someone else?
         is_claimed, claimed_discord_id = is_user_already_claimed(u_clean)
         if is_claimed:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"❌ TikTok account **@{u_clean}** is already linked to another Discord account.\n"
                 f"One TikTok account can only be claimed by one Discord account. "
                 f"If this is yours, please contact an admin.",
@@ -768,7 +776,7 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
         embed, view = build_verification_start(
             interaction.user.id, u_clean, total_coins, display_name
         )
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
 class VerificationMethodChoiceView(discord.ui.View):
     """Standard verification (10+ coins): bio code or live chat code."""
@@ -915,8 +923,17 @@ class BioVerificationView(discord.ui.View):
         custom_id="bio_verify_persistent"
     )
     async def check_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Defer immediately: DB/Turso calls and TikTok fetch can exceed Discord's
+        # 3-second interaction response deadline.
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.InteractionResponded:
+            pass
+        except Exception:
+            return
+
         if not is_feature_enabled("verification"):
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "⛔ Verification is currently disabled. Please try again later.",
                 ephemeral=True
             )
@@ -924,13 +941,12 @@ class BioVerificationView(discord.ui.View):
 
         tiktok_user, code = self._resolve_pending(interaction.user.id)
         if not tiktok_user:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "⌛ Your verification session expired. Open the verification panel and start again.",
                 ephemeral=True
             )
             return
 
-        await interaction.response.defer(ephemeral=True)
         is_valid, current_bio = await async_verify_tiktok_bio(tiktok_user, code)
 
         if is_valid:
@@ -990,10 +1006,17 @@ class BioVerificationView(discord.ui.View):
         custom_id="bio_change_method_persistent"
     )
     async def change_method(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await interaction.response.defer()
+        except discord.InteractionResponded:
+            pass
+        except Exception:
+            return
+
         pending = get_pending_verification(interaction.user.id)
         tiktok_user = (pending or {}).get("tiktok_user") or self.tiktok_user
         if not tiktok_user:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "⌛ Your verification session expired. Open the verification panel and start again.",
                 ephemeral=True
             )
@@ -1017,7 +1040,7 @@ class BioVerificationView(discord.ui.View):
                 color=discord.Color.blue()
             )
             view = VerificationMethodChoiceView(tiktok_user, code, total_coins)
-        await interaction.response.edit_message(embed=embed, view=view)
+        await interaction.edit_original_response(embed=embed, view=view, content=None)
 
     @discord.ui.button(
         label="Cancel",
@@ -1026,8 +1049,14 @@ class BioVerificationView(discord.ui.View):
         custom_id="bio_cancel_persistent"
     )
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await interaction.response.defer()
+        except discord.InteractionResponded:
+            pass
+        except Exception:
+            return
         cancel_pending_verification(interaction.user.id)
-        await interaction.response.edit_message(content="❌ Verification cancelled.", embed=None, view=None)
+        await interaction.edit_original_response(content="❌ Verification cancelled.", embed=None, view=None)
 
 class LiveVerificationView(discord.ui.View):
     """Standard live chat code verification (10+ coins)."""
