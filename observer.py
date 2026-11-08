@@ -106,7 +106,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             if current_session_id:
                 update_live_session_host(current_session_id, detected)
             set_current_host_for_account(username_clean, detected)
-            log_activity_event("host_detected", f"Host terdeteksi: {detected} di @{username_clean} ('{text}')", username_clean)
+            log_activity_event("host_detected", f"Host detected: {detected} on @{username_clean} ('{text}')", username_clean)
             
             # Update/edit pesan pengumuman yang sudah ada di Discord
             await _trigger_announcement(announcement_callback, username_clean, True, host_name=detected)
@@ -154,7 +154,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
 
             current_session_id = start_live_session(username_clean, initial_host=current_host)
             
-            connect_msg = f"terhubung ke akun @{username_clean} channel (Host: {current_host})"
+            connect_msg = f"Connected to @{username_clean}'s live (Host: {current_host})"
             log_activity_event("connect", connect_msg, username_clean)
             
             # Kirim pengumuman (hanya 1 kali per sesi live)
@@ -167,7 +167,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             
             if is_connected:
                 is_connected = False
-                disconnect_msg = f"terputus dari akun @{username_clean} channel"
+                disconnect_msg = f"Disconnected from @{username_clean}'s live"
                 log_activity_event("disconnect", disconnect_msg, username_clean)
 
                 # Jalankan grace period agar tidak spam hapus/buat pengumuman jika hanya reconnect singkat
@@ -278,8 +278,8 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     # Log activity gift lengkap: tanggal, nama akun, user, nama gift, jumlah koin, total koin saat ini
                     gift_msg = (
                         f"[{full_datetime}] [{channel_name} (@{username_clean})] "
-                        f"User: @{user} - {gift_name} - {coins} koin [{coins}c] - "
-                        f"[channel {channel_spent} c] - [today {today_spent} c] - [total saat ini: {total_all} c]"
+                        f"User: @{user} - {gift_name} - {coins} coins [{coins}c] - "
+                        f"[channel {channel_spent} c] - [today {today_spent} c] - [current total: {total_all} c]"
                     )
                     log_activity_event("gift", gift_msg, username_clean)
                     print(f"[Activity] {gift_msg}")
@@ -301,7 +301,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         finally:
             if is_connected:
                 is_connected = False
-                disconnect_msg = f"terputus dari akun @{username_clean} channel"
+                disconnect_msg = f"Disconnected from @{username_clean}'s live"
                 log_activity_event("disconnect", disconnect_msg, username_clean)
 
                 if current_session_id and (not disconnect_timer_task or disconnect_timer_task.done()):

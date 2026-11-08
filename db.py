@@ -926,6 +926,35 @@ def find_pending_live_verification(tiktok_user: str, comment_text: str) -> dict:
     finally:
         conn.close()
 
+def find_pending_live_greeting(tiktok_user: str) -> dict:
+    """Mencari verifikasi live pending berbasis sapaan (welcome message) untuk username ini."""
+    u_clean = tiktok_user.lower().lstrip("@")
+    wib = pytz.timezone('Asia/Jakarta')
+    now_str = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        conn.execute("DELETE FROM pending_verifications WHERE expires_at < ?", (now_str,))
+        conn.commit()
+
+        row = cur.execute("""
+            SELECT discord_id, tiktok_user, code, method
+            FROM pending_verifications
+            WHERE LOWER(tiktok_user) = ? AND method = 'live_greeting'
+            ORDER BY created_at ASC
+            LIMIT 1
+        """, (u_clean,)).fetchone()
+        if row:
+            return {
+                "discord_id": row[0],
+                "tiktok_user": row[1],
+                "code": row[2],
+                "method": row[3]
+            }
+        return None
+    finally:
+        conn.close()
+
 def cancel_pending_verification(discord_id: int):
     """Membatalkan verifikasi yang sedang pending."""
     conn = get_db_connection()

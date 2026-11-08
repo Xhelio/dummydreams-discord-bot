@@ -29,7 +29,7 @@ TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
 def view_data():
     html = """
     <!DOCTYPE html>
-    <html lang="id">
+    <html lang="en">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -43,16 +43,16 @@ def view_data():
         NAV_HTML_PLACEHOLDER
         
         <div class="card">
-            <h2>📌 Menu Pengelolaan Admin</h2>
+            <h2>📌 Admin Management Menu</h2>
             <p style="color: #94a3b8; font-size: 0.95rem; margin-bottom: 16px;">
-                Pilih modul di atas untuk mengelola data viewer & koin, memantau sesi live realtime, atau memeriksa log activity.
+                Use the modules above to manage viewer and coin data, monitor realtime live sessions, or review the activity log.
             </p>
         </div>
 
         <div class="card" style="border-color: #ef4444;">
             <h2 style="color: #ef4444;">⚠️ Danger Zone</h2>
-            <form action="/admin/reset-db" method="POST" onsubmit="return confirm('HAPUS SELURUH DATA GIFT DAN SESI LIVE?')">
-                <button type="submit" class="btn-danger">🔥 Reset Data Gift & Sesi Live</button>
+            <form action="/admin/reset-db" method="POST" onsubmit="return confirm('DELETE ALL GIFT AND LIVE SESSION DATA?')">
+                <button type="submit" class="btn-danger">🔥 Reset Gift & Live Session Data</button>
             </form>
         </div>
         AUTO_REFRESH_JS_PLACEHOLDER
@@ -100,55 +100,55 @@ def view_host_detail(host_name):
 
     html = """
     <!DOCTYPE html>
-    <html lang="id">
+    <html lang="en">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Riwayat Shift Host: {{ host_name }}</title>
+        <title>Host Shift History: {{ host_name }}</title>
         <style>BASE_CSS_PLACEHOLDER</style>
     </head>
     <body>
         <div class="header">
-            <h1>👤 Detail Riwayat Shift: <span style="color: #38bdf8;">{{ host_name }}</span></h1>
-            <a href="/admin/schedule" class="nav-btn">⬅ Kembali ke Jadwal</a>
+            <h1>👤 Shift History Detail: <span style="color: #38bdf8;">{{ host_name }}</span></h1>
+            <a href="/admin/schedule" class="nav-btn">⬅ Back to Schedule</a>
         </div>
         NAV_HTML_PLACEHOLDER
 
         <div class="stat-grid">
             <div class="stat-box">
-                <div style="color: #94a3b8; font-size: 0.85rem;">TOTAL KONSISTENSI SHIFT</div>
-                <div class="stat-number">{{ total_sessions }} Sesi</div>
+                <div style="color: #94a3b8; font-size: 0.85rem;">TOTAL SHIFT CONSISTENCY</div>
+                <div class="stat-number">{{ total_sessions }} Sessions</div>
             </div>
             <div class="stat-box">
-                <div style="color: #94a3b8; font-size: 0.85rem;">TOTAL KOIN DIPEROLEH</div>
+                <div style="color: #94a3b8; font-size: 0.85rem;">TOTAL COINS EARNED</div>
                 <div class="stat-number" style="color: #eab308;">{{ total_coins }} c</div>
             </div>
             <div class="stat-box">
-                <div style="color: #94a3b8; font-size: 0.85rem;">TOTAL DURASI STREAMING</div>
+                <div style="color: #94a3b8; font-size: 0.85rem;">TOTAL STREAMING DURATION</div>
                 <div class="stat-number" style="color: #22c55e;">
-                    {{ total_duration_sec // 3600 }}j {{ (total_duration_sec % 3600) // 60 }}m
+                    {{ total_duration_sec // 3600 }}h {{ (total_duration_sec % 3600) // 60 }}m
                 </div>
             </div>
         </div>
 
         <div class="card">
-            <h2>📜 Histori Sesi Live Host {{ host_name }}</h2>
+            <h2>📜 Live Session History for Host {{ host_name }}</h2>
             <table>
                 <tr>
                     <th>Channel (@)</th>
-                    <th>Waktu Mulai</th>
-                    <th>Waktu Selesai</th>
-                    <th>Durasi Live</th>
-                    <th>Koin Didapat</th>
+                    <th>Start Time</th>
+                    <th>End Time</th>
+                    <th>Live Duration</th>
+                    <th>Coins Earned</th>
                 </tr>
                 {% for s in sessions %}
                 <tr>
                     <td>@{{ s[1] }}</td>
                     <td>{{ s[2] }}</td>
-                    <td>{{ s[3] or '🔴 Masih Live' }}</td>
+                    <td>{{ s[3] or '🔴 Still Live' }}</td>
                     <td>
                         {% if s[4] > 0 %}
-                            {{ s[4] // 3600 }}j {{ (s[4] % 3600) // 60 }}m {{ s[4] % 60 }}d
+                            {{ s[4] // 3600 }}h {{ (s[4] % 3600) // 60 }}m {{ s[4] % 60 }}s
                         {% else %}
                             -
                         {% endif %}
@@ -156,7 +156,7 @@ def view_host_detail(host_name):
                     <td><span class="badge" style="background: #ca8a04;">{{ s[5] }} c</span></td>
                 </tr>
                 {% else %}
-                <tr><td colspan="5">Belum ada data riwayat shift live untuk host ini.</td></tr>
+                <tr><td colspan="5">No live shift history for this host yet.</td></tr>
                 {% endfor %}
             </table>
         </div>
@@ -196,41 +196,41 @@ def view_viewers():
 
     html = """
     <!DOCTYPE html>
-    <html lang="id">
+    <html lang="en">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Daftar Viewer & Koin</title>
+        <title>Viewer & Coin List</title>
         <style>BASE_CSS_PLACEHOLDER</style>
     </head>
     <body>
         <div class="header">
-            <h1>👥 Daftar Viewer & Koin</h1>
+            <h1>👥 Viewer & Coin List</h1>
         </div>
         NAV_HTML_PLACEHOLDER
 
         <div class="card">
-            <h2>Daftar Viewer</h2>
+            <h2>Viewer List</h2>
             <table>
                 <tr>
                     <th>Username (@)</th>
-                    <th>Nama Viewer</th>
-                    <th>Total Koin</th>
-                    <th>Status Live Realtime</th>
-                    <th>Edit Koin</th>
+                    <th>Viewer Name</th>
+                    <th>Total Coins</th>
+                    <th>Realtime Live Status</th>
+                    <th>Edit Coins</th>
                 </tr>
                 {% for v in viewers %}
                 <tr>
                     <td>
-                        <a href="/admin/viewer/{{ v[0] }}" class="viewer-link" title="Klik untuk lihat detail perolehan koin">@{{ v[0] }} ↗</a>
+                        <a href="/admin/viewer/{{ v[0] }}" class="viewer-link" title="Click to view coin details">@{{ v[0] }} ↗</a>
                     </td>
                     <td>
-                        <a href="/admin/viewer/{{ v[0] }}" class="viewer-link" title="Klik untuk lihat detail perolehan koin">{{ v[1] or v[0] }} ↗</a>
+                        <a href="/admin/viewer/{{ v[0] }}" class="viewer-link" title="Click to view coin details">{{ v[1] or v[0] }} ↗</a>
                     </td>
                     <td><span class="badge" style="background: #ca8a04;">{{ v[2] }} c</span></td>
                     <td>
                         {% if v[3] %}
-                        <a href="https://www.tiktok.com/@{{ v[3] }}/live" target="_blank" class="badge badge-active">🔴 Sedang Live ↗</a>
+                        <a href="https://www.tiktok.com/@{{ v[3] }}/live" target="_blank" class="badge badge-active">🔴 Live Now ↗</a>
                         {% else %}
                         <span class="badge badge-inactive">Offline</span>
                         {% endif %}
@@ -239,12 +239,12 @@ def view_viewers():
                         <form action="/admin/edit-coin" method="POST" class="edit-form">
                             <input type="hidden" name="tiktok_user" value="{{ v[0] }}">
                             <input type="number" name="new_coins" value="{{ v[2] }}" required>
-                            <button type="submit">Simpan</button>
+                            <button type="submit">Save</button>
                         </form>
                     </td>
                 </tr>
                 {% else %}
-                <tr><td colspan="5">Belum ada data viewer tercatat.</td></tr>
+                <tr><td colspan="5">No viewer data recorded yet.</td></tr>
                 {% endfor %}
             </table>
         </div>
@@ -309,37 +309,37 @@ def view_viewer_detail(tiktok_user):
 
     html = """
     <!DOCTYPE html>
-    <html lang="id">
+    <html lang="en">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Detail Viewer: @{{ username }}</title>
+        <title>Viewer Detail: @{{ username }}</title>
         <style>BASE_CSS_PLACEHOLDER</style>
     </head>
     <body>
         <div class="header">
-            <h1>👤 Detail Viewer: <span style="color: #38bdf8;">{{ display_name }}</span> (@{{ username }})</h1>
-            <a href="/admin/viewers" class="nav-btn">⬅ Kembali ke Daftar Viewer</a>
+            <h1>👤 Viewer Detail: <span style="color: #38bdf8;">{{ display_name }}</span> (@{{ username }})</h1>
+            <a href="/admin/viewers" class="nav-btn">⬅ Back to Viewer List</a>
         </div>
         NAV_HTML_PLACEHOLDER
 
         <div class="stat-grid">
             <div class="stat-box">
-                <div style="color: #94a3b8; font-size: 0.85rem;">TOTAL KOIN KESELURUHAN</div>
+                <div style="color: #94a3b8; font-size: 0.85rem;">TOTAL COINS</div>
                 <div class="stat-number" style="color: #eab308;">{{ grand_total_coins }} c</div>
             </div>
             <div class="stat-box">
-                <div style="color: #94a3b8; font-size: 0.85rem;">KOIN HARI INI ({{ today_str }})</div>
+                <div style="color: #94a3b8; font-size: 0.85rem;">COINS TODAY ({{ today_str }})</div>
                 <div class="stat-number" style="color: #22c55e;">{{ today_coins }} c</div>
             </div>
         </div>
 
         <div class="card">
-            <h2>📅 Riwayat Koin Per Hari</h2>
+            <h2>📅 Daily Coin History</h2>
             <table>
                 <tr>
-                    <th>Tanggal</th>
-                    <th>Jumlah Koin</th>
+                    <th>Date</th>
+                    <th>Coin Amount</th>
                 </tr>
                 {% for d in daily_history %}
                 <tr>
@@ -347,21 +347,21 @@ def view_viewer_detail(tiktok_user):
                     <td><span class="badge" style="background: #ca8a04;">{{ d[1] }} c</span></td>
                 </tr>
                 {% else %}
-                <tr><td colspan="2">Belum ada catatan koin harian.</td></tr>
+                <tr><td colspan="2">No daily coin records yet.</td></tr>
                 {% endfor %}
             </table>
         </div>
 
         <div class="card">
-            <h2>🎁 Log Kiriman Gift Terbaru</h2>
+            <h2>🎁 Recent Gift Log</h2>
             <table>
                 <tr>
-                    <th>Tanggal & Waktu</th>
-                    <th>Nama Gift</th>
-                    <th>Jumlah</th>
-                    <th>Koin</th>
-                    <th>Akun Target Spent</th>
-                    <th>Host Terdeteksi</th>
+                    <th>Date & Time</th>
+                    <th>Gift Name</th>
+                    <th>Amount</th>
+                    <th>Coins</th>
+                    <th>Target Account Spent</th>
+                    <th>Detected Host</th>
                 </tr>
                 {% for g in gift_logs %}
                 <tr>
@@ -372,14 +372,14 @@ def view_viewer_detail(tiktok_user):
                     <td>@{{ g[5] }}</td>
                     <td>
                         {% if g[6] != '-' and g[6] != 'Host' %}
-                            <a href="/admin/host/{{ g[6] }}" class="host-link" title="Klik untuk lihat riwayat shift">{{ g[6] }} ↗</a>
+                            <a href="/admin/host/{{ g[6] }}" class="host-link" title="Click to view shift history">{{ g[6] }} ↗</a>
                         {% else %}
                             <strong>{{ g[6] }}</strong>
                         {% endif %}
                     </td>
                 </tr>
                 {% else %}
-                <tr><td colspan="6">Belum ada histori gift tercatat.</td></tr>
+                <tr><td colspan="6">No gift history recorded yet.</td></tr>
                 {% endfor %}
             </table>
         </div>
@@ -445,34 +445,34 @@ def view_monitor():
 
     html = """
     <!DOCTYPE html>
-    <html lang="id">
+    <html lang="en">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Monitor Live Realtime</title>
+        <title>Realtime Live Monitor</title>
         <style>BASE_CSS_PLACEHOLDER</style>
     </head>
     <body>
         <div class="header">
-            <h1>📹 Monitor Live Realtime</h1>
+            <h1>📹 Realtime Live Monitor</h1>
         </div>
         NAV_HTML_PLACEHOLDER
 
         <div class="card">
-            <h2>🎙️ Akun Target TikTok</h2>
+            <h2>🎙️ TikTok Target Accounts</h2>
             <div style="display: flex; gap: 10px; margin-bottom: 12px; flex-wrap: wrap;">
-                <form action="/admin/sync-hosts" method="POST" onsubmit="return confirm('Merapikan dan sinkronisasi 6 akun target resmi dengan ID 1-6?');" style="margin: 0;">
-                    <button type="submit" style="background: #15803d; padding: 8px 14px;">🔄 Rapikan & Sinkron 6 Akun Resmi (ID 1-6)</button>
+                <form action="/admin/sync-hosts" method="POST" onsubmit="return confirm('Reorganize and sync the 6 official target accounts with IDs 1-6?');" style="margin: 0;">
+                    <button type="submit" style="background: #15803d; padding: 8px 14px;">🔄 Sync 6 Official Accounts (IDs 1-6)</button>
                 </form>
             </div>
             <form action="/admin/add-host" method="POST" class="form-grid">
                 <input type="text" name="tiktok_username" placeholder="Username TikTok (@...)" required>
-                <input type="text" name="display_name" placeholder="Nama Channel (misal: George Vilora)" required>
-                <button type="submit">+ Tambah Target Host</button>
+                <input type="text" name="display_name" placeholder="Channel Name (e.g. George Vilora)" required>
+                <button type="submit">+ Add Target Host</button>
             </form>
             <br>
             <table>
-                <tr><th>ID</th><th>Username TikTok</th><th>Nama Channel</th><th>Status Realtime</th><th>Aksi</th></tr>
+                <tr><th>ID</th><th>Username TikTok</th><th>Channel Name</th><th>Realtime Status</th><th>Action</th></tr>
                 {% for h in hosts %}
                 <tr>
                     <td>{{ h[0] }}</td>
@@ -480,32 +480,32 @@ def view_monitor():
                     <td>{{ h[2] or h[1] }}</td>
                     <td>
                         {% if h[4] == 1 %}
-                        <a href="https://www.tiktok.com/@{{ h[1] }}/live" target="_blank" class="badge badge-active" title="Klik untuk nonton Live">🔴 Sedang Live ↗</a>
+                        <a href="https://www.tiktok.com/@{{ h[1] }}/live" target="_blank" class="badge badge-active" title="Click to watch the live">🔴 Live Now ↗</a>
                         {% else %}
                         <span class="badge badge-inactive">Offline</span>
                         {% endif %}
                     </td>
                     <td>
-                        <a href="/admin/toggle-host/{{ h[0] }}" class="btn-action btn-toggle">Ubah Status Active</a>
-                        <a href="/admin/delete-host/{{ h[0] }}" class="btn-action btn-del" onclick="return confirm('Hapus target ini?')">Hapus</a>
+                        <a href="/admin/toggle-host/{{ h[0] }}" class="btn-action btn-toggle">Toggle Active Status</a>
+                        <a href="/admin/delete-host/{{ h[0] }}" class="btn-action btn-del" onclick="return confirm('Delete this target?')">Delete</a>
                     </td>
                 </tr>
                 {% else %}
-                <tr><td colspan="5">Belum ada target terdaftar.</td></tr>
+                <tr><td colspan="5">No targets registered yet.</td></tr>
                 {% endfor %}
             </table>
         </div>
 
         <div class="card">
-            <h2>📹 Riwayat Sesi Live</h2>
+            <h2>📹 Live Session History</h2>
             <table>
                 <tr>
                     <th>Username (@)</th>
-                    <th>Mulai</th>
-                    <th>Selesai</th>
-                    <th>Durasi</th>
-                    <th>Koin</th>
-                    <th>Host Terdeteksi</th>
+                    <th>Start</th>
+                    <th>End</th>
+                    <th>Duration</th>
+                    <th>Coins</th>
+                    <th>Detected Host</th>
                 </tr>
                 {% for s in sessions %}
                 <tr>
@@ -517,14 +517,14 @@ def view_monitor():
                         {% if s[3] %}
                             {{ s[3] }}
                         {% elif s[7] == 1 %}
-                            <span class="badge badge-active">🔴 Sedang Live</span>
+                            <span class="badge badge-active">🔴 Live Now</span>
                         {% else %}
-                            <span style="color: #94a3b8; font-style: italic;">Tidak ada data</span>
+                            <span style="color: #94a3b8; font-style: italic;">No data</span>
                         {% endif %}
                     </td>
                     <td>
                         {% if s[4] > 0 %}
-                            {{ s[4] // 3600 }}j {{ (s[4] % 3600) // 60 }}m {{ s[4] % 60 }}d
+                            {{ s[4] // 3600 }}h {{ (s[4] % 3600) // 60 }}m {{ s[4] % 60 }}s
                         {% else %}
                             -
                         {% endif %}
@@ -532,14 +532,14 @@ def view_monitor():
                     <td><span class="badge" style="background: #ca8a04;">{{ s[5] }} c</span></td>
                     <td>
                         {% if s[6] and s[6] != '-' and s[6] != 'Host' %}
-                            <a href="/admin/host/{{ s[6] }}" class="host-link" title="Klik untuk lihat riwayat shift">{{ s[6] }} ↗</a>
+                            <a href="/admin/host/{{ s[6] }}" class="host-link" title="Click to view shift history">{{ s[6] }} ↗</a>
                         {% else %}
                             <strong>{{ s[6] or '-' }}</strong>
                         {% endif %}
                     </td>
                 </tr>
                 {% else %}
-                <tr><td colspan="6">Belum ada histori sesi live.</td></tr>
+                <tr><td colspan="6">No live session history yet.</td></tr>
                 {% endfor %}
             </table>
         </div>
@@ -604,7 +604,7 @@ def view_activity():
 
     html = """
     <!DOCTYPE html>
-    <html lang="id">
+    <html lang="en">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -613,10 +613,10 @@ def view_activity():
     </head>
     <body>
         <div class="header">
-            <h1>📊 Log Activity Realtime</h1>
+            <h1>📊 Realtime Activity Log</h1>
             <div style="display: flex; gap: 10px; align-items: center;">
-                <form action="/admin/clear-activity-logs" method="POST" onsubmit="return confirm('Bersihkan seluruh log activity?');" style="margin: 0;">
-                    <button type="submit" class="btn-danger" style="padding: 6px 12px; font-size: 0.8rem;">🗑️ Bersihkan Log</button>
+                <form action="/admin/clear-activity-logs" method="POST" onsubmit="return confirm('Clear the entire activity log?');" style="margin: 0;">
+                    <button type="submit" class="btn-danger" style="padding: 6px 12px; font-size: 0.8rem;">🗑️ Clear Log</button>
                 </form>
             </div>
         </div>
@@ -625,9 +625,9 @@ def view_activity():
         <div class="card" style="margin-bottom: 16px; padding: 14px 20px;">
             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
                 <form method="GET" action="/admin/activity" style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-                    <label for="channel_filter" style="font-size: 0.875rem; color: #94a3b8; font-weight: 500;">Filter Akun Channel:</label>
+                    <label for="channel_filter" style="font-size: 0.875rem; color: #94a3b8; font-weight: 500;">Channel Account Filter:</label>
                     <select name="channel" id="channel_filter" onchange="this.form.submit()" style="padding: 6px 10px; min-width: 240px;">
-                        <option value="" {% if not current_filter %}selected{% endif %}>🌐 Semua Akun (6 Target Resmi)</option>
+                        <option value="" {% if not current_filter %}selected{% endif %}>🌐 All Accounts (6 Official Targets)</option>
                         {% for h in all_hosts %}
                         <option value="{{ h }}" {% if current_filter == h %}selected{% endif %}>@{{ h }}</option>
                         {% endfor %}
@@ -637,26 +637,26 @@ def view_activity():
                     {% endif %}
                 </form>
                 <div style="color: #94a3b8; font-size: 0.85rem;">
-                    Menampilkan <strong>{{ gift_activities|length }}</strong> gift & <strong>{{ logs|length }}</strong> baris log feed
+                    Showing <strong>{{ gift_activities|length }}</strong> gifts & <strong>{{ logs|length }}</strong> log feed lines
                 </div>
             </div>
         </div>
 
-        <!-- TABEL AKTIVITAS GIFT TERBARU (Terstruktur Sesuai Permintaan) -->
+        <!-- RECENT GIFT ACTIVITY TABLE -->
         <div class="card">
-            <h2>🎁 Aktivitas Gift Masuk Terbaru</h2>
+            <h2>🎁 Recent Incoming Gifts</h2>
             <p style="color: #94a3b8; font-size: 0.85rem; margin-bottom: 14px;">
-                Memuat riwayat gift realtime: Tanggal & Waktu, Nama Akun Target, User/Donatur, Nama Hadiah, Jumlah Koin, dan Total Koin Pengguna Saat Ini.
+                Realtime gift history: date &amp; time, target account name, user/donor, gift name, coin amount, and the user's current total coins.
             </p>
             <table>
                 <tr>
                     <th style="width: 50px;">NO</th>
-                    <th>TANGGAL & WAKTU (WIB)</th>
-                    <th>NAMA AKUN (CHANNEL)</th>
-                    <th>USER (DONATUR)</th>
-                    <th>NAMA GIFT</th>
-                    <th>JUMLAH KOIN</th>
-                    <th>TOTAL KOIN SAAT INI</th>
+                    <th>DATE & TIME (WIB)</th>
+                    <th>ACCOUNT NAME (CHANNEL)</th>
+                    <th>USER (DONOR)</th>
+                    <th>GIFT NAME</th>
+                    <th>COIN AMOUNT</th>
+                    <th>CURRENT TOTAL COINS</th>
                 </tr>
                 {% for g in gift_activities %}
                 <tr>
@@ -683,7 +683,7 @@ def view_activity():
                 {% else %}
                 <tr>
                     <td colspan="7" style="text-align: center; color: #64748b; padding: 20px;">
-                        Belum ada aktivitas gift yang tercatat untuk filter ini.
+                        No gift activity recorded for this filter yet.
                     </td>
                 </tr>
                 {% endfor %}
@@ -692,7 +692,7 @@ def view_activity():
 
         <!-- LIVE STREAM FEED TERMINAL -->
         <div class="card">
-            <h2>📜 Live Activity Feed (Konsol Stream)</h2>
+            <h2>📜 Live Activity Feed (Stream Console)</h2>
             <div class="terminal-container" id="terminal-feed">
                 {% for log in logs %}
                 <div class="terminal-row">
@@ -713,7 +713,7 @@ def view_activity():
                 </div>
                 {% else %}
                 <div style="color: #64748b; font-style: italic; padding: 24px; text-align: center;">
-                    Belum ada aktivitas yang tercatat. Sistem standby memantau 6 akun target resmi.
+                    No activity recorded yet. The system is standing by and monitoring the 6 official target accounts.
                 </div>
                 {% endfor %}
             </div>
@@ -753,46 +753,46 @@ def view_verifications():
 
     html = """
     <!DOCTYPE html>
-    <html lang="id">
+    <html lang="en">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Kelola Verifikasi Akun TikTok</title>
+        <title>Manage TikTok Account Verification</title>
         <style>BASE_CSS_PLACEHOLDER</style>
     </head>
     <body>
         <div class="header">
-            <h1>🔐 Pengelolaan Verifikasi Akun TikTok & Discord</h1>
+            <h1>🔐 TikTok & Discord Account Verification Management</h1>
         </div>
         NAV_HTML_PLACEHOLDER
 
         <div class="card">
-            <h2>⚙️ Konfigurasi Role & Channel Verifikasi</h2>
+            <h2>⚙️ Verification Role & Channel Configuration</h2>
             <form action="/admin/save-verification-settings" method="POST" class="form-grid" style="grid-template-columns: 1fr 1fr auto; align-items: end;">
                 <div>
-                    <label style="font-size: 0.8rem; color: #94a3b8;">Verified Role ID (Discord Role ID):</label>
-                    <input type="text" name="verified_role_id" value="{{ verified_role_id }}" placeholder="Contoh: 1554883561759187105" required>
+                    <label style="font-size: 0.8rem; color: #94a3b8;">Verified Role ID:</label>
+                    <input type="text" name="verified_role_id" value="{{ verified_role_id }}" placeholder="Example: 1554883561759187105" required>
                 </div>
                 <div>
                     <label style="font-size: 0.8rem; color: #94a3b8;">Verification Channel ID:</label>
-                    <input type="text" name="verification_channel_id" value="{{ verification_channel_id }}" placeholder="Contoh: 123456789012345678">
+                    <input type="text" name="verification_channel_id" value="{{ verification_channel_id }}" placeholder="Example: 123456789012345678">
                 </div>
-                <button type="submit">💾 Simpan Konfigurasi</button>
+                <button type="submit">💾 Save Configuration</button>
             </form>
         </div>
 
         <div class="card">
-            <h2>✅ Akun Terverifikasi (Discord &lt;-&gt; TikTok)</h2>
+            <h2>✅ Verified Accounts (Discord &lt;-&gt; TikTok)</h2>
             <p style="color: #94a3b8; font-size: 0.85rem; margin-bottom: 12px;">
-                Daftar akun Discord yang telah sukses di-binding ke akun TikTok. Satu akun hanya dapat diklaim oleh satu pengguna.
+                Discord accounts successfully linked to a TikTok account. Each account can only be claimed by one user.
             </p>
             <table>
                 <tr>
                     <th>Discord ID</th>
                     <th>TikTok Username</th>
                     <th>Display Name</th>
-                    <th>Total Koin</th>
-                    <th>Aksi</th>
+                    <th>Total Coins</th>
+                    <th>Action</th>
                 </tr>
                 {% for u in users %}
                 <tr>
@@ -801,27 +801,27 @@ def view_verifications():
                     <td>{{ u[3] or '-' }}</td>
                     <td><span class="badge">{{ u[2] }} c</span></td>
                     <td>
-                        <form action="/admin/unclaim-user/{{ u[0] }}" method="POST" onsubmit="return confirm('Batalkan ikatan akun untuk Discord ID {{ u[0] }}?');" style="display:inline;">
-                            <button type="submit" class="btn-action btn-del">Batal Claim</button>
+                        <form action="/admin/unclaim-user/{{ u[0] }}" method="POST" onsubmit="return confirm('Remove the account link for Discord ID {{ u[0] }}?');" style="display:inline;">
+                            <button type="submit" class="btn-action btn-del">Unclaim</button>
                         </form>
                     </td>
                 </tr>
                 {% else %}
-                <tr><td colspan="5" style="text-align:center; color:#64748b;">Belum ada akun yang terverifikasi.</td></tr>
+                <tr><td colspan="5" style="text-align:center; color:#64748b;">No verified accounts yet.</td></tr>
                 {% endfor %}
             </table>
         </div>
 
         <div class="card">
-            <h2>⏳ Verifikasi Pending (Sedang Berjalan)</h2>
+            <h2>⏳ Pending Verifications (In Progress)</h2>
             <table>
                 <tr>
                     <th>Discord ID</th>
                     <th>TikTok Username</th>
-                    <th>Kode Verifikasi</th>
-                    <th>Metode</th>
-                    <th>Waktu Dibuat</th>
-                    <th>Batas Waktu (WIB)</th>
+                    <th>Verification Code</th>
+                    <th>Method</th>
+                    <th>Created At</th>
+                    <th>Expires At (WIB)</th>
                 </tr>
                 {% for p in pending %}
                 <tr>
@@ -833,7 +833,7 @@ def view_verifications():
                     <td>{{ p[5] }}</td>
                 </tr>
                 {% else %}
-                <tr><td colspan="6" style="text-align:center; color:#64748b;">Tidak ada verifikasi yang sedang pending saat ini.</td></tr>
+                <tr><td colspan="6" style="text-align:center; color:#64748b;">No pending verifications right now.</td></tr>
                 {% endfor %}
             </table>
         </div>

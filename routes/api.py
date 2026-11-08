@@ -12,18 +12,18 @@ def set_announcement_handler(handler):
 
 @api_bp.route('/health', methods=['GET'])
 def health_check():
-    """Endpoint status kesehatan untuk indikator website stabil."""
+    """Health status endpoint for the website status indicator."""
     db_ok = check_database_health()
     if db_ok:
         return jsonify({
             "status": "ok",
-            "message": "Website Stabil",
+            "message": "Website Stable",
             "database": "connected"
         }), 200
     else:
         return jsonify({
             "status": "warning",
-            "message": "Website Terhubung (Database Reconnecting)",
+            "message": "Website Connected (Database Reconnecting)",
             "database": "error"
         }), 200
 

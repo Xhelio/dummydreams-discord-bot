@@ -8,7 +8,7 @@ h1 { font-size: 1.5rem; color: #f8fafc; display: flex; align-items: center; gap:
 .nav-btn { background: #1e293b; color: #38bdf8; border: 1px solid #334155; text-decoration: none; padding: 8px 16px; border-radius: 8px; font-size: 0.875rem; font-weight: 600; transition: all 0.2s; display: inline-flex; align-items: center; gap: 6px; }
 .nav-btn:hover, .nav-btn.active { background: #0284c7; color: white; border-color: #0284c7; }
 
-/* Status Indikator Website Stabil */
+/* Website Status Indicator */
 .status-indicator-pill {
     display: inline-flex;
     align-items: center;
@@ -117,22 +117,22 @@ NAV_HTML = """
 <div class="nav-bar-container">
     <div class="nav-links">
         <a href="/admin/data" class="nav-btn">🏠 Main Menu</a>
-        <a href="/admin/viewers" class="nav-btn">👥 Viewer & Koin</a>
-        <a href="/admin/monitor" class="nav-btn">📹 Monitor Live</a>
-        <a href="/admin/activity" class="nav-btn">📊 Log Activity</a>
-        <a href="/admin/verifications" class="nav-btn">🔐 Verifikasi Akun</a>
+        <a href="/admin/viewers" class="nav-btn">👥 Viewers & Coins</a>
+        <a href="/admin/monitor" class="nav-btn">📹 Live Monitor</a>
+        <a href="/admin/activity" class="nav-btn">📊 Activity Log</a>
+        <a href="/admin/verifications" class="nav-btn">🔐 Account Verification</a>
     </div>
-    <div id="website-status-box" class="status-indicator-pill" title="Indikator Sistem Realtime">
+    <div id="website-status-box" class="status-indicator-pill" title="Realtime System Indicator">
         <span class="status-pulse-dot" id="status-pulse-dot"></span>
-        <span id="website-status-text">Website Stabil</span>
-        <span id="website-ping-badge" class="ping-badge">&bull; Memeriksa...</span>
+        <span id="website-status-text">Website Stable</span>
+        <span id="website-ping-badge" class="ping-badge">&bull; Checking...</span>
     </div>
 </div>
 """
 
 AUTO_REFRESH_JS = """
 <script>
-    // Realtime Health & Ping Checker untuk Indikator Website Stabil
+    // Realtime health & ping checker for the website status indicator
     function updateWebsiteStatus() {
         const startTime = Date.now();
         fetch('/api/health')
@@ -145,7 +145,7 @@ AUTO_REFRESH_JS = """
                 const pingBadge = document.getElementById('website-ping-badge');
 
                 if (statusText && data.status === 'ok') {
-                    statusText.innerText = 'Website Stabil';
+                    statusText.innerText = 'Website Stable';
                     pingBadge.innerText = '• ' + latency + 'ms';
                     if (statusPill) {
                         statusPill.style.borderColor = '#10b981';
@@ -176,7 +176,7 @@ AUTO_REFRESH_JS = """
             });
     }
 
-    // Jalankan cek pertama langsung dan ulangi tiap 4 detik
+    // Run the first check immediately and repeat every 4 seconds
     updateWebsiteStatus();
     setInterval(updateWebsiteStatus, 4000);
 

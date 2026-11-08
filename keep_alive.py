@@ -55,7 +55,7 @@ def view_data():
             {% for row in gifts %}
             <tr><td>@{{ row[0] }}</td><td>{{ row[1] or '-' }}</td><td><span class="badge">{{ row[2] }} c</span></td></tr>
             {% else %}
-            <tr><td colspan="3">Belum ada data koin.</td></tr>
+            <tr><td colspan="3">No coin data yet.</td></tr>
             {% endfor %}
         </table>
 
@@ -65,7 +65,7 @@ def view_data():
             {% for row in users %}
             <tr><td>{{ row[0] }}</td><td>@{{ row[1] }}</td></tr>
             {% else %}
-            <tr><td colspan="2">Belum ada data klaim akun.</td></tr>
+            <tr><td colspan="2">No account claims yet.</td></tr>
             {% endfor %}
         </table>
 
@@ -75,7 +75,7 @@ def view_data():
             {% for row in announcements %}
             <tr><td>@{{ row[0] }}</td><td>{{ row[1] }}</td><td>{{ row[2] }}</td></tr>
             {% else %}
-            <tr><td colspan="3">Belum ada pengumuman aktif.</td></tr>
+            <tr><td colspan="3">No active announcements.</td></tr>
             {% endfor %}
         </table>
     </body>
@@ -87,19 +87,19 @@ def view_data():
 @app.route('/api/announcement', methods=['POST'])
 def trigger_announcement():
     # Notifikasi konsol bahwa Replit 2 mengakses endpoint ini
-    print(f"[API Request] Menerima akses dari Replit 2 dengan Headers: {dict(request.headers)}")
+    print(f"[API Request] Received access from Replit 2 with headers: {dict(request.headers)}")
 
     data = request.get_json() or {}
     secret_key = request.headers.get("X-API-KEY")
     expected_key = os.environ.get("API_SECRET_KEY")
 
     if expected_key and secret_key != expected_key:
-        print(f"[API Warning] Akses ditolak: API Key salah atau tidak cocok.")
+        print(f"[API Warning] Access denied: wrong or mismatched API Key.")
         return jsonify({"status": "error", "message": "Unauthorized"}), 401
 
     username = data.get("username")
     is_live = data.get("is_live")
-    print(f"[API Data] Berhasil memproses data untuk @{username}, Status Live: {is_live}")
+    print(f"[API Data] Successfully processed data for @{username}, Live Status: {is_live}")
 
     if not username or is_live is None:
         return jsonify({"status": "error", "message": "Missing username or is_live status"}), 400

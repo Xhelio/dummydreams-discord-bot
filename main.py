@@ -1,6 +1,7 @@
 import asyncio
 import os
 import json
+import re
 import discord
 from discord.ext import commands
 
@@ -25,6 +26,7 @@ from db import (
     create_pending_verification,
     get_pending_verification,
     find_pending_live_verification,
+    find_pending_live_greeting,
     cancel_pending_verification,
     log_activity_event
 )
@@ -91,7 +93,7 @@ async def grant_verified_access(member: discord.Member, tiktok_user: str, total_
     # Berikan juga tier roles sesuai total koin yang ada
     await auto_assign_role(tiktok_user, total_coins)
     
-    role_info = f" Role **{', '.join(roles_added_names)}** telah diberikan." if roles_added_names else " Role telah diaktifkan."
+    role_info = f" Role **{', '.join(roles_added_names)}** has been granted." if roles_added_names else " Role has been activated."
     return True, role_info
 
 def handle_api_announcement(username: str, is_live: bool, host_name: str = None):
@@ -304,24 +306,138 @@ async def reconcile_announcement_sessions(delay_seconds: int = 120):
 
 # --- Discord UI Components (Modals & Views) ---
 
+MIN_COINS_FOR_STANDARD_VERIFICATION = 10
+
+WELCOME_GREETINGS = {
+    "hi", "hii", "hiii", "hiiii", "hey", "heyy", "hello", "helo", "hallo",
+    "yo", "greetings", "welcome",
+}
+
+WELCOME_PHRASES = (
+    "good morning", "good afternoon", "good evening", "good night",
+    "nice to meet you", "how are you",
+)
+
+def is_welcome_message(text: str) -> bool:
+    """Return True when a live chat comment is an English welcome/greeting."""
+    if not text:
+        return False
+    cleaned = re.sub(r"[^a-z\s]", " ", text.lower())
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return False
+    if cleaned.split(" ", 1)[0] in WELCOME_GREETINGS:
+        return True
+    return cleaned.startswith(WELCOME_PHRASES)
+
+def build_bio_verification_embed(tiktok_user: str, code: str) -> discord.Embed:
+    """Embed with the exact bio text the user must save before verifying."""
+    return discord.Embed(
+        title="📝 Verify via TikTok Bio",
+        description=(
+            f"TikTok account: **@{tiktok_user}**\n\n"
+            f"🔑 **Set your TikTok bio to this verification text:**\n"
+            f"```text\n{code}\n```\n"
+            f"**Steps:**\n"
+            f"1. Open the TikTok app.\n"
+            f"2. Go to **Profile** -> **Edit profile** -> **Bio**.\n"
+            f"3. Put the verification text above in your bio and save it.\n"
+            f"4. Click **[ 🔍 Verify Bio ]** below.\n\n"
+            f"⏱️ *The code expires in 15 minutes. You can remove it from your bio after verification.*"
+        ),
+        color=discord.Color.gold()
+    )
+
+def build_verification_start(discord_user_id: int, tiktok_user: str, total_coins: int, display_name: str):
+    """Pick the verification flow based on the account's coin activity.
+
+    Accounts with at least 10 coins use the standard code-based flow.
+    Accounts that never transacted (or have less than 10 coins) get two
+    simpler options: a live greeting or a bio text.
+    """
+    low_activity = int(total_coins or 0) < MIN_COINS_FOR_STANDARD_VERIFICATION
+
+    if low_activity:
+        live_hosts = get_current_live_hosts()
+        if not live_hosts:
+            # No host is live: send the bio instructions right away.
+            code = create_pending_verification(discord_user_id, tiktok_user, method='bio')
+            embed = build_bio_verification_embed(tiktok_user, code)
+            embed.description = (
+                f"⚪ **No host is live right now**, so please verify using your TikTok bio.\n\n"
+                + embed.description
+            )
+            return embed, BioVerificationView(tiktok_user, code, total_coins, low_activity=True)
+
+        embed = discord.Embed(
+            title="🔐 Verify Your TikTok Account",
+            description=(
+                f"TikTok account **@{tiktok_user}** (`{display_name or tiktok_user}`) is not in our "
+                f"supporter database yet or has less than **{MIN_COINS_FOR_STANDARD_VERIFICATION} coins**.\n\n"
+                f"You can still verify your account with either method below:"
+            ),
+            color=discord.Color.blue()
+        )
+        embed.add_field(
+            name="🔴 Option 1 — Live greeting",
+            value=(
+                "Join an active live and post a welcome message such as `hello`, `hello host`, or `hiii` "
+                "from your TikTok account. The bot will detect your comment and verify you automatically."
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="📝 Option 2 — TikTok bio",
+            value=(
+                "The bot will give you a verification text to put in your TikTok bio. "
+                "Save it, then click **Verify Bio**."
+            ),
+            inline=False
+        )
+        return embed, LowActivityVerificationView(tiktok_user, total_coins)
+
+    # Standard flow for accounts with at least 10 coins
+    code = create_pending_verification(discord_user_id, tiktok_user, method='choice')
+    embed = discord.Embed(
+        title="✅ TikTok Account Found",
+        description=(
+            f"TikTok account **@{tiktok_user}** (`{display_name or tiktok_user}`) is registered in our database!\n"
+            f"💰 **Recorded coins:** `{total_coins} c`\n\n"
+            f"🔒 **Choose a verification method:**\n"
+            f"Prove that you own this account using one of the **2 methods** below:"
+        ),
+        color=discord.Color.blue()
+    )
+    embed.add_field(
+        name="📝 Option 1 — Profile bio",
+        value="Add the verification code to your TikTok bio, then click the confirm button. *(No live stream required.)*",
+        inline=False
+    )
+    embed.add_field(
+        name="🔴 Option 2 — Live chat code",
+        value="Type the verification code in the live chat while one of our hosts is live. The bot detects it automatically.",
+        inline=False
+    )
+    return embed, VerificationMethodChoiceView(tiktok_user, code, total_coins)
+
 class VerificationChannelView(discord.ui.View):
-    """View permanen dengan tombol untuk verifikasi akun TikTok di channel verifikasi."""
+    """Persistent view with the TikTok verification button."""
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(
-        label="Verifikasi Akun TikTok", 
-        style=discord.ButtonStyle.primary, 
-        emoji="🔑", 
+        label="Verify TikTok Account",
+        style=discord.ButtonStyle.primary,
+        emoji="🔑",
         custom_id="btn_tiktok_verify_persistent"
     )
     async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(TikTokUsernameModal())
 
-class TikTokUsernameModal(discord.ui.Modal, title="Verifikasi Akun TikTok"):
+class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
     username_input = discord.ui.TextInput(
-        label="Username TikTok Anda",
-        placeholder="Contoh: clarissadreams (tanpa tanda @)",
+        label="Your TikTok Username",
+        placeholder="Example: clarissadreams (without @)",
         min_length=2,
         max_length=32,
         required=True
@@ -329,213 +445,257 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verifikasi Akun TikTok"):
 
     async def on_submit(self, interaction: discord.Interaction):
         u_clean = self.username_input.value.strip().lstrip('@').lower()
-        
-        # 1. Cek apakah user Discord ini sudah memiliki akun TikTok yang terikat
+
+        # 1. Discord user already linked?
         existing_tiktok = get_user_mapping(interaction.user.id)
         if existing_tiktok:
             await interaction.response.send_message(
-                f"ℹ️ Akun Discord Anda sudah terverifikasi dengan akun TikTok **@{existing_tiktok}**.\n"
-                f"Anda tidak perlu melakukan verifikasi ulang.",
+                f"ℹ️ Your Discord account is already verified with TikTok **@{existing_tiktok}**.\n"
+                f"You do not need to verify again.",
                 ephemeral=True
             )
             return
 
-        # 2. Cek apakah username TikTok ini sudah di-claim orang lain
+        # 2. TikTok account claimed by someone else?
         is_claimed, claimed_discord_id = is_user_already_claimed(u_clean)
         if is_claimed:
             await interaction.response.send_message(
-                f"❌ Akun TikTok **@{u_clean}** sudah terikat ke akun Discord lain.\n"
-                f"Satu akun TikTok hanya dapat diklaim oleh satu akun Discord. Jika ini milik Anda, silakan hubungi admin.",
+                f"❌ TikTok account **@{u_clean}** is already linked to another Discord account.\n"
+                f"One TikTok account can only be claimed by one Discord account. "
+                f"If this is yours, please contact an admin.",
                 ephemeral=True
             )
             return
 
-        # 3. Cek apakah username TikTok ini ada di database bot
+        # 3. Look up the account (may not exist yet / may have less than 10 coins)
         exists, total_coins, display_name = is_tiktok_user_in_db(u_clean)
-        if not exists:
-            await interaction.response.send_message(
-                f"❌ Akun TikTok **@{u_clean}** **tidak ditemukan di database kami**.\n\n"
-                f"⚠️ **Syarat Verifikasi:**\n"
-                f"1. Pastikan penulisan username TikTok Anda benar (tanpa spasi/typo).\n"
-                f"2. Anda harus sudah pernah berinteraksi atau mengirim gift di live stream host kami.\n\n"
-                f"Jika baru saja mengirim gift, mohon tunggu sebentar agar observer selesai mencatatnya.",
-                ephemeral=True
-            )
-            return
-
-        # 4. Buat kode verifikasi acak unik (DM-XXXX)
-        code = create_pending_verification(interaction.user.id, u_clean, method='choice')
-        
-        embed = discord.Embed(
-            title="✅ Akun TikTok Ditemukan!",
-            description=(
-                f"Akun TikTok **@{u_clean}** (`{display_name or u_clean}`) terdaftar di database kami!\n"
-                f"💰 **Total Koin Tercatat:** `{total_coins} c`\n\n"
-                f"🔒 **Pilih Metode Verifikasi:**\n"
-                f"Untuk membuktikan bahwa Anda adalah pemilik sah akun ini, silakan pilih salah satu dari **2 metode** berikut:"
-            ),
-            color=discord.Color.blue()
+        embed, view = build_verification_start(
+            interaction.user.id, u_clean, total_coins, display_name
         )
-        embed.add_field(
-            name="📝 Pilihan 1: Verifikasi via Bio Profil",
-            value="Tambahkan kode verifikasi ke Bio profil TikTok Anda, lalu klik tombol konfirmasi. *(Bisa dilakukan kapan saja tanpa perlu live)*",
-            inline=False
-        )
-        embed.add_field(
-            name="🔴 Pilihan 2: Verifikasi via Live Chat",
-            value="Ketik kode verifikasi di Live Chat saat salah satu host kami sedang Live Streaming. Bot akan mendeteksi komentar Anda secara otomatis.",
-            inline=False
-        )
-
-        view = VerificationMethodChoiceView(u_clean, code, total_coins)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 class VerificationMethodChoiceView(discord.ui.View):
+    """Standard verification (10+ coins): bio code or live chat code."""
     def __init__(self, tiktok_user: str, code: str, total_coins: int):
         super().__init__(timeout=900)
         self.tiktok_user = tiktok_user
         self.code = code
         self.total_coins = total_coins
 
-    @discord.ui.button(label="Verifikasi Lewat Bio", style=discord.ButtonStyle.primary, emoji="📝")
+    @discord.ui.button(label="Verify via Bio", style=discord.ButtonStyle.primary, emoji="📝")
     async def via_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(
-            title="📝 Verifikasi Akun via Bio TikTok",
-            description=(
-                f"Akun TikTok: **@{self.tiktok_user}**\n\n"
-                f"🔑 **Kode Verifikasi Anda:**\n"
-                f"```text\n{self.code}\n```\n"
-                f"**Langkah-langkah:**\n"
-                f"1. Buka aplikasi TikTok Anda.\n"
-                f"2. Buka **Profil** -> **Edit Profil** -> Bagian **Bio**.\n"
-                f"3. Masukkan / tambahkan kode `{self.code}` ke dalam Bio profil Anda.\n"
-                f"4. Simpan perubahan profil di TikTok.\n"
-                f"5. Klik tombol **[ 🔍 Konfirmasi & Cek Bio ]** di bawah ini.\n\n"
-                f"⏱️ *Kode berlaku selama 15 menit. Anda dapat menghapus kode ini dari bio setelah verifikasi selesai.*"
-            ),
-            color=discord.Color.gold()
+        self.code = create_pending_verification(interaction.user.id, self.tiktok_user, method='bio')
+        await interaction.response.edit_message(
+            embed=build_bio_verification_embed(self.tiktok_user, self.code),
+            view=BioVerificationView(self.tiktok_user, self.code, self.total_coins)
         )
-        view = BioVerificationView(self.tiktok_user, self.code, self.total_coins)
-        await interaction.response.edit_message(embed=embed, view=view)
 
-    @discord.ui.button(label="Verifikasi Lewat Live Chat", style=discord.ButtonStyle.danger, emoji="🔴")
+    @discord.ui.button(label="Verify via Live Chat", style=discord.ButtonStyle.danger, emoji="🔴")
     async def via_live(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.code = create_pending_verification(interaction.user.id, self.tiktok_user, method='live_code')
         live_hosts = get_current_live_hosts()
         if live_hosts:
-            host_text = "🟢 **Host yang SEDANG LIVE saat ini:**\n" + "\n".join([f"• `@{h}` (https://www.tiktok.com/@{h}/live)" for h in live_hosts])
+            host_text = "🟢 **Hosts live right now:**\n" + "\n".join(
+                [f"• `@{h}` (https://www.tiktok.com/@{h}/live)" for h in live_hosts]
+            )
         else:
-            host_text = "⚪ **Saat ini belum ada host yang sedang live.**\n💡 *Disarankan menggunakan metode Verifikasi Bio agar dapat langsung selesai tanpa menunggu live.*"
+            host_text = (
+                "⚪ **No host is live right now.**\n"
+                "💡 *Use the bio verification method if you do not want to wait.*"
+            )
 
         embed = discord.Embed(
-            title="🔴 Verifikasi Akun via Live Chat TikTok",
+            title="🔴 Verify via Live Chat",
             description=(
-                f"Akun TikTok: **@{self.tiktok_user}**\n\n"
-                f"🔑 **Kode Verifikasi Anda:**\n"
+                f"TikTok account: **@{self.tiktok_user}**\n\n"
+                f"🔑 **Your verification code:**\n"
                 f"```text\n{self.code}\n```\n"
                 f"{host_text}\n\n"
-                f"**Langkah-langkah:**\n"
-                f"1. Masuk ke live streaming host kami yang sedang live.\n"
-                f"2. Kirim komentar di Live Chat yang memuat kode: `{self.code}` menggunakan akun TikTok **@{self.tiktok_user}** Anda.\n"
-                f"3. Bot akan otomatis mendeteksi komentar tersebut dan langsung mengaktifkan role Anda!\n\n"
-                f"⏱️ *Bot sedang mendengarkan live chat... (Kode berlaku 15 menit)*"
+                f"**Steps:**\n"
+                f"1. Join one of our live streams.\n"
+                f"2. Post a comment containing `{self.code}` from TikTok account **@{self.tiktok_user}**.\n"
+                f"3. The bot detects it automatically and gives you the role.\n\n"
+                f"⏱️ *The bot is listening to live chat... (code expires in 15 minutes)*"
             ),
             color=discord.Color.red()
         )
-        view = LiveVerificationView(self.tiktok_user, self.code, self.total_coins)
-        await interaction.response.edit_message(embed=embed, view=view)
+        await interaction.response.edit_message(
+            embed=embed,
+            view=LiveVerificationView(self.tiktok_user, self.code, self.total_coins)
+        )
 
-    @discord.ui.button(label="Batal", style=discord.ButtonStyle.secondary, emoji="❌")
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         cancel_pending_verification(interaction.user.id)
-        await interaction.response.edit_message(content="❌ Proses verifikasi dibatalkan.", embed=None, view=None)
+        await interaction.response.edit_message(content="❌ Verification cancelled.", embed=None, view=None)
+
+class LowActivityVerificationView(discord.ui.View):
+    """Verification for accounts with fewer than 10 coins (or no transactions)."""
+    def __init__(self, tiktok_user: str, total_coins: int):
+        super().__init__(timeout=900)
+        self.tiktok_user = tiktok_user
+        self.total_coins = total_coins
+
+    @discord.ui.button(label="Verify via Live Greeting", style=discord.ButtonStyle.danger, emoji="🔴")
+    async def via_live_greeting(self, interaction: discord.Interaction, button: discord.ui.Button):
+        live_hosts = get_current_live_hosts()
+        if not live_hosts:
+            code = create_pending_verification(interaction.user.id, self.tiktok_user, method='bio')
+            embed = build_bio_verification_embed(self.tiktok_user, code)
+            embed.description = (
+                f"⚪ **No host is live right now.**\n\n" + embed.description
+            )
+            await interaction.response.edit_message(
+                embed=embed,
+                view=BioVerificationView(self.tiktok_user, code, self.total_coins, low_activity=True)
+            )
+            return
+
+        create_pending_verification(interaction.user.id, self.tiktok_user, method='live_greeting')
+        await interaction.response.edit_message(
+            embed=build_live_greeting_embed(self.tiktok_user, live_hosts),
+            view=LiveGreetingVerificationView(self.tiktok_user, self.total_coins)
+        )
+
+    @discord.ui.button(label="Verify via Bio", style=discord.ButtonStyle.success, emoji="📝")
+    async def via_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
+        code = create_pending_verification(interaction.user.id, self.tiktok_user, method='bio')
+        await interaction.response.edit_message(
+            embed=build_bio_verification_embed(self.tiktok_user, code),
+            view=BioVerificationView(self.tiktok_user, code, self.total_coins, low_activity=True)
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cancel_pending_verification(interaction.user.id)
+        await interaction.response.edit_message(content="❌ Verification cancelled.", embed=None, view=None)
+
+def build_live_greeting_embed(tiktok_user: str, live_hosts: list) -> discord.Embed:
+    host_lines = "\n".join(
+        [f"• `@{h}` — https://www.tiktok.com/@{h}/live" for h in live_hosts]
+    )
+    return discord.Embed(
+        title="🔴 Verify via Live Greeting",
+        description=(
+            f"TikTok account: **@{tiktok_user}**\n\n"
+            f"🟢 **Hosts live right now:**\n{host_lines}\n\n"
+            f"**What to do:**\n"
+            f"1. Join one of the live streams above using TikTok account **@{tiktok_user}**.\n"
+            f"2. Post an English welcome message, for example:\n"
+            f"   `hello`, `hello host`, `hiii`, `hey`, or `good evening`.\n"
+            f"3. The bot will detect your account and your message automatically and verify you.\n\n"
+            f"⏱️ *This verification request is valid for 15 minutes.*"
+        ),
+        color=discord.Color.red()
+    )
 
 class BioVerificationView(discord.ui.View):
-    def __init__(self, tiktok_user: str, code: str, total_coins: int):
+    def __init__(self, tiktok_user: str, code: str, total_coins: int, low_activity: bool = False):
         super().__init__(timeout=900)
         self.tiktok_user = tiktok_user
         self.code = code
         self.total_coins = total_coins
+        self.low_activity = low_activity
 
-    @discord.ui.button(label="Konfirmasi & Cek Bio", style=discord.ButtonStyle.success, emoji="🔍")
+    @discord.ui.button(label="Verify Bio", style=discord.ButtonStyle.success, emoji="🔍")
     async def check_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
-        
+
         is_valid, current_bio = await async_verify_tiktok_bio(self.tiktok_user, self.code)
-        
+
         if is_valid:
             bind_user_mapping(interaction.user.id, self.tiktok_user)
-            log_activity_event("verification", f"[VERIFIKASI BIO] @{self.tiktok_user} berhasil verifikasi akun via Bio!", self.tiktok_user)
-            
+            cancel_pending_verification(interaction.user.id)
+            log_activity_event(
+                "verification",
+                f"[BIO] @{self.tiktok_user} verified via TikTok bio.",
+                self.tiktok_user
+            )
+
             if isinstance(interaction.user, discord.Member):
-                _, role_info = await grant_verified_access(interaction.user, self.tiktok_user, self.total_coins)
+                _, role_info = await grant_verified_access(
+                    interaction.user, self.tiktok_user, self.total_coins
+                )
             else:
-                role_info = " Akses server telah dibuka."
+                role_info = " Server access has been unlocked."
 
             embed = discord.Embed(
-                title="🎉 Verifikasi Berhasil!",
+                title="🎉 Verification Successful!",
                 description=(
-                    f"Selamat {interaction.user.mention}!\n\n"
-                    f"✅ Akun TikTok **@{self.tiktok_user}** berhasil di-binding ke akun Discord Anda.\n"
-                    f"🔒 Akun telah terkunci dan tidak dapat di-claim oleh orang lain.\n"
+                    f"Congratulations {interaction.user.mention}!\n\n"
+                    f"✅ TikTok account **@{self.tiktok_user}** has been linked to your Discord account.\n"
+                    f"🔒 The account is locked and cannot be claimed by anyone else.\n"
                     f"🌟{role_info}\n\n"
-                    f"*Anda sekarang dapat menghapus kode `{self.code}` dari bio TikTok Anda. Selamat bersenang-senang!*"
+                    f"*You can now remove `{self.code}` from your TikTok bio. Have fun!*"
                 ),
                 color=discord.Color.green()
             )
             await interaction.edit_original_response(embed=embed, view=None)
         else:
             embed = discord.Embed(
-                title="⚠️ Kode Belum Ditemukan di Bio",
+                title="⚠️ Verification Text Not Found in Bio",
                 description=(
-                    f"Kode **`{self.code}`** belum terdeteksi di bio profil TikTok **@{self.tiktok_user}**.\n\n"
-                    f"📄 **Bio yang terbaca saat ini:**\n"
-                    f"> *\"{current_bio or '(Bio Kosong)'}\"*\n\n"
-                    f"💡 **Petunjuk:**\n"
-                    f"1. Pastikan Anda sudah menekan tombol **Simpan** di profil TikTok.\n"
-                    f"2. Tunggu 5-10 detik jika baru saja disimpan agar TikTok meng-update datanya.\n"
-                    f"3. Pastikan kode `{self.code}` tertulis lengkap di dalam bio."
+                    f"The text **`{self.code}`** was not found in the TikTok bio of **@{self.tiktok_user}**.\n\n"
+                    f"📄 **Bio currently read:**\n"
+                    f"> *\"{current_bio or '(empty bio)'}\"*\n\n"
+                    f"💡 **Tips:**\n"
+                    f"1. Make sure you pressed **Save** in your TikTok profile.\n"
+                    f"2. Wait 5–10 seconds after saving so TikTok updates the data.\n"
+                    f"3. Make sure the full text `{self.code}` is in your bio."
                 ),
                 color=discord.Color.orange()
             )
             await interaction.edit_original_response(embed=embed, view=self)
 
-    @discord.ui.button(label="Ganti Metode", style=discord.ButtonStyle.secondary, emoji="🔙")
+    @discord.ui.button(label="Change Method", style=discord.ButtonStyle.secondary, emoji="🔙")
     async def change_method(self, interaction: discord.Interaction, button: discord.ui.Button):
-        view = VerificationMethodChoiceView(self.tiktok_user, self.code, self.total_coins)
-        embed = discord.Embed(
-            title="🔒 Pilih Metode Verifikasi",
-            description=f"Pilih metode verifikasi untuk akun TikTok **@{self.tiktok_user}**:",
-            color=discord.Color.blue()
-        )
+        if self.low_activity:
+            embed = discord.Embed(
+                title="🔒 Choose Verification Method",
+                description=f"Choose a verification method for TikTok account **@{self.tiktok_user}**:",
+                color=discord.Color.blue()
+            )
+            view = LowActivityVerificationView(self.tiktok_user, self.total_coins)
+        else:
+            code = create_pending_verification(interaction.user.id, self.tiktok_user, method='choice')
+            embed = discord.Embed(
+                title="🔒 Choose Verification Method",
+                description=f"Choose a verification method for TikTok account **@{self.tiktok_user}**:",
+                color=discord.Color.blue()
+            )
+            view = VerificationMethodChoiceView(self.tiktok_user, code, self.total_coins)
         await interaction.response.edit_message(embed=embed, view=view)
 
-    @discord.ui.button(label="Batal", style=discord.ButtonStyle.secondary, emoji="❌")
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         cancel_pending_verification(interaction.user.id)
-        await interaction.response.edit_message(content="❌ Proses verifikasi dibatalkan.", embed=None, view=None)
+        await interaction.response.edit_message(content="❌ Verification cancelled.", embed=None, view=None)
 
 class LiveVerificationView(discord.ui.View):
+    """Standard live chat code verification (10+ coins)."""
     def __init__(self, tiktok_user: str, code: str, total_coins: int):
         super().__init__(timeout=900)
         self.tiktok_user = tiktok_user
         self.code = code
         self.total_coins = total_coins
 
-    @discord.ui.button(label="Cek Status Verifikasi", style=discord.ButtonStyle.primary, emoji="🔄")
+    @discord.ui.button(label="Check Verification Status", style=discord.ButtonStyle.primary, emoji="🔄")
     async def check_status(self, interaction: discord.Interaction, button: discord.ui.Button):
         current_mapped = get_user_mapping(interaction.user.id)
         if current_mapped and current_mapped.lower() == self.tiktok_user.lower():
             if isinstance(interaction.user, discord.Member):
-                _, role_info = await grant_verified_access(interaction.user, self.tiktok_user, self.total_coins)
+                _, role_info = await grant_verified_access(
+                    interaction.user, self.tiktok_user, self.total_coins
+                )
             else:
-                role_info = " Akses server telah dibuka."
+                role_info = " Server access has been unlocked."
 
             embed = discord.Embed(
-                title="🎉 Verifikasi Live Berhasil!",
+                title="🎉 Live Verification Successful!",
                 description=(
-                    f"Selamat {interaction.user.mention}!\n\n"
-                    f"✅ Komentar Anda telah terdeteksi di Live Chat!\n"
-                    f"Akun TikTok **@{self.tiktok_user}** telah di-binding ke akun Discord Anda.\n"
+                    f"Congratulations {interaction.user.mention}!\n\n"
+                    f"✅ Your comment was detected in the live chat!\n"
+                    f"TikTok account **@{self.tiktok_user}** has been linked to your Discord account.\n"
                     f"🌟{role_info}"
                 ),
                 color=discord.Color.green()
@@ -545,67 +705,140 @@ class LiveVerificationView(discord.ui.View):
 
         live_hosts = get_current_live_hosts()
         if live_hosts:
-            host_text = "🟢 **Host yang SEDANG LIVE saat ini:**\n" + "\n".join([f"• `@{h}`" for h in live_hosts])
+            host_text = "🟢 **Hosts live right now:**\n" + "\n".join(
+                [f"• `@{h}`" for h in live_hosts]
+            )
         else:
-            host_text = "⚪ **Saat ini belum ada host yang sedang live.**"
+            host_text = "⚪ **No host is live right now.**"
 
         embed = discord.Embed(
-            title="⏳ Menunggu Komentar di Live Chat",
+            title="⏳ Waiting for Your Live Chat Comment",
             description=(
-                f"Akun TikTok: **@{self.tiktok_user}**\n"
-                f"Kode: **`{self.code}`**\n\n"
+                f"TikTok account: **@{self.tiktok_user}**\n"
+                f"Code: **`{self.code}`**\n\n"
                 f"{host_text}\n\n"
-                f"Kirim komentar yang memuat kode **`{self.code}`** di live chat host kami.\n"
-                f"Begitu komentar Anda masuk, verifikasi akan otomatis selesai!"
+                f"Post a comment containing **`{self.code}`** in one of our live chats.\n"
+                f"Once your comment arrives, verification completes automatically!"
             ),
             color=discord.Color.yellow()
         )
         await interaction.response.edit_message(embed=embed, view=self)
 
-    @discord.ui.button(label="Ganti ke Verifikasi Bio", style=discord.ButtonStyle.secondary, emoji="📝")
+    @discord.ui.button(label="Switch to Bio", style=discord.ButtonStyle.secondary, emoji="📝")
     async def switch_to_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(
-            title="📝 Verifikasi Akun via Bio TikTok",
-            description=(
-                f"Akun TikTok: **@{self.tiktok_user}**\n\n"
-                f"🔑 **Kode Verifikasi Anda:**\n"
-                f"```text\n{self.code}\n```\n"
-                f"**Langkah-langkah:**\n"
-                f"1. Buka aplikasi TikTok -> **Profil** -> **Edit Profil** -> **Bio**.\n"
-                f"2. Masukkan kode `{self.code}` ke dalam Bio Anda dan simpan.\n"
-                f"3. Klik tombol **[ 🔍 Konfirmasi & Cek Bio ]** di bawah ini."
-            ),
-            color=discord.Color.gold()
+        self.code = create_pending_verification(interaction.user.id, self.tiktok_user, method='bio')
+        await interaction.response.edit_message(
+            embed=build_bio_verification_embed(self.tiktok_user, self.code),
+            view=BioVerificationView(self.tiktok_user, self.code, self.total_coins)
         )
-        view = BioVerificationView(self.tiktok_user, self.code, self.total_coins)
-        await interaction.response.edit_message(embed=embed, view=view)
 
-    @discord.ui.button(label="Batal", style=discord.ButtonStyle.secondary, emoji="❌")
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         cancel_pending_verification(interaction.user.id)
-        await interaction.response.edit_message(content="❌ Proses verifikasi dibatalkan.", embed=None, view=None)
+        await interaction.response.edit_message(content="❌ Verification cancelled.", embed=None, view=None)
+
+class LiveGreetingVerificationView(discord.ui.View):
+    """Live greeting verification for accounts with fewer than 10 coins."""
+    def __init__(self, tiktok_user: str, total_coins: int):
+        super().__init__(timeout=900)
+        self.tiktok_user = tiktok_user
+        self.total_coins = total_coins
+
+    @discord.ui.button(label="Check Verification Status", style=discord.ButtonStyle.primary, emoji="🔄")
+    async def check_status(self, interaction: discord.Interaction, button: discord.ui.Button):
+        current_mapped = get_user_mapping(interaction.user.id)
+        if current_mapped and current_mapped.lower() == self.tiktok_user.lower():
+            if isinstance(interaction.user, discord.Member):
+                _, role_info = await grant_verified_access(
+                    interaction.user, self.tiktok_user, self.total_coins
+                )
+            else:
+                role_info = " Server access has been unlocked."
+
+            embed = discord.Embed(
+                title="🎉 Live Greeting Verification Successful!",
+                description=(
+                    f"Congratulations {interaction.user.mention}!\n\n"
+                    f"✅ Your welcome message was detected in the live chat!\n"
+                    f"TikTok account **@{self.tiktok_user}** has been linked to your Discord account.\n"
+                    f"🌟{role_info}"
+                ),
+                color=discord.Color.green()
+            )
+            await interaction.response.edit_message(embed=embed, view=None)
+            return
+
+        live_hosts = get_current_live_hosts()
+        if live_hosts:
+            embed = build_live_greeting_embed(self.tiktok_user, live_hosts)
+        else:
+            embed = discord.Embed(
+                title="⏳ Waiting for a Live Stream",
+                description=(
+                    f"No host is live right now.\n\n"
+                    f"TikTok account **@{self.tiktok_user}** will be verified automatically "
+                    f"as soon as you post a welcome message in one of our live streams.\n\n"
+                    f"💡 *You can also switch to bio verification if you do not want to wait.*"
+                ),
+                color=discord.Color.yellow()
+            )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Switch to Bio", style=discord.ButtonStyle.secondary, emoji="📝")
+    async def switch_to_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
+        code = create_pending_verification(interaction.user.id, self.tiktok_user, method='bio')
+        await interaction.response.edit_message(
+            embed=build_bio_verification_embed(self.tiktok_user, code),
+            view=BioVerificationView(self.tiktok_user, code, self.total_coins, low_activity=True)
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cancel_pending_verification(interaction.user.id)
+        await interaction.response.edit_message(content="❌ Verification cancelled.", embed=None, view=None)
 
 async def handle_live_comment_verification(tiktok_user: str, comment_text: str, target_host: str):
-    """
-    Callback yang dipanggil ketika ada komentar masuk di live stream TikTok.
-    Mengecek apakah komentar tersebut cocok dengan verifikasi live pending.
+    """Verify a pending request when the matching TikTok account comments in a live stream.
+
+    Supports both the standard verification code and the English welcome-message
+    flow used for accounts with fewer than 10 coins.
     """
     pending = find_pending_live_verification(tiktok_user, comment_text)
+    greeting_used = False
+
+    if not pending and is_welcome_message(comment_text):
+        pending = find_pending_live_greeting(tiktok_user)
+        greeting_used = bool(pending)
+
     if not pending:
         return
 
     discord_id = pending['discord_id']
     u_clean = tiktok_user.lower()
 
-    # Binding akun ke user_mappings
+    # Link the TikTok account to the Discord user
     bind_user_mapping(discord_id, u_clean)
-    log_activity_event("verification", f"[VERIFIKASI LIVE] @{u_clean} berhasil verifikasi via Live Chat @{target_host}!", target_host)
-    print(f"[Verification] Live comment verified for @{u_clean} (Discord ID: {discord_id})")
+    cancel_pending_verification(discord_id)
 
-    # Ambil total koin
+    if greeting_used:
+        log_activity_event(
+            "verification",
+            f"[LIVE GREETING] @{u_clean} verified via welcome message \"{comment_text}\" in @{target_host}'s live.",
+            target_host
+        )
+        print(f"[Verification] Live greeting verified for @{u_clean} (Discord ID: {discord_id})")
+    else:
+        log_activity_event(
+            "verification",
+            f"[LIVE CODE] @{u_clean} verified via live chat code in @{target_host}'s live.",
+            target_host
+        )
+        print(f"[Verification] Live comment verified for @{u_clean} (Discord ID: {discord_id})")
+
+    # Get the coin balance
     _, total_coins, _ = is_tiktok_user_in_db(u_clean)
 
-    # Berikan role verifikasi di setiap guild tempat member berada
+    # Grant the verified role in every guild the member belongs to
     for guild in bot.guilds:
         member = guild.get_member(discord_id)
         if member:
@@ -615,17 +848,17 @@ async def handle_live_comment_verification(tiktok_user: str, comment_text: str, 
             except Exception as e:
                 print(f"[Verification] Error granting role in {guild.name}: {e}")
 
-    # Kirim pesan notifikasi langsung ke DM pengguna jika DM terbuka
+    # Send a DM notification when the user's DMs are open
     try:
         user_obj = await bot.fetch_user(discord_id)
         if user_obj:
             embed = discord.Embed(
-                title="🎉 Verifikasi Live TikTok Berhasil!",
+                title="🎉 TikTok Verification Successful!",
                 description=(
-                    f"Halo {user_obj.name}!\n\n"
-                    f"Komentar Anda di Live Chat host **@{target_host}** telah terdeteksi!\n"
-                    f"Akun TikTok **@{u_clean}** telah berhasil di-binding ke akun Discord Anda.\n"
-                    f"✅ Role verifikasi telah diberikan dan akses server telah dibuka!"
+                    f"Hello {user_obj.name}!\n\n"
+                    f"Your welcome message in **@{target_host}**'s live chat was detected!\n"
+                    f"TikTok account **@{u_clean}** has been linked to your Discord account.\n"
+                    f"✅ The verified role has been granted and server access is now open!"
                 ),
                 color=discord.Color.green()
             )
@@ -638,16 +871,16 @@ async def handle_live_comment_verification(tiktok_user: str, comment_text: str, 
 @bot.event
 async def on_ready():
     print(f"[Discord] Bot logged in as {bot.user}")
-    # Daftarkan persistent view agar tombol verifikasi selalu aktif
+    # Register the persistent view so the verification button always works
     bot.add_view(VerificationChannelView())
-    # Setelah restart, bersihkan sesi pengumuman yang sudah tidak live (pesan ikut dihapus)
+    # After a restart, clean up announcement sessions that are no longer live
     if not getattr(bot, "_announcement_reconcile_started", False):
         bot._announcement_reconcile_started = True
         asyncio.create_task(reconcile_announcement_sessions())
 
 @bot.event
 async def on_member_join(member: discord.Member):
-    # Jika member yang bergabung kembali sudah pernah verifikasi sebelumnya, pulihkan role-nya
+    # Restore roles if the member has verified before
     tt_user = get_user_mapping(member.id)
     if tt_user:
         _, total_coins, _ = is_tiktok_user_in_db(tt_user)
@@ -656,23 +889,23 @@ async def on_member_join(member: discord.Member):
 @bot.command(name="setup_verification")
 @commands.has_permissions(administrator=True)
 async def setup_verification(ctx):
-    """Admin command untuk mengirim panel verifikasi akun TikTok ke channel."""
+    """Admin command: send the TikTok verification panel to this channel."""
     embed = discord.Embed(
-        title="🛡️ VERIFIKASI AKUN TIKTOK",
+        title="🛡️ TIKTOK ACCOUNT VERIFICATION",
         description=(
-            "Selamat datang di server!\n\n"
-            "Untuk mendapatkan role dan membuka akses ke seluruh channel server, "
-            "Anda diwajibkan untuk **mengklaim & memverifikasi akun TikTok** Anda terlebih dahulu.\n\n"
-            "📌 **Cara Verifikasi:**\n"
-            "1. Klik tombol **[ 🔑 Verifikasi Akun TikTok ]** di bawah ini.\n"
-            "2. Masukkan username TikTok Anda pada formulir yang muncul.\n"
-            "3. Percakapan bersifat **100% Privat (hanya Anda dan bot yang bisa melihat)**.\n"
-            "4. Pilih metode verifikasi kepemilikan akun (**Lewat Bio** atau **Lewat Live Chat**).\n"
-            "5. Setelah sesuai, akun TikTok akan terikat secara permanen dan role akses server otomatis aktif!"
+            "Welcome to the server!\n\n"
+            "To get your role and unlock access to every server channel, "
+            "you must first **claim & verify your TikTok account**.\n\n"
+            "📌 **How to verify:**\n"
+            "1. Click the **[ 🔑 Verify TikTok Account ]** button below.\n"
+            "2. Enter your TikTok username in the form.\n"
+            "3. The conversation is **100% private (only you and the bot can see it)**.\n"
+            "4. Choose a verification method (**Live Greeting**, **Live Chat Code**, or **Bio**).\n"
+            "5. Once confirmed, your TikTok account is permanently linked and your server access role activates automatically!"
         ),
         color=discord.Color.from_rgb(0, 168, 255)
     )
-    embed.set_footer(text="Dummy Dream Bot • Sistem Verifikasi & Keamanan")
+    embed.set_footer(text="Dummy Dream Bot • Verification & Security System")
     view = VerificationChannelView()
     await ctx.send(embed=embed, view=view)
     set_setting("verification_channel_id", str(ctx.channel.id))
@@ -684,18 +917,18 @@ async def setup_verification(ctx):
 @bot.command(name="set_verified_role")
 @commands.has_permissions(administrator=True)
 async def set_verified_role_cmd(ctx, role: discord.Role):
-    """Admin command untuk menentukan role yang diberikan setelah verifikasi berhasil."""
+    """Admin command: set the role granted after successful verification."""
     set_setting("verified_role_id", str(role.id))
-    await ctx.send(f"✅ Role verifikasi berhasil disetel ke: **{role.name}** (`{role.id}`)")
+    await ctx.send(f"✅ Verified role set to: **{role.name}** (`{role.id}`)")
 
 @bot.command(name="claim", aliases=["verify"])
 async def claim(ctx, tiktok_user: str = None):
-    """Memulai proses claim / verifikasi akun TikTok."""
+    """Start the TikTok account claim / verification process."""
     if not tiktok_user:
         view = VerificationChannelView()
         embed = discord.Embed(
-            title="🔑 Verifikasi Akun TikTok",
-            description="Klik tombol di bawah ini untuk memulai proses verifikasi akun TikTok Anda secara privat.",
+            title="🔑 Verify TikTok Account",
+            description="Click the button below to start verifying your TikTok account privately.",
             color=discord.Color.blue()
         )
         await ctx.send(embed=embed, view=view)
@@ -704,66 +937,60 @@ async def claim(ctx, tiktok_user: str = None):
     u_clean = tiktok_user.strip().lstrip('@').lower()
     existing_tiktok = get_user_mapping(ctx.author.id)
     if existing_tiktok:
-        await ctx.send(f"ℹ️ Akun Discord Anda sudah terverifikasi dengan akun TikTok **@{existing_tiktok}**.")
+        await ctx.send(f"ℹ️ Your Discord account is already verified with TikTok **@{existing_tiktok}**.")
         return
 
     is_claimed, claimed_discord_id = is_user_already_claimed(u_clean)
     if is_claimed:
-        await ctx.send(f"❌ Akun TikTok **@{u_clean}** sudah terikat ke akun Discord lain.")
+        await ctx.send(f"❌ TikTok account **@{u_clean}** is already linked to another Discord account.")
         return
 
     exists, total_coins, display_name = is_tiktok_user_in_db(u_clean)
-    if not exists:
-        await ctx.send(
-            f"❌ Akun TikTok **@{u_clean}** **tidak ditemukan di database kami**.\n\n"
-            f"⚠️ **Syarat Verifikasi:**\n"
-            f"1. Pastikan username sudah benar.\n"
-            f"2. Anda harus sudah pernah mengirim gift / berinteraksi di live stream host kami."
-        )
-        return
-
-    code = create_pending_verification(ctx.author.id, u_clean, method='choice')
-    view = VerificationMethodChoiceView(u_clean, code, total_coins)
-    embed = discord.Embed(
-        title="✅ Akun TikTok Ditemukan!",
-        description=(
-            f"Akun TikTok **@{u_clean}** (`{display_name or u_clean}`) terdaftar di database!\n"
-            f"💰 Total Koin: `{total_coins} c`\n\n"
-            f"Silakan pilih metode verifikasi di bawah ini:"
-        ),
-        color=discord.Color.blue()
+    embed, view = build_verification_start(
+        ctx.author.id, u_clean, total_coins, display_name
     )
     try:
         await ctx.author.send(embed=embed, view=view)
-        await ctx.send(f"📬 {ctx.author.mention}, petunjuk verifikasi telah dikirimkan ke Direct Message (DM) Anda!", delete_after=10)
+        await ctx.send(
+            f"📬 {ctx.author.mention}, verification instructions have been sent to your Direct Messages!",
+            delete_after=10
+        )
     except discord.Forbidden:
-        await ctx.send(f"⚠️ {ctx.author.mention}, DM Anda tertutup. Silakan gunakan tombol di channel verifikasi untuk interaksi privat.", delete_after=15)
+        await ctx.send(
+            f"⚠️ {ctx.author.mention}, your DMs are closed. "
+            f"Please use the button in the verification channel for private interaction.",
+            delete_after=15
+        )
 
 @bot.command(name="unclaim")
 @commands.has_permissions(administrator=True)
 async def unclaim(ctx, member: discord.Member):
-    """Admin command untuk menghapus ikatan akun TikTok dari member Discord."""
+    """Admin command: remove a member's linked TikTok account."""
     conn = get_db_connection()
     try:
         res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (member.id,)).fetchone()
         if not res:
-            await ctx.send(f"❌ {member.mention} belum memiliki akun TikTok yang terikat.")
+            await ctx.send(f"❌ {member.mention} has no linked TikTok account.")
             return
         tt_user = res[0]
         conn.execute("DELETE FROM user_mappings WHERE discord_id = ?", (member.id,))
         conn.commit()
-        await ctx.send(f"✅ Berhasil membatalkan ikatan akun TikTok `@{tt_user}` dari {member.mention}.")
+        await ctx.send(f"✅ Removed the link to TikTok account `@{tt_user}` from {member.mention}.")
     finally:
         conn.close()
 
 @bot.command(name="mycoins", aliases=["check", "coins"])
 async def mycoins(ctx):
+    """Show the coin balance of your linked TikTok account."""
     conn = get_db_connection()
     try:
         res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (ctx.author.id,))
         mapping = res.fetchone()
         if not mapping:
-            await ctx.send(f"❌ {ctx.author.mention}, kamu belum memverifikasi akun TikTok! Gunakan `!claim` atau klik tombol di channel verifikasi.")
+            await ctx.send(
+                f"❌ {ctx.author.mention}, you have not verified a TikTok account yet! "
+                f"Use `!claim` or the button in the verification channel."
+            )
             return
 
         tiktok_user = mapping[0]
@@ -772,43 +999,48 @@ async def mycoins(ctx):
         display_name = gift_data[0] if (gift_data and gift_data[0]) else tiktok_user
         total_coins = gift_data[1] if gift_data else 0
 
-        await ctx.send(f"📊 **Coin Balance for {ctx.author.display_name}:** @{tiktok_user} | **{total_coins} c**")
+        await ctx.send(f"📊 **Coin balance for {ctx.author.display_name}:** @{tiktok_user} | **{total_coins} c**")
     finally:
         conn.close()
 
 @bot.command(name="myhistory")
 async def myhistory(ctx):
+    """Show your 5 most recent gift transactions."""
     conn = get_db_connection()
     try:
         res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (ctx.author.id,))
         mapping = res.fetchone()
         if not mapping:
-            await ctx.send(f"❌ {ctx.author.mention}, kamu belum link akun! Gunakan `!claim` atau tombol di channel verifikasi.")
+            await ctx.send(
+                f"❌ {ctx.author.mention}, you have not linked an account yet! "
+                f"Use `!claim` or the button in the verification channel."
+            )
             return
 
         tiktok_user = mapping[0]
         res = conn.execute("""
-            SELECT target_username, gift_name, gift_count, coins, created_at 
-            FROM gift_logs 
-            WHERE viewer_username = ? 
+            SELECT target_username, gift_name, gift_count, coins, created_at
+            FROM gift_logs
+            WHERE viewer_username = ?
             ORDER BY created_at DESC LIMIT 5
         """, (tiktok_user,))
         rows = res.fetchall()
 
         if not rows:
-            await ctx.send("📜 Belum ada riwayat gift yang tercatat.")
+            await ctx.send("📜 No gift history recorded yet.")
             return
 
-        msg = f"📜 **Riwayat Gift Terbaru untuk @{tiktok_user}:**\n"
+        msg = f"📜 **Recent gifts for @{tiktok_user}:**\n"
         for host, g_name, g_count, coins, dt in rows:
-            msg += f"• `{dt}` - **{g_count}x {g_name}** ({coins}c) ke host **@{host}**\n"
+            msg += f"• `{dt}` - **{g_count}x {g_name}** ({coins}c) to host **@{host}**\n"
 
         await ctx.send(msg)
     finally:
         conn.close()
 
-@bot.command(name="topsupporter", aliases=["leaderboard", "koin", "topdonator"])
+@bot.command(name="topsupporter", aliases=["leaderboard", "topdonator"])
 async def topsupporter(ctx):
+    """Show the all-time top supporters leaderboard."""
     conn = get_db_connection()
     try:
         res = conn.execute("SELECT tiktok_user, display_name, total_coins FROM tiktok_gifts ORDER BY total_coins DESC LIMIT 10")
@@ -830,11 +1062,12 @@ async def topsupporter(ctx):
     finally:
         conn.close()
 
-@bot.command(name="dailyrank", aliases=["daily", "harini"])
+@bot.command(name="dailyrank", aliases=["daily", "today"])
 async def dailyrank(ctx):
+    """Show today's coin ranking."""
     rows = get_daily_top_supporters()
     if not rows:
-        await ctx.send("❌ Belum ada data koin yang tercatat untuk hari ini.")
+        await ctx.send("❌ No coin data recorded for today yet.")
         return
 
     table = "```text\n"
@@ -846,70 +1079,71 @@ async def dailyrank(ctx):
             name_str = name_str[:20] + "..."
         table += f"{idx:<4} | {name_str:<24} | {coins:<10} c\n"
     table += "```"
-    await ctx.send(f"🏆 **TIKTOK LIVE DAILY RANKING (HARI INI)**\n{table}")
+    await ctx.send(f"🏆 **TIKTOK LIVE DAILY RANKING (TODAY)**\n{table}")
 
 @bot.command(name="livesessions", aliases=["sessions"])
 async def livesessions(ctx, host_username: str = None):
+    """Show the most recent live sessions."""
     conn = get_db_connection()
     try:
         if host_username:
             u_clean = host_username.lstrip("@").lower()
             res = conn.execute("""
-                SELECT session_id, tiktok_username, start_time, duration_seconds, total_coins 
+                SELECT session_id, tiktok_username, start_time, duration_seconds, total_coins
                 FROM live_sessions WHERE tiktok_username = ? ORDER BY start_time DESC LIMIT 5
             """, (u_clean,))
         else:
             res = conn.execute("""
-                SELECT session_id, tiktok_username, start_time, duration_seconds, total_coins 
+                SELECT session_id, tiktok_username, start_time, duration_seconds, total_coins
                 FROM live_sessions ORDER BY start_time DESC LIMIT 5
             """)
-        
+
         rows = res.fetchall()
         if not rows:
-            await ctx.send("❌ Belum ada riwayat sesi live yang tercatat.")
+            await ctx.send("❌ No live session history recorded yet.")
             return
 
-        msg = "📹 **Riwayat Sesi Live Terbaru:**\n"
+        msg = "📹 **Most recent live sessions:**\n"
         for s_id, host, s_time, dur_sec, coins in rows:
             hrs = dur_sec // 3600
             mins = (dur_sec % 3600) // 60
             secs = dur_sec % 60
-            dur_str = f"{hrs:02d}:{mins:02d}:{secs:02d}" if dur_sec > 0 else "Masih Live / Disconnect"
-            msg += f"• Sesi `#{s_id}` (@{host}) | Mulai: `{s_time}` | Durasi: `{dur_str}` | Total: **{coins} c**\n"
+            dur_str = f"{hrs:02d}:{mins:02d}:{secs:02d}" if dur_sec > 0 else "Still live / disconnected"
+            msg += f"• Session `#{s_id}` (@{host}) | Started: `{s_time}` | Duration: `{dur_str}` | Total: **{coins} c**\n"
 
         await ctx.send(msg)
     finally:
         conn.close()
 
-@bot.command(name="help", aliases=["commands", "bantuan"])
+@bot.command(name="help", aliases=["commands"])
 async def help_command(ctx):
-    """Menampilkan daftar command bot beserta kegunaannya."""
+    """Show all available bot commands."""
     embed = discord.Embed(
-        title="📖 Bantuan Dummy Dream Bot",
+        title="📖 Dummy Dream Bot Help",
         description=(
-            f"Halo {ctx.author.mention}! Berikut daftar command yang tersedia.\n"
-            f"Prefix: `!` • Contoh: `!mycoins`"
+            f"Hello {ctx.author.mention}! Here are the available commands.\n"
+            f"Prefix: `!` • Example: `!mycoins`"
         ),
         color=discord.Color.from_rgb(0, 168, 255)
     )
     embed.add_field(
-        name="🔑 Verifikasi & Akun",
+        name="🔑 Verification & Account",
         value=(
-            "`!claim` — mulai verifikasi akun TikTok (tombol, privat via DM)\n"
-            "`!claim <username>` — verifikasi langsung dengan username TikTok\n"
-            "`!mycoins` — lihat total koin kamu (`!check`, `!coins`)\n"
-            "`!myhistory` — 5 riwayat gift terakhir kamu"
+            "`!claim` — start TikTok account verification (private buttons via DM)\n"
+            "`!claim <username>` — verify with your TikTok username directly\n"
+            "`!mycoins` — show your total coins (`!check`, `!coins`)\n"
+            "`!myhistory` — your 5 most recent gift transactions"
         ),
         inline=False
     )
     embed.add_field(
-        name="🏆 Statistik & Live",
+        name="🏆 Stats & Live",
         value=(
-            "`!topsupporter` — leaderboard supporter (`!leaderboard`, `!koin`)\n"
-            "`!dailyrank` — ranking koin hari ini (`!daily`, `!harini`)\n"
-            "`!livesessions` — riwayat sesi live terakhir (`!sessions`)\n"
-            "`!livesessions <username>` — riwayat sesi live akun tertentu\n"
-            "`!help` — tampilkan pesan bantuan ini"
+            "`!topsupporter` — supporter leaderboard (`!leaderboard`, `!topdonator`)\n"
+            "`!dailyrank` — today's coin ranking (`!daily`, `!today`)\n"
+            "`!livesessions` — most recent live sessions (`!sessions`)\n"
+            "`!livesessions <username>` — live sessions for a specific account\n"
+            "`!help` — show this help message"
         ),
         inline=False
     )
@@ -919,9 +1153,9 @@ async def help_command(ctx):
         embed.add_field(
             name="🛡️ Admin",
             value=(
-                "`!setup_verification` — kirim panel verifikasi ke channel ini\n"
-                "`!set_verified_role @role` — atur role setelah verifikasi\n"
-                "`!unclaim @member` — hapus ikatan akun TikTok member"
+                "`!setup_verification` — send the verification panel to this channel\n"
+                "`!set_verified_role @role` — set the role granted after verification\n"
+                "`!unclaim @member` — remove a member's linked TikTok account"
             ),
             inline=False
         )
@@ -929,21 +1163,21 @@ async def help_command(ctx):
     live_hosts = get_current_live_hosts()
     if live_hosts:
         embed.add_field(
-            name="🟢 Sedang Live",
+            name="🟢 Live Now",
             value="\n".join(
                 [f"• @{h} — https://www.tiktok.com/@{h}/live" for h in live_hosts]
             ),
             inline=False
         )
 
-    embed.set_footer(text="Dummy Dream Bot • Ketik !help kapan saja")
+    embed.set_footer(text="Dummy Dream Bot • Type !help anytime")
     await ctx.send(embed=embed)
 
 async def main():
     init_db()
     keep_alive(handle_api_announcement)
 
-    # Jalankan observer secara dinamis dengan callback announcement, role, dan verifikasi komentar live chat
+    # Start observers with announcement, role, and live chat verification callbacks
     asyncio.create_task(run_all_observers(
         announcement_callback=process_live_announcement,
         role_callback=auto_assign_role,

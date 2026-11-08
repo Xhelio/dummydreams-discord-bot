@@ -51,7 +51,7 @@ async def async_verify_tiktok_bio(username: str, expected_code: str) -> tuple[bo
     """
     bio = await async_fetch_tiktok_bio(username)
     if not bio:
-        return False, "(Bio tidak ditemukan atau profil privat)"
+        return False, "(Bio not found or profile is private)"
     
     code_clean = expected_code.strip().lower()
     if code_clean in bio.lower():
