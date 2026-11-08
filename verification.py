@@ -1,3 +1,4 @@
+import asyncio
 import json
 import random
 import re
@@ -88,4 +89,66 @@ async def async_verify_tiktok_bio(username: str, expected_code: str) -> tuple[bo
         return True, bio
 
     return False, bio
+
+
+async def async_fetch_tiktok_display_name(username: str) -> str:
+    """Fetch a TikTok account display/nickname for use as the channel name."""
+    u_clean = username.lower().lstrip("@")
+    cache_bust = f"_cb={int(time.time() * 1000)}_{random.randint(1000, 9999)}"
+
+    try:
+        async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
+            resp = await client.get(
+                f"https://www.tiktok.com/@{u_clean}?{cache_bust}",
+                headers=MOBILE_HEADERS,
+            )
+            if resp.status_code == 200:
+                html = resp.text
+                for key in ("nickname", "uniqueId"):
+                    m = re.search(rf'"{key}"\s*:\s*"((?:\\.|[^"\\])*)"', html)
+                    if m:
+                        try:
+                            value = json.loads('"' + m.group(1) + '"')
+                        except Exception:
+                            value = m.group(1)
+                        if value and key == "nickname":
+                            return str(value).strip()
+                # Fallback: title tag often contains "Name (@user) | TikTok"
+                m = re.search(r"<title>([^<]+)</title>", html, re.IGNORECASE)
+                if m:
+                    title = m.group(1)
+                    title = re.sub(r"\s*\|\s*TikTok\s*$", "", title, flags=re.IGNORECASE).strip()
+                    title = re.sub(r"\s*\(@[^)]+\)\s*$", "", title).strip()
+                    if title and title.lower() not in ("tiktok", u_clean):
+                        return title
+    except Exception as e:
+        print(f"[Profile Scraper] HTTP error for @{u_clean}: {e}")
+
+    try:
+        c = TikTokLiveClient(unique_id=u_clean)
+        data = await FetchRoomIdAPIRoute.fetch_user_room_data(c.web, u_clean)
+        user_info = data.get("data", {}).get("user", {})
+        name = user_info.get("nickname") or user_info.get("uniqueId")
+        if name:
+            return str(name).strip()
+    except Exception as e:
+        print(f"[Profile Scraper] TikTokLive fallback error for @{u_clean}: {e}")
+
+    return u_clean
+
+
+def fetch_tiktok_display_name(username: str) -> str:
+    """Sync wrapper for Flask/admin routes."""
+    try:
+        return asyncio.run(async_fetch_tiktok_display_name(username))
+    except RuntimeError:
+        # Fallback if somehow called in a running loop context.
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(async_fetch_tiktok_display_name(username))
+        finally:
+            loop.close()
+    except Exception as e:
+        print(f"[Profile Scraper] Failed for @{username}: {e}")
+        return (username or "").lower().lstrip("@")
 

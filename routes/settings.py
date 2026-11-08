@@ -21,7 +21,9 @@ from db import (
     delete_role_tier,
     get_role_tiers,
     get_tier_settings,
+    get_channel_display_name,
 )
+from verification import fetch_tiktok_display_name
 from styles import BASE_CSS, NAV_HTML, AUTO_REFRESH_JS
 
 settings_bp = Blueprint("settings", __name__, url_prefix="/admin")
@@ -279,9 +281,8 @@ def view_settings():
         <div class="card">
             <h2>🎯 Target Hosts</h2>
             <p class="muted">These TikTok accounts are watched by the realtime monitor.</p>
-            <form action="/admin/settings/host/add" method="POST" class="form-grid host-form">
-                <input type="text" name="tiktok_username" placeholder="TikTok username (@...)" required>
-                <input type="text" name="display_name" placeholder="Channel name" required>
+            <form action="/admin/settings/host/add" method="POST" class="form-grid" style="grid-template-columns: 1fr auto;">
+                <input type="text" name="tiktok_username" placeholder="TikTok username (@...) — channel name is fetched automatically" required>
                 <button type="submit">+ Add Host</button>
             </form>
             <div class="table-scroll">
@@ -477,8 +478,10 @@ def remove_tier(tier_id):
 @settings_bp.route("/settings/host/add", methods=["POST"])
 def add_target_host():
     username = request.form.get("tiktok_username", "").strip().lower().lstrip("@")
-    display_name = request.form.get("display_name", username).strip() or username
     if username:
+        display_name = fetch_tiktok_display_name(username)
+        if not display_name or display_name == username:
+            display_name = get_channel_display_name(username) or username
         conn = get_db_connection()
         try:
             conn.execute("""

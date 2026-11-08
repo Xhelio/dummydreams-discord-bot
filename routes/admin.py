@@ -19,6 +19,7 @@ from db import (
     sync_valid_hosts
 )
 from runtime_status import get_live_snapshot
+from verification import fetch_tiktok_display_name
 from styles import BASE_CSS, NAV_HTML, AUTO_REFRESH_JS
 
 admin_bp = Blueprint('admin', __name__, url_prefix='/admin')
@@ -486,9 +487,8 @@ def view_monitor():
                     <button type="submit" style="background: #15803d; padding: 8px 14px;">🔄 Sync 6 Official Accounts (IDs 1-6)</button>
                 </form>
             </div>
-            <form action="/admin/add-host" method="POST" class="form-grid">
-                <input type="text" name="tiktok_username" placeholder="Username TikTok (@...)" required>
-                <input type="text" name="display_name" placeholder="Channel Name (e.g. George Vilora)" required>
+            <form action="/admin/add-host" method="POST" class="form-grid" style="grid-template-columns: 1fr auto;">
+                <input type="text" name="tiktok_username" placeholder="TikTok username (@...) — channel name is fetched automatically" required>
                 <button type="submit">+ Add Target Host</button>
             </form>
             <br>
@@ -575,10 +575,15 @@ def view_monitor():
 @admin_bp.route('/add-host', methods=['POST'])
 def add_host():
     username = request.form.get("tiktok_username", "").strip().lower().lstrip("@")
-    display_name = request.form.get("display_name", username).strip()
     if username:
+        display_name = fetch_tiktok_display_name(username)
+        if not display_name or display_name == username:
+            display_name = get_channel_display_name(username) or username
         conn = get_db_connection()
-        conn.execute("INSERT OR REPLACE INTO hosts (tiktok_username, display_name, is_active) VALUES (?, ?, 1)", (username, display_name))
+        conn.execute(
+            "INSERT OR REPLACE INTO hosts (tiktok_username, display_name, is_active) VALUES (?, ?, 1)",
+            (username, display_name),
+        )
         conn.commit()
         conn.close()
     return redirect('/admin/monitor')
