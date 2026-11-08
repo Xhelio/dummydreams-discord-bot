@@ -41,7 +41,7 @@ NOTIFICATION_LOCK = asyncio.Lock()
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 def get_verified_role(guild: discord.Guild) -> discord.Role:
     """Mengambil object Role verifikasi dari setting, env, roles.json, atau nama role."""
