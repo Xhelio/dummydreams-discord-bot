@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import time
 try:
     import libsql_experimental as libsql
     HAS_LIBSQL = True
@@ -60,17 +61,32 @@ def get_channel_display_name(tiktok_username: str) -> str:
     return u_clean
 
 def sync_valid_hosts():
-    """Merapikan ID (1-6) dan sinkronisasi 6 akun target resmi di database."""
+    """Ensure the 6 official target accounts exist without deleting custom hosts."""
     conn = get_db_connection()
     try:
         cur = conn.cursor()
-        # Bersihkan tabel hosts agar ID 1-6 dapat diisi rapi berurutan
-        cur.execute("DELETE FROM hosts")
         for host_id, uname, dname in VALID_TARGET_ACCOUNTS:
-            cur.execute("""
-                INSERT INTO hosts (host_id, tiktok_username, display_name, is_active)
-                VALUES (?, ?, ?, 1)
-            """, (host_id, uname, dname))
+            row = cur.execute(
+                "SELECT host_id FROM hosts WHERE LOWER(tiktok_username) = ?",
+                (uname,),
+            ).fetchone()
+            if row:
+                cur.execute(
+                    "UPDATE hosts SET display_name = ?, is_active = 1 WHERE host_id = ?",
+                    (dname, row[0]),
+                )
+            else:
+                try:
+                    cur.execute("""
+                        INSERT INTO hosts (host_id, tiktok_username, display_name, is_active)
+                        VALUES (?, ?, ?, 1)
+                    """, (host_id, uname, dname))
+                except Exception:
+                    # The preferred ID is already used by a custom host.
+                    cur.execute("""
+                        INSERT INTO hosts (tiktok_username, display_name, is_active)
+                        VALUES (?, ?, 1)
+                    """, (uname, dname))
         conn.commit()
     except Exception as e:
         print(f"[Hosts Sync Error] {e}")
@@ -109,7 +125,28 @@ def get_recent_gift_activities(limit: int = 100, channel_filter: str = "") -> li
         conn.close()
 
 def get_all_host_names() -> list:
-    return ["George Vilora", "Jeremy Jean", "Julianne", "Frank Lynn", "Steffanny Alisha", "Dummy Dreams Entertaiment", "SOLEN", "ZIZE", "YOSA", "IELYA", "YUCA", "SINTA", "COLE", "LUNA"]
+    """Return display names for every target host stored in the database."""
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT COALESCE(display_name, tiktok_username) FROM hosts ORDER BY host_id ASC"
+        ).fetchall()
+        names = [r[0] for r in rows if r[0]]
+    finally:
+        conn.close()
+    return names or [t[2] for t in VALID_TARGET_ACCOUNTS]
+
+
+def get_all_hosts() -> list:
+    """Return full host rows for the admin panel."""
+    conn = get_db_connection()
+    try:
+        return conn.execute("""
+            SELECT host_id, tiktok_username, COALESCE(display_name, tiktok_username), is_active
+            FROM hosts ORDER BY host_id ASC
+        """).fetchall()
+    finally:
+        conn.close()
 
 def get_active_hosts() -> list:
     conn = get_db_connection()
@@ -123,34 +160,63 @@ def get_active_hosts() -> list:
     finally:
         conn.close()
 
-def get_active_live_announcement(tiktok_username: str):
-    """Mengambil sesi pengumuman live yang tersimpan untuk satu akun TikTok.
+def _announcement_row_to_dict(row):
+    return {
+        "tiktok_username": row[0],
+        "channel_id": str(row[1]) if row[1] is not None else None,
+        "message_id": str(row[2]) if row[2] is not None else None,
+        "host_name": row[3] if len(row) > 3 else None,
+        "created_at": row[4] if len(row) > 4 else None,
+    }
 
-    Sesi ini menyimpan channel & message Discord yang sudah dikirim, sehingga
-    notifikasi berikutnya cukup di-EDIT (tidak mengirim pesan baru).
-    """
+
+def get_active_live_announcement(tiktok_username: str, channel_id=None):
+    """Return the stored announcement session for one account (and channel)."""
     u_clean = tiktok_username.lower().lstrip("@")
     conn = get_db_connection()
     try:
-        row = conn.execute(
+        if channel_id is None:
+            row = conn.execute(
+                """
+                SELECT tiktok_username, channel_id, message_id, host_name, created_at
+                FROM active_live_announcements
+                WHERE tiktok_username = ?
+                ORDER BY created_at ASC LIMIT 1
+                """,
+                (u_clean,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT tiktok_username, channel_id, message_id, host_name, created_at
+                FROM active_live_announcements
+                WHERE tiktok_username = ? AND channel_id = ?
+                """,
+                (u_clean, str(channel_id)),
+            ).fetchone()
+        return _announcement_row_to_dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_active_live_announcements_for_account(tiktok_username: str) -> list:
+    """Return every per-channel announcement session for one TikTok account."""
+    u_clean = tiktok_username.lower().lstrip("@")
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
             """
             SELECT tiktok_username, channel_id, message_id, host_name, created_at
             FROM active_live_announcements
             WHERE tiktok_username = ?
+            ORDER BY created_at ASC
             """,
             (u_clean,),
-        ).fetchone()
-        if not row:
-            return None
-        return {
-            "tiktok_username": row[0],
-            "channel_id": str(row[1]) if row[1] is not None else None,
-            "message_id": str(row[2]) if row[2] is not None else None,
-            "host_name": row[3] if len(row) > 3 else None,
-            "created_at": row[4] if len(row) > 4 else None,
-        }
+        ).fetchall()
+        return [_announcement_row_to_dict(r) for r in rows]
     finally:
         conn.close()
+
 
 def get_all_active_live_announcements() -> list:
     """Mengambil semua sesi pengumuman live aktif (untuk rekonsiliasi saat startup)."""
@@ -162,21 +228,13 @@ def get_all_active_live_announcements() -> list:
             FROM active_live_announcements
             """
         ).fetchall()
-        return [
-            {
-                "tiktok_username": r[0],
-                "channel_id": str(r[1]) if r[1] is not None else None,
-                "message_id": str(r[2]) if r[2] is not None else None,
-                "host_name": r[3] if len(r) > 3 else None,
-                "created_at": r[4] if len(r) > 4 else None,
-            }
-            for r in rows
-        ]
+        return [_announcement_row_to_dict(r) for r in rows]
     finally:
         conn.close()
 
+
 def save_active_live_announcement(tiktok_username: str, channel_id, message_id, host_name: str = None):
-    """Menyimpan / memperbarui sesi pengumuman live (1 pesan per akun TikTok)."""
+    """Store one announcement message per TikTok account per Discord channel."""
     u_clean = tiktok_username.lower().lstrip("@")
     conn = get_db_connection()
     try:
@@ -184,8 +242,7 @@ def save_active_live_announcement(tiktok_username: str, channel_id, message_id, 
             """
             INSERT INTO active_live_announcements (tiktok_username, channel_id, message_id, host_name)
             VALUES (?, ?, ?, ?)
-            ON CONFLICT(tiktok_username) DO UPDATE SET
-                channel_id = excluded.channel_id,
+            ON CONFLICT(tiktok_username, channel_id) DO UPDATE SET
                 message_id = excluded.message_id,
                 host_name = COALESCE(excluded.host_name, active_live_announcements.host_name)
             """,
@@ -195,8 +252,9 @@ def save_active_live_announcement(tiktok_username: str, channel_id, message_id, 
     finally:
         conn.close()
 
+
 def update_active_live_announcement_host(tiktok_username: str, host_name: str):
-    """Memperbarui nama host pada sesi pengumuman live (mis. saat jadwal/host berubah)."""
+    """Update the host name on every announcement session for an account."""
     u_clean = tiktok_username.lower().lstrip("@")
     conn = get_db_connection()
     try:
@@ -208,15 +266,41 @@ def update_active_live_announcement_host(tiktok_username: str, host_name: str):
     finally:
         conn.close()
 
-def delete_active_live_announcement(tiktok_username: str):
-    """Menghapus sesi pengumuman live setelah live berakhir."""
+
+def delete_active_live_announcement(tiktok_username: str, channel_id=None):
+    """Delete announcement session(s) for an account, optionally one channel only."""
     u_clean = tiktok_username.lower().lstrip("@")
     conn = get_db_connection()
     try:
-        conn.execute(
-            "DELETE FROM active_live_announcements WHERE tiktok_username = ?",
-            (u_clean,),
-        )
+        if channel_id is None:
+            conn.execute(
+                "DELETE FROM active_live_announcements WHERE tiktok_username = ?",
+                (u_clean,),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM active_live_announcements WHERE tiktok_username = ? AND channel_id = ?",
+                (u_clean, str(channel_id)),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def close_all_open_live_sessions():
+    """Close live sessions left open by a previous process (stale 'Live' status)."""
+    wib = pytz.timezone('Asia/Jakarta')
+    now_str = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
+    conn = get_db_connection()
+    try:
+        conn.execute("""
+            UPDATE live_sessions
+            SET end_time = ?, duration_seconds = CASE
+                WHEN start_time IS NULL THEN 0
+                ELSE CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER)
+            END
+            WHERE end_time IS NULL
+        """, (now_str, now_str))
         conn.commit()
     finally:
         conn.close()
@@ -239,11 +323,12 @@ def init_db():
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS active_live_announcements (
-                tiktok_username TEXT PRIMARY KEY,
+                tiktok_username TEXT NOT NULL,
                 channel_id TEXT NOT NULL,
                 message_id TEXT NOT NULL,
                 host_name TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (tiktok_username, channel_id)
             )
         """)
         conn.execute("""
@@ -334,6 +419,53 @@ def init_db():
             )
         """)
 
+        # Case-insensitive host aliases managed from the admin panel
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS host_aliases (
+                alias TEXT PRIMARY KEY COLLATE NOCASE,
+                host_name TEXT NOT NULL
+            )
+        """)
+
+        # Role tiers (reset group + permanent "all of the time" group)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS role_tiers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_key TEXT NOT NULL DEFAULT 'reset',
+                tier_name TEXT NOT NULL,
+                role_id TEXT NOT NULL,
+                min_coins INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER DEFAULT 0
+            )
+        """)
+
+        # Migrate the old one-message-per-account announcement table to
+        # one-message-per-account-per-channel.
+        try:
+            info = conn.execute("PRAGMA table_info(active_live_announcements)").fetchall()
+            pk_cols = [r[1] for r in info if len(r) > 5 and r[5]]
+            if pk_cols != ["tiktok_username", "channel_id"]:
+                conn.execute("ALTER TABLE active_live_announcements RENAME TO active_live_announcements_legacy")
+                conn.execute("""
+                    CREATE TABLE active_live_announcements (
+                        tiktok_username TEXT NOT NULL,
+                        channel_id TEXT NOT NULL,
+                        message_id TEXT NOT NULL,
+                        host_name TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY (tiktok_username, channel_id)
+                    )
+                """)
+                conn.execute("""
+                    INSERT OR IGNORE INTO active_live_announcements
+                        (tiktok_username, channel_id, message_id, host_name, created_at)
+                    SELECT tiktok_username, channel_id, message_id, host_name, created_at
+                    FROM active_live_announcements_legacy
+                """)
+                conn.execute("DROP TABLE active_live_announcements_legacy")
+        except Exception as e:
+            print(f"[DB Migration] Announcement table migration skipped: {e}")
+
         # Migrasi kolom jika tabel lama sudah ada
         for col, dtype in [
             ("log_date", "TEXT"),
@@ -352,6 +484,70 @@ def init_db():
             conn.execute("ALTER TABLE active_live_announcements ADD COLUMN host_name TEXT")
         except Exception:
             pass
+
+        # Default settings (never overwrite values saved by the admin)
+        wib = pytz.timezone('Asia/Jakarta')
+        now_str = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
+        defaults = {
+            "master_enabled": "1",
+            "feature_announcements": "1",
+            "feature_verification": "1",
+            "feature_role_tiers": "1",
+            "feature_leaderboard": "1",
+            "feature_live_tracking": "1",
+            "allowed_channels_enabled": "0",
+            "allowed_channel_ids": "[]",
+            "announcement_channel_ids": json.dumps(
+                [str(os.environ.get("ANNOUNCEMENT_CHANNEL_ID"))]
+                if os.environ.get("ANNOUNCEMENT_CHANNEL_ID") else []
+            ),
+            "role_tiers_enabled": "1",
+            "role_tiers_mode": "replace",
+            "role_tier_reset_enabled": "0",
+            "role_tier_reset_interval": "4",
+            "role_tier_reset_unit": "weeks",
+            "role_tier_announce": "1",
+            "role_tier_permanent_enabled": "0",
+            "role_tier_last_reset": now_str,
+        }
+        for key, value in defaults.items():
+            conn.execute(
+                "INSERT OR IGNORE INTO bot_settings (key, value) VALUES (?, ?)",
+                (key, str(value)),
+            )
+
+        # Seed aliases once so existing welcome-message detection keeps working.
+        alias_count = conn.execute("SELECT COUNT(*) FROM host_aliases").fetchone()[0]
+        if not alias_count:
+            for alias, host_name in HOST_ALIASES.items():
+                conn.execute(
+                    "INSERT OR IGNORE INTO host_aliases (alias, host_name) VALUES (?, ?)",
+                    (alias, host_name),
+                )
+
+        # Seed role tiers from the legacy JSON config only once.
+        seeded = conn.execute("SELECT value FROM bot_settings WHERE key = 'tiers_seeded'").fetchone()
+        tier_count = conn.execute("SELECT COUNT(*) FROM role_tiers").fetchone()[0]
+        if not seeded and not tier_count:
+            try:
+                if os.path.exists("config/roles.json"):
+                    with open("config/roles.json", "r") as f:
+                        cfg = json.load(f)
+                    guild_tiers = cfg.get("role_tiers", {})
+                    first = next(iter(guild_tiers.values()), [])
+                    for idx, item in enumerate(first, start=1):
+                        min_coins = item.get("min_coins") if isinstance(item, dict) else item[0]
+                        role_id = item.get("role_id") if isinstance(item, dict) else item[1]
+                        conn.execute("""
+                            INSERT INTO role_tiers
+                                (group_key, tier_name, role_id, min_coins, sort_order)
+                            VALUES ('reset', ?, ?, ?, ?)
+                        """, (f"Tier {idx}", str(role_id), int(min_coins), idx))
+            except Exception as e:
+                print(f"[DB Seed] Role tier seed skipped: {e}")
+            conn.execute(
+                "INSERT OR IGNORE INTO bot_settings (key, value) VALUES ('tiers_seeded', '1')"
+            )
 
         cur = conn.cursor()
         
@@ -501,15 +697,70 @@ HOST_ALIASES = {
     "dummydreams": "Dummy Dreams Entertaiment",
 }
 
+_HOST_ALIAS_CACHE = {"loaded_at": 0, "items": None}
+
+
+def invalidate_host_alias_cache():
+    _HOST_ALIAS_CACHE["loaded_at"] = 0
+    _HOST_ALIAS_CACHE["items"] = None
+
+
+def get_host_aliases() -> list:
+    """Return all aliases as (alias, host_name), cached briefly for live chat speed."""
+    now = time.time()
+    if _HOST_ALIAS_CACHE["items"] is None or now - _HOST_ALIAS_CACHE["loaded_at"] > 30:
+        conn = get_db_connection()
+        try:
+            rows = conn.execute(
+                "SELECT alias, host_name FROM host_aliases ORDER BY LENGTH(alias) DESC"
+            ).fetchall()
+            items = [(r[0], r[1]) for r in rows if r[0] and r[1]]
+        except Exception:
+            items = list(HOST_ALIASES.items())
+        finally:
+            conn.close()
+        _HOST_ALIAS_CACHE["items"] = items
+        _HOST_ALIAS_CACHE["loaded_at"] = now
+    return list(_HOST_ALIAS_CACHE["items"])
+
+
+def add_host_alias(alias: str, host_name: str):
+    alias_clean = (alias or "").strip().lower().lstrip("@")
+    host_clean = (host_name or "").strip()
+    if not alias_clean or not host_clean:
+        return False
+    conn = get_db_connection()
+    try:
+        conn.execute("""
+            INSERT INTO host_aliases (alias, host_name) VALUES (?, ?)
+            ON CONFLICT(alias) DO UPDATE SET host_name = excluded.host_name
+        """, (alias_clean, host_clean))
+        conn.commit()
+        invalidate_host_alias_cache()
+        return True
+    finally:
+        conn.close()
+
+
+def delete_host_alias(alias: str):
+    alias_clean = (alias or "").strip().lower().lstrip("@")
+    conn = get_db_connection()
+    try:
+        conn.execute("DELETE FROM host_aliases WHERE alias = ?", (alias_clean,))
+        conn.commit()
+        invalidate_host_alias_cache()
+    finally:
+        conn.close()
+
+
 def detect_host_from_welcome_message(text: str):
     """
     Mendeteksi nama host dari welcome message / chat / intro di TikTok.
-    Case-insensitive dan membaca di sela-sela teks (misal: ZIZE's here -> Zize).
-    Keyword 'Mommy' adalah alias dari Sinta.
+    Case-insensitive, alias dikelola dari admin panel.
     """
     if not text:
         return None
-    for kw, host_name in HOST_ALIASES.items():
+    for kw, host_name in get_host_aliases():
         pattern = rf"(?:^|[\s\W_]){re.escape(kw)}(?:[\x27\u2019]s|s)?(?:$|[\s\W_])"
         if re.search(pattern, text, re.IGNORECASE):
             return host_name
@@ -760,6 +1011,161 @@ def set_setting(key: str, value: str):
         conn.commit()
     finally:
         conn.close()
+
+
+def get_bool_setting(key: str, default: bool = True) -> bool:
+    value = get_setting(key)
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "on", "enabled")
+
+
+def get_json_list_setting(key: str) -> list:
+    raw = get_setting(key, "[]")
+    try:
+        value = json.loads(raw or "[]")
+        if isinstance(value, list):
+            return value
+    except Exception:
+        pass
+    # Backwards-compatible comma/space separated input
+    return [p.strip() for p in re.split(r"[\s,]+", str(raw or "")) if p.strip()]
+
+
+def get_int_list_setting(key: str) -> list:
+    result = []
+    for item in get_json_list_setting(key):
+        try:
+            result.append(int(str(item).strip()))
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def is_feature_enabled(feature: str) -> bool:
+    """Master switch gates every individual feature."""
+    if not get_bool_setting("master_enabled", True):
+        return False
+    return get_bool_setting(f"feature_{feature}", True)
+
+
+def get_announcement_channel_ids() -> list:
+    ids = get_int_list_setting("announcement_channel_ids")
+    if ids:
+        return list(dict.fromkeys(ids))
+    env_id = os.environ.get("ANNOUNCEMENT_CHANNEL_ID")
+    try:
+        return [int(env_id)] if env_id else []
+    except (TypeError, ValueError):
+        return []
+
+
+def get_role_tiers(group_key: str = None) -> list:
+    conn = get_db_connection()
+    try:
+        if group_key:
+            rows = conn.execute("""
+                SELECT id, group_key, tier_name, role_id, min_coins, sort_order
+                FROM role_tiers WHERE group_key = ?
+                ORDER BY min_coins ASC, sort_order ASC, id ASC
+            """, (group_key,)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT id, group_key, tier_name, role_id, min_coins, sort_order
+                FROM role_tiers
+                ORDER BY group_key ASC, min_coins ASC, sort_order ASC, id ASC
+            """).fetchall()
+        return [
+            {
+                "id": r[0],
+                "group_key": r[1],
+                "tier_name": r[2],
+                "role_id": str(r[3]),
+                "min_coins": int(r[4] or 0),
+                "sort_order": int(r[5] or 0),
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def add_role_tier(group_key: str, role_id: str, min_coins: int, tier_name: str = None):
+    group_key = group_key if group_key in ("reset", "permanent") else "reset"
+    conn = get_db_connection()
+    try:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM role_tiers WHERE group_key = ?", (group_key,)
+        ).fetchone()[0]
+        name = tier_name or f"Tier {count + 1}"
+        conn.execute("""
+            INSERT INTO role_tiers (group_key, tier_name, role_id, min_coins, sort_order)
+            VALUES (?, ?, ?, ?, ?)
+        """, (group_key, name, str(role_id), int(min_coins), count + 1))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_role_tier(tier_id: int):
+    conn = get_db_connection()
+    try:
+        conn.execute("DELETE FROM role_tiers WHERE id = ?", (tier_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_tier_settings() -> dict:
+    return {
+        "enabled": get_bool_setting("role_tiers_enabled", True),
+        "permanent_enabled": get_bool_setting("role_tier_permanent_enabled", False),
+        "mode": get_setting("role_tiers_mode", "replace"),
+        "reset_enabled": get_bool_setting("role_tier_reset_enabled", False),
+        "reset_interval": int(get_setting("role_tier_reset_interval", "4") or 4),
+        "reset_unit": get_setting("role_tier_reset_unit", "weeks"),
+        "announce": get_bool_setting("role_tier_announce", True),
+        "announce_channel_id": get_setting("role_tier_announce_channel_id", ""),
+    }
+
+
+def _add_months(dt: datetime, months: int) -> datetime:
+    month = dt.month - 1 + months
+    year = dt.year + month // 12
+    month = month % 12 + 1
+    import calendar
+    day = min(dt.day, calendar.monthrange(year, month)[1])
+    return dt.replace(year=year, month=month, day=day)
+
+
+def tier_reset_due() -> bool:
+    """True when the configured weeks/months reset interval has elapsed."""
+    if not get_bool_setting("role_tier_reset_enabled", False):
+        return False
+    wib = pytz.timezone('Asia/Jakarta')
+    now = datetime.now(wib)
+    raw = get_setting("role_tier_last_reset", "")
+    try:
+        last = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+        last = wib.localize(last)
+    except Exception:
+        set_setting("role_tier_last_reset", now.strftime("%Y-%m-%d %H:%M:%S"))
+        return False
+    try:
+        interval = max(1, int(get_setting("role_tier_reset_interval", "4") or 4))
+    except ValueError:
+        interval = 4
+    unit = get_setting("role_tier_reset_unit", "weeks")
+    if unit == "months":
+        next_dt = _add_months(last, interval)
+    else:
+        next_dt = last + timedelta(weeks=interval)
+    return now >= next_dt
+
+
+def mark_tier_reset_done():
+    wib = pytz.timezone('Asia/Jakarta')
+    set_setting("role_tier_last_reset", datetime.now(wib).strftime("%Y-%m-%d %H:%M:%S"))
 
 def is_tiktok_user_in_db(tiktok_user: str) -> tuple:
     """

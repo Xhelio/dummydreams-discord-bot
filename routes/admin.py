@@ -18,6 +18,7 @@ from db import (
     get_channel_display_name,
     sync_valid_hosts
 )
+from runtime_status import get_live_snapshot
 from styles import BASE_CSS, NAV_HTML, AUTO_REFRESH_JS
 
 admin_bp = Blueprint('admin', __name__, url_prefix='/admin')
@@ -401,27 +402,18 @@ def view_viewer_detail(tiktok_user):
 
 @admin_bp.route('/monitor', methods=['GET'])
 def view_monitor():
+    live_snapshot = get_live_snapshot()
     try:
         conn = get_db_connection()
         cur = conn.cursor()
 
-        hosts = cur.execute("""
-            SELECT 
-                h.host_id, 
-                h.tiktok_username, 
-                h.display_name,
-                h.is_active,
-                CASE 
-                    WHEN a.tiktok_username IS NOT NULL OR s.session_id IS NOT NULL THEN 1 
-                    ELSE 0 
-                END as is_currently_live
+        host_rows = cur.execute("""
+            SELECT h.host_id, h.tiktok_username, h.display_name, h.is_active
             FROM hosts h
-            LEFT JOIN active_live_announcements a ON LOWER(h.tiktok_username) = LOWER(a.tiktok_username)
-            LEFT JOIN live_sessions s ON LOWER(h.tiktok_username) = LOWER(s.tiktok_username) AND s.end_time IS NULL
             ORDER BY h.host_id ASC
         """).fetchall()
 
-        sessions = cur.execute("""
+        session_rows = cur.execute("""
             SELECT 
                 s.session_id, 
                 s.tiktok_username, 
@@ -429,19 +421,48 @@ def view_monitor():
                 s.end_time, 
                 s.duration_seconds, 
                 s.total_coins, 
-                s.scheduled_host,
-                CASE 
-                    WHEN a.tiktok_username IS NOT NULL OR s.end_time IS NULL THEN 1 
-                    ELSE 0 
-                END as is_live_now
+                s.scheduled_host
             FROM live_sessions s
-            LEFT JOIN active_live_announcements a ON LOWER(s.tiktok_username) = LOWER(a.tiktok_username)
             ORDER BY s.start_time DESC
         """).fetchall()
 
         conn.close()
     except Exception as e:
         return f"<h3>Database Error: {e}</h3>", 500
+
+    # Current host from the most recent open session (used only as a fallback).
+    open_hosts = {}
+    for s in session_rows:
+        uname = (s[1] or "").lower()
+        if s[3] is None and uname not in open_hosts and s[6] and s[6] != "Host":
+            open_hosts[uname] = s[6]
+
+    hosts = []
+    for h in host_rows:
+        uname = (h[1] or "").lower()
+        live_item = live_snapshot.get(uname)
+        hosts.append({
+            "host_id": h[0],
+            "username": h[1],
+            "display_name": h[2] or h[1],
+            "is_active": bool(h[3]),
+            "is_live": bool(live_item),
+            "host_name": (live_item or {}).get("host") or open_hosts.get(uname) or h[2] or h[1],
+        })
+
+    sessions = []
+    for s in session_rows:
+        uname = (s[1] or "").lower()
+        sessions.append({
+            "session_id": s[0],
+            "username": s[1],
+            "start_time": s[2],
+            "end_time": s[3],
+            "duration_seconds": s[4] or 0,
+            "total_coins": s[5] or 0,
+            "scheduled_host": s[6],
+            "is_live_now": uname in live_snapshot,
+        })
 
     html = """
     <!DOCTYPE html>
@@ -472,26 +493,27 @@ def view_monitor():
             </form>
             <br>
             <table>
-                <tr><th>ID</th><th>Username TikTok</th><th>Channel Name</th><th>Realtime Status</th><th>Action</th></tr>
+                <tr><th>ID</th><th>Username TikTok</th><th>Channel Name</th><th>Live Host</th><th>Realtime Status</th><th>Action</th></tr>
                 {% for h in hosts %}
                 <tr>
-                    <td>{{ h[0] }}</td>
-                    <td>@{{ h[1] }}</td>
-                    <td>{{ h[2] or h[1] }}</td>
+                    <td>{{ h.host_id }}</td>
+                    <td>@{{ h.username }}</td>
+                    <td>{{ h.display_name }}</td>
+                    <td><strong>{{ h.host_name }}</strong></td>
                     <td>
-                        {% if h[4] == 1 %}
-                        <a href="https://www.tiktok.com/@{{ h[1] }}/live" target="_blank" class="badge badge-active" title="Click to watch the live">🔴 Live Now ↗</a>
+                        {% if h.is_live %}
+                        <a href="https://www.tiktok.com/@{{ h.username }}/live" target="_blank" class="badge badge-active" title="Click to watch the live">🔴 Live Now ↗</a>
                         {% else %}
                         <span class="badge badge-inactive">Offline</span>
                         {% endif %}
                     </td>
                     <td>
-                        <a href="/admin/toggle-host/{{ h[0] }}" class="btn-action btn-toggle">Toggle Active Status</a>
-                        <a href="/admin/delete-host/{{ h[0] }}" class="btn-action btn-del" onclick="return confirm('Delete this target?')">Delete</a>
+                        <a href="/admin/toggle-host/{{ h.host_id }}" class="btn-action btn-toggle">Toggle Active Status</a>
+                        <a href="/admin/delete-host/{{ h.host_id }}" class="btn-action btn-del" onclick="return confirm('Delete this target?')">Delete</a>
                     </td>
                 </tr>
                 {% else %}
-                <tr><td colspan="5">No targets registered yet.</td></tr>
+                <tr><td colspan="6">No targets registered yet.</td></tr>
                 {% endfor %}
             </table>
         </div>
@@ -510,31 +532,31 @@ def view_monitor():
                 {% for s in sessions %}
                 <tr>
                     <td>
-                        <a href="https://www.tiktok.com/@{{ s[1] }}" target="_blank" class="viewer-link">@{{ s[1] }} ↗</a>
+                        <a href="https://www.tiktok.com/@{{ s.username }}" target="_blank" class="viewer-link">@{{ s.username }} ↗</a>
                     </td>
-                    <td>{{ s[2] }}</td>
+                    <td>{{ s.start_time }}</td>
                     <td>
-                        {% if s[3] %}
-                            {{ s[3] }}
-                        {% elif s[7] == 1 %}
+                        {% if s.end_time %}
+                            {{ s.end_time }}
+                        {% elif s.is_live_now %}
                             <span class="badge badge-active">🔴 Live Now</span>
                         {% else %}
                             <span style="color: #94a3b8; font-style: italic;">No data</span>
                         {% endif %}
                     </td>
                     <td>
-                        {% if s[4] > 0 %}
-                            {{ s[4] // 3600 }}h {{ (s[4] % 3600) // 60 }}m {{ s[4] % 60 }}s
+                        {% if s.duration_seconds > 0 %}
+                            {{ s.duration_seconds // 3600 }}h {{ (s.duration_seconds % 3600) // 60 }}m {{ s.duration_seconds % 60 }}s
                         {% else %}
                             -
                         {% endif %}
                     </td>
-                    <td><span class="badge" style="background: #ca8a04;">{{ s[5] }} c</span></td>
+                    <td><span class="badge" style="background: #ca8a04;">{{ s.total_coins }} c</span></td>
                     <td>
-                        {% if s[6] and s[6] != '-' and s[6] != 'Host' %}
-                            <a href="/admin/host/{{ s[6] }}" class="host-link" title="Click to view shift history">{{ s[6] }} ↗</a>
+                        {% if s.scheduled_host and s.scheduled_host != '-' and s.scheduled_host != 'Host' %}
+                            <a href="/admin/host/{{ s.scheduled_host }}" class="host-link" title="Click to view shift history">{{ s.scheduled_host }} ↗</a>
                         {% else %}
-                            <strong>{{ s[6] or '-' }}</strong>
+                            <strong>{{ s.scheduled_host or '-' }}</strong>
                         {% endif %}
                     </td>
                 </tr>

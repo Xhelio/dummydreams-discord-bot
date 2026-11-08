@@ -1,7 +1,8 @@
 from flask import Blueprint, request, jsonify
 import os
 import json
-from db import check_database_health
+from db import check_database_health, get_bool_setting
+from runtime_status import get_bot_status, get_live_snapshot
 
 api_bp = Blueprint('api', __name__, url_prefix='/api')
 async_announcement_handler = None
@@ -12,20 +13,27 @@ def set_announcement_handler(handler):
 
 @api_bp.route('/health', methods=['GET'])
 def health_check():
-    """Health status endpoint for the website status indicator."""
+    """Health status endpoint for the website, TikTok live and Discord bot pills."""
     db_ok = check_database_health()
-    if db_ok:
-        return jsonify({
-            "status": "ok",
-            "message": "Website Stable",
-            "database": "connected"
-        }), 200
-    else:
-        return jsonify({
-            "status": "warning",
-            "message": "Website Connected (Database Reconnecting)",
-            "database": "error"
-        }), 200
+    bot = get_bot_status()
+    live_accounts = get_live_snapshot()
+    payload = {
+        "status": "ok" if db_ok else "warning",
+        "message": "Website Stable" if db_ok else "Website Connected (Database Reconnecting)",
+        "database": "connected" if db_ok else "error",
+        "website": True,
+        "discord_bot": {
+            "online": bool(bot.get("online")),
+            "user": bot.get("user"),
+            "ready_at": bot.get("ready_at"),
+        },
+        "tiktok_live": {
+            "count": len(live_accounts),
+            "accounts": live_accounts,
+        },
+        "master_enabled": get_bool_setting("master_enabled", True),
+    }
+    return jsonify(payload), 200
 
 @api_bp.route('/config', methods=['GET'])
 def get_bot_config():

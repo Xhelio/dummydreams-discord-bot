@@ -45,19 +45,21 @@ from db import (
     get_current_host_for_account,
     set_current_host_for_account,
     update_live_session_host,
-    get_channel_display_name
+    get_channel_display_name,
+    is_feature_enabled
 )
+import runtime_status
 
 # Set global untuk melacak host yang saat ini sedang LIVE
 CURRENT_LIVE_HOSTS = set()
 
 def get_current_live_hosts() -> list:
     """Mengembalikan daftar username host yang saat ini sedang terhubung dan live."""
-    return list(CURRENT_LIVE_HOSTS)
+    return runtime_status.get_live_usernames()
 
 def is_any_host_live() -> bool:
     """Mengecek apakah ada minimal 1 host yang sedang live saat ini."""
-    return len(CURRENT_LIVE_HOSTS) > 0
+    return len(runtime_status.get_live_usernames()) > 0
 
 async def _trigger_announcement(announcement_callback, username: str, is_live: bool, host_name: str = None):
     if not announcement_callback:
@@ -103,6 +105,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         if detected and detected != current_host:
             current_host = detected
             print(f"[{username_clean}] 🎯 Host detected from welcome message: {detected} (from text: {text!r})")
+            runtime_status.set_live(username_clean, detected)
             if current_session_id:
                 update_live_session_host(current_session_id, detected)
             set_current_host_for_account(username_clean, detected)
@@ -112,11 +115,11 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             await _trigger_announcement(announcement_callback, username_clean, True, host_name=detected)
 
     async def delayed_disconnect_handler(session_to_close):
-        """Menunggu grace period 60 detik sebelum benar-benar menyatakan live berakhir di Discord."""
+        """Menunggu grace period 30 detik sebelum benar-benar menyatakan live berakhir di Discord."""
         try:
-            await asyncio.sleep(60)
+            await asyncio.sleep(30)
             nonlocal is_connected, current_session_id
-            CURRENT_LIVE_HOSTS.discard(username_clean)
+            runtime_status.clear_live(username_clean)
             if session_to_close:
                 end_live_session(session_to_close)
             # Saat offline, bot Discord akan MENGHAPUS pesan pengumuman lewat sesi tersimpan.
@@ -143,7 +146,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 print(f"[{username_clean}] Reconnected within grace period. Live status maintained.")
 
             is_connected = True
-            CURRENT_LIVE_HOSTS.add(username_clean)
+            runtime_status.set_live(username_clean, current_host)
             print(f"[{username_clean}] Connected to live stream.")
             
             # Cek apakah judul / room_info memuat nama host dari welcome message
@@ -180,6 +183,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             try:
                 user = event.user.unique_id.lower()
                 comment_text = event.comment
+                runtime_status.touch_live(username_clean)
                 
                 # 1. Cek verifikasi live chat akun Discord
                 if comment_callback:
@@ -234,6 +238,9 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         @client.on(GiftEvent)
         async def on_gift(event: GiftEvent):
             try:
+                if not is_feature_enabled("live_tracking"):
+                    return
+                runtime_status.touch_live(username_clean)
                 if event.gift.streakable and event.gift.streaking:
                     return
 
@@ -312,15 +319,36 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         await asyncio.sleep(30)
 
 async def run_all_observers(announcement_callback, role_callback, comment_callback=None):
-    """Membaca daftar host aktif dari DB dan menjalankan observer secara paralel."""
-    target_users = get_active_hosts()
-    print(f"[Observer System] Initializing observers for target hosts in DB: {target_users}")
-    
-    tasks = []
-    for username in target_users:
-        tasks.append(
-            asyncio.create_task(
-                start_single_observer(username, announcement_callback, role_callback, comment_callback)
-            )
-        )
-    await asyncio.gather(*tasks)
+    """Supervise one observer task per active host, refreshing from the DB.
+
+    Hosts added, paused or removed in the admin panel are picked up within a
+    minute without restarting the bot.
+    """
+    tasks = {}
+    print("[Observer System] Starting supervised observers for target hosts in DB.")
+
+    while True:
+        target_users = [u.lower().lstrip("@") for u in get_active_hosts() if u]
+        target_set = set(target_users)
+
+        # Stop observers for hosts that were paused or deleted.
+        for username in list(tasks.keys()):
+            task = tasks[username]
+            if username not in target_set:
+                if task and not task.done():
+                    task.cancel()
+                tasks.pop(username, None)
+                print(f"[Observer System] Stopped observer for @{username} (no longer active).")
+
+        # Start observers for newly added or previously failed hosts.
+        for username in target_users:
+            task = tasks.get(username)
+            if task is None or task.done():
+                tasks[username] = asyncio.create_task(
+                    start_single_observer(
+                        username, announcement_callback, role_callback, comment_callback
+                    )
+                )
+                print(f"[Observer System] Started observer for @{username}.")
+
+        await asyncio.sleep(60)

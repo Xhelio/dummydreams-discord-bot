@@ -28,12 +28,24 @@ from db import (
     find_pending_live_verification,
     find_pending_live_greeting,
     cancel_pending_verification,
-    log_activity_event
+    log_activity_event,
+    get_bool_setting,
+    get_int_list_setting,
+    get_announcement_channel_ids,
+    get_active_live_announcements_for_account,
+    get_role_tiers,
+    get_tier_settings,
+    is_feature_enabled,
+    tier_reset_due,
+    mark_tier_reset_done,
+    close_all_open_live_sessions
 )
-from utils import get_schedule_info, load_role_config, load_summary_config
+from utils import get_schedule_info, load_summary_config
 from server import keep_alive
 from observer import run_all_observers, get_current_live_hosts, is_any_host_live
 from verification import async_verify_tiktok_bio
+from routes.settings import set_verification_refresh_handler
+import runtime_status
 
 DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN')
 ANNOUNCEMENT_CHANNEL_ID = int(os.environ.get('ANNOUNCEMENT_CHANNEL_ID', "0"))
@@ -44,6 +56,32 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+
+
+def is_admin_member(member) -> bool:
+    """Admin = configured admin role, or server administrator when no role is set."""
+    if not isinstance(member, discord.Member):
+        return False
+    role_id = get_setting("admin_role_id", "") or ""
+    if role_id.isdigit():
+        return any(r.id == int(role_id) for r in member.roles)
+    return bool(member.guild_permissions.administrator)
+
+
+def is_admin(ctx) -> bool:
+    return is_admin_member(ctx.author)
+
+
+@bot.check
+async def global_bot_check(ctx):
+    if not get_bool_setting("master_enabled", True):
+        raise commands.CheckFailure("bot_disabled")
+    if ctx.guild and get_bool_setting("allowed_channels_enabled", False):
+        if not is_admin_member(ctx.author):
+            allowed = get_int_list_setting("allowed_channel_ids")
+            if ctx.channel.id not in allowed:
+                raise commands.CheckFailure("channel_not_allowed")
+    return True
 
 def get_verified_role(guild: discord.Guild) -> discord.Role:
     """Mengambil object Role verifikasi dari setting, env, roles.json, atau nama role."""
@@ -106,74 +144,113 @@ def handle_api_announcement(username: str, is_live: bool, host_name: str = None)
     except Exception as e:
         print(f"[API Error] Failed to schedule announcement for @{username}: {e}")
 
+async def _announce_tier_up(member: discord.Member, role: discord.Role, tiktok_user: str, total_coins: int):
+    tier_cfg = get_tier_settings()
+    if not tier_cfg["announce"] or not is_feature_enabled("role_tiers"):
+        return
+    channel_id = str(tier_cfg.get("announce_channel_id") or "").strip()
+    if not channel_id.isdigit():
+        return
+    try:
+        channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
+        if not channel:
+            return
+        embed = discord.Embed(
+            title="🎉 Tier Up!",
+            description=(
+                f"{member.mention} just reached **{role.name}**!\n\n"
+                f"🎵 TikTok account: **@{tiktok_user}**\n"
+                f"💰 Total coins: **{total_coins:,} c**"
+            ),
+            color=discord.Color.gold()
+        )
+        await channel.send(embed=embed)
+    except Exception as e:
+        print(f"[Discord] Failed to announce tier up: {e}")
+
+
 async def auto_assign_role(tiktok_user: str, total_coins: int):
+    """Assign reset and permanent tier roles based on the admin panel settings."""
+    if not is_feature_enabled("role_tiers"):
+        return
+
     discord_id = get_discord_id_from_tiktok(tiktok_user)
     if not discord_id:
         return
 
-    role_tiers, stack_roles = load_role_config()
-    if not role_tiers:
+    tier_cfg = get_tier_settings()
+    groups = []
+    if tier_cfg["enabled"]:
+        groups.append("reset")
+    if tier_cfg["permanent_enabled"]:
+        groups.append("permanent")
+    if not groups:
         return
 
-    for guild_id, tiers in role_tiers.items():
-        try:
-            guild = bot.get_guild(int(guild_id))
-        except Exception:
-            guild = None
-        if not guild:
-            continue
+    stacked = str(tier_cfg.get("mode", "replace")).lower() == "stacked"
 
+    for guild in bot.guilds:
         try:
             member = await guild.fetch_member(discord_id)
-        except discord.NotFound:
+        except (discord.NotFound, discord.HTTPException):
             continue
 
         roles_to_add = []
         roles_to_remove = []
+        added_tiers = []
 
-        if stack_roles:
-            for item in tiers:
-                min_coins = item.get("min_coins") if isinstance(item, dict) else item[0]
-                role_id = item.get("role_id") if isinstance(item, dict) else item[1]
-                role = guild.get_role(role_id)
-                if role and total_coins >= min_coins and role not in member.roles:
-                    roles_to_add.append(role)
-        else:
-            highest_eligible_role = None
-            all_tier_roles = []
-
-            for item in tiers:
-                min_coins = item.get("min_coins") if isinstance(item, dict) else item[0]
-                role_id = item.get("role_id") if isinstance(item, dict) else item[1]
-                role = guild.get_role(role_id)
+        for group_key in groups:
+            tiers = get_role_tiers(group_key)
+            resolved = []
+            for tier in tiers:
+                try:
+                    role = guild.get_role(int(tier["role_id"]))
+                except (TypeError, ValueError):
+                    role = None
                 if role:
-                    all_tier_roles.append(role)
-                    if total_coins >= min_coins:
-                        highest_eligible_role = role
+                    resolved.append((tier, role))
 
-            if highest_eligible_role:
-                if highest_eligible_role not in member.roles:
-                    roles_to_add.append(highest_eligible_role)
+            if not resolved:
+                continue
 
-                for role in all_tier_roles:
-                    if role != highest_eligible_role and role in member.roles:
+            eligible = [(t, r) for t, r in resolved if total_coins >= t["min_coins"]]
+            if stacked:
+                for tier, role in eligible:
+                    if role not in member.roles and role not in roles_to_add:
+                        roles_to_add.append(role)
+                        added_tiers.append((tier, role))
+            else:
+                highest = max(eligible, key=lambda x: x[0]["min_coins"], default=None)
+                if highest:
+                    tier, role = highest
+                    if role not in member.roles and role not in roles_to_add:
+                        roles_to_add.append(role)
+                        added_tiers.append((tier, role))
+                for tier, role in resolved:
+                    if highest and role == highest[1]:
+                        continue
+                    if role in member.roles and role not in roles_to_remove:
                         roles_to_remove.append(role)
 
         if roles_to_add:
             try:
-                await member.add_roles(*roles_to_add)
+                await member.add_roles(*roles_to_add, reason="Coin tier update")
                 role_names = ", ".join([r.name for r in roles_to_add])
-                print(f"[Discord] Assigned role {role_names} to {member.display_name} in '{guild.name}'!")
+                print(f"[Discord] Assigned tier role(s) {role_names} to {member.display_name} in '{guild.name}'!")
             except Exception as e:
                 print(f"[Discord] Error assigning tier roles: {e}")
 
         if roles_to_remove:
             try:
-                await member.remove_roles(*roles_to_remove)
+                await member.remove_roles(*roles_to_remove, reason="Coin tier replacement")
                 role_names = ", ".join([r.name for r in roles_to_remove])
-                print(f"[Discord] Removed previous tier role ({role_names}) from {member.display_name} in '{guild.name}'.")
+                print(f"[Discord] Removed previous tier role(s) ({role_names}) from {member.display_name} in '{guild.name}'.")
             except Exception as e:
                 print(f"[Discord] Error removing previous tier roles: {e}")
+
+        if added_tiers:
+            best_tier, best_role = max(added_tiers, key=lambda x: x[0]["min_coins"])
+            await _announce_tier_up(member, best_role, tiktok_user, total_coins)
 
 async def _resolve_announcement_channel(announcement_session: dict = None):
     """Menentukan channel Discord tempat sesi pengumuman tersimpan (fallback ke env)."""
@@ -208,43 +285,43 @@ async def _fetch_announcement_message(channel, message_id):
         return None
 
 async def process_live_announcement(username: str, is_live: bool, host_name: str = None):
-    """Kelola 1 pesan pengumuman per akun TikTok berdasarkan sesi yang tersimpan.
+    """Maintain one live announcement message per target account per channel.
 
-    - Live mulai  : kirim 1x, lalu simpan channel/message/host ke active_live_announcements.
-    - Masih live  : jangan kirim pesan baru. Jika host/jadwal berubah, EDIT pesan lama.
-    - Live berhenti: hapus pesan Discord lama, lalu hapus sesinya dari database.
+    - Start / still live: send once per configured channel, edit on host changes.
+    - Offline: delete every stored message for the account and clear sessions.
+    - Channels removed from the admin panel are cleaned up automatically.
     """
     user_key = username.lower().lstrip("@")
     async with NOTIFICATION_LOCK:
         if not bot.is_ready():
             await bot.wait_until_ready()
 
-        # Ambil sesi pengumuman yang tersimpan (jika ada)
-        announcement_session = get_active_live_announcement(user_key)
+        sessions = get_active_live_announcements_for_account(user_key)
 
-        # --- LIVE BERHENTI: hapus pesan lewat sesi tersimpan, lalu hapus sesi ---
+        # --- OFFLINE: remove all stored announcement messages ---
         if not is_live:
-            if not announcement_session:
-                return
-
-            channel = await _resolve_announcement_channel(announcement_session)
-            old_msg = await _fetch_announcement_message(
-                channel, announcement_session.get("message_id")
-            )
-            if old_msg:
-                try:
-                    await old_msg.delete()
-                    print(f"[Discord] Deleted live announcement message for @{user_key} because stream is offline.")
-                except Exception as e:
-                    print(f"[Discord] Failed to delete message for @{user_key}: {e}")
-
-            delete_active_live_announcement(user_key)
-            print(f"[Discord] Announcement session cleared for @{user_key}.")
+            for session in sessions:
+                channel = await _resolve_announcement_channel(session)
+                old_msg = await _fetch_announcement_message(
+                    channel, session.get("message_id")
+                )
+                if old_msg:
+                    try:
+                        await old_msg.delete()
+                        print(f"[Discord] Deleted live announcement for @{user_key} in channel {session.get('channel_id')}.")
+                    except Exception as e:
+                        print(f"[Discord] Failed to delete message for @{user_key}: {e}")
+                delete_active_live_announcement(user_key, session.get("channel_id"))
+            if sessions:
+                print(f"[Discord] Announcement sessions cleared for @{user_key}.")
             return
 
-        # --- LIVE MULAI / MASIH LIVE ---
-        if not ANNOUNCEMENT_CHANNEL_ID and not announcement_session:
-            print("[Discord] Notification failed: ANNOUNCEMENT_CHANNEL_ID is not set.")
+        if not is_feature_enabled("announcements"):
+            return
+
+        configured_channels = get_announcement_channel_ids()
+        if not configured_channels:
+            print("[Discord] Notification failed: no announcement channel configured.")
             return
 
         sched_host, account_name = get_schedule_info(user_key)
@@ -256,32 +333,47 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
             f"Watch here:\n{live_url}"
         )
 
-        channel = await _resolve_announcement_channel(announcement_session)
-        if not channel:
-            return
-
-        # Jika sesi sudah ada: edit pesan lama (termasuk saat host/jadwal berubah)
-        if announcement_session:
-            old_msg = await _fetch_announcement_message(
-                channel, announcement_session.get("message_id")
-            )
-            if old_msg:
-                if old_msg.content != live_content:
+        # Remove sessions for channels that are no longer configured.
+        for session in sessions:
+            try:
+                stored_channel = int(session.get("channel_id"))
+            except (TypeError, ValueError):
+                stored_channel = None
+            if stored_channel not in configured_channels:
+                channel = await _resolve_announcement_channel(session)
+                old_msg = await _fetch_announcement_message(channel, session.get("message_id"))
+                if old_msg:
                     try:
-                        await old_msg.edit(content=live_content)
-                        print(f"[Discord] Edited/updated live announcement for @{user_key} (Host: {final_host_name})")
-                    except Exception as e:
-                        print(f"[Discord] Failed to edit live announcement for @{user_key}: {e}")
-                if announcement_session.get("host_name") != final_host_name:
-                    update_active_live_announcement_host(user_key, final_host_name)
-                return
-            # Pesan lama sudah tidak ada (dihapus manual) -> kirim ulang & perbarui sesi
-            print(f"[Discord] Announcement message for @{user_key} missing, sending a new one.")
+                        await old_msg.delete()
+                    except Exception:
+                        pass
+                delete_active_live_announcement(user_key, session.get("channel_id"))
 
-        # Kirim 1x lalu simpan sesinya agar update berikutnya cukup edit pesan ini
-        new_msg = await channel.send(live_content)
-        save_active_live_announcement(user_key, channel.id, new_msg.id, final_host_name)
-        print(f"[Discord] Sent 1-time live announcement for @{user_key} (Msg ID: {new_msg.id})")
+        for channel_id in configured_channels:
+            session = get_active_live_announcement(user_key, channel_id)
+            channel = await _resolve_announcement_channel({"channel_id": channel_id})
+            if not channel:
+                continue
+
+            if session:
+                old_msg = await _fetch_announcement_message(channel, session.get("message_id"))
+                if old_msg:
+                    if old_msg.content != live_content:
+                        try:
+                            await old_msg.edit(content=live_content)
+                            print(f"[Discord] Updated live announcement for @{user_key} in {channel_id}.")
+                        except Exception as e:
+                            print(f"[Discord] Failed to edit announcement for @{user_key}: {e}")
+                    continue
+
+            try:
+                new_msg = await channel.send(live_content)
+                save_active_live_announcement(user_key, channel.id, new_msg.id, final_host_name)
+                print(f"[Discord] Sent live announcement for @{user_key} in {channel.id} (Msg ID: {new_msg.id}).")
+            except Exception as e:
+                print(f"[Discord] Failed to send announcement for @{user_key} in {channel_id}: {e}")
+
+        update_active_live_announcement_host(user_key, final_host_name)
 
 async def reconcile_announcement_sessions(delay_seconds: int = 120):
     """Bersihkan sesi/pesan pengumuman basi setelah bot restart.
@@ -304,7 +396,205 @@ async def reconcile_announcement_sessions(delay_seconds: int = 120):
     except Exception as e:
         print(f"[Discord] Announcement reconciliation failed: {e}")
 
-# --- Discord UI Components (Modals & Views) ---
+# --- Leaderboard, tier reset, verification panel tasks ---
+
+def build_leaderboard_embed(title: str, rows, value_label: str = "Total Coins") -> discord.Embed:
+    embed = discord.Embed(
+        title=title,
+        color=discord.Color.gold(),
+    )
+    if not rows:
+        embed.description = "No coin data recorded yet."
+        return embed
+    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+    lines = []
+    for idx, row in enumerate(rows, start=1):
+        username, display_name, coins = row[0], row[1], row[2]
+        name = display_name or f"@{username}"
+        prefix = medals.get(idx, f"`#{idx}`")
+        lines.append(f"{prefix} **{name}** — `{int(coins or 0):,} c`")
+    embed.description = "\n".join(lines)
+    embed.set_footer(text=f"Dummy Dream Bot • {value_label} • updated automatically")
+    return embed
+
+
+async def update_leaderboard_message():
+    if not is_feature_enabled("leaderboard"):
+        return
+    channel_id = str(get_setting("leaderboard_channel_id", "") or "").strip()
+    if not channel_id.isdigit():
+        return
+    channel = bot.get_channel(int(channel_id))
+    if not channel:
+        try:
+            channel = await bot.fetch_channel(int(channel_id))
+        except Exception:
+            return
+
+    conn = get_db_connection()
+    try:
+        all_time = conn.execute("""
+            SELECT tiktok_user, display_name, total_coins
+            FROM tiktok_gifts ORDER BY total_coins DESC LIMIT 10
+        """).fetchall()
+    finally:
+        conn.close()
+
+    embed = build_leaderboard_embed("🏆 All-Time Top Supporters", all_time)
+    daily = get_daily_top_supporters()
+    if daily:
+        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+        daily_lines = []
+        for idx, row in enumerate(daily[:5], start=1):
+            name = row[1] or f"@{row[0]}"
+            daily_lines.append(f"{medals.get(idx, f'`#{idx}`')} **{name}** — `{int(row[2] or 0):,} c`")
+        embed.add_field(name="📅 Today's Top Supporters", value="\n".join(daily_lines), inline=False)
+
+    old_message_id = str(get_setting("leaderboard_message_id", "") or "")
+    old_channel_id = str(get_setting("leaderboard_message_channel_id", "") or "")
+
+    if old_message_id and old_channel_id and old_channel_id != str(channel.id):
+        try:
+            old_channel = bot.get_channel(int(old_channel_id)) or await bot.fetch_channel(int(old_channel_id))
+            old_msg = await old_channel.fetch_message(int(old_message_id))
+            await old_msg.delete()
+        except Exception:
+            pass
+        old_message_id = ""
+
+    if old_message_id and old_channel_id == str(channel.id):
+        try:
+            msg = await channel.fetch_message(int(old_message_id))
+            await msg.edit(embed=embed)
+            return
+        except Exception:
+            pass
+
+    msg = await channel.send(embed=embed)
+    set_setting("leaderboard_message_id", str(msg.id))
+    set_setting("leaderboard_message_channel_id", str(channel.id))
+
+
+async def leaderboard_loop():
+    await asyncio.sleep(15)
+    while True:
+        try:
+            await update_leaderboard_message()
+        except Exception as e:
+            print(f"[Leaderboard] Update failed: {e}")
+        await asyncio.sleep(180)
+
+
+async def reset_tier_roles():
+    reset_tiers = get_role_tiers("reset")
+    role_ids = set()
+    for tier in reset_tiers:
+        try:
+            role_ids.add(int(tier["role_id"]))
+        except (TypeError, ValueError):
+            continue
+    if not role_ids:
+        mark_tier_reset_done()
+        return
+
+    removed = 0
+    for guild in bot.guilds:
+        for member in guild.members:
+            roles = [r for r in member.roles if r.id in role_ids]
+            if roles:
+                try:
+                    await member.remove_roles(*roles, reason="Scheduled role tier reset")
+                    removed += 1
+                except Exception as e:
+                    print(f"[Tier Reset] Failed for {member.display_name}: {e}")
+
+    mark_tier_reset_done()
+    log_activity_event("tier_reset", f"Scheduled tier reset completed; roles removed from {removed} member(s).")
+    print(f"[Tier Reset] Removed reset tier roles from {removed} member(s).")
+
+    tier_cfg = get_tier_settings()
+    channel_id = str(tier_cfg.get("announce_channel_id") or "").strip()
+    if tier_cfg["announce"] and channel_id.isdigit():
+        try:
+            channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
+            if channel:
+                await channel.send(embed=discord.Embed(
+                    title="🔄 Role Tier Reset",
+                    description=f"The scheduled tier reset has completed. Roles were removed from **{removed}** member(s).",
+                    color=discord.Color.orange()
+                ))
+        except Exception as e:
+            print(f"[Tier Reset] Could not announce reset: {e}")
+
+
+async def tier_reset_loop():
+    await asyncio.sleep(30)
+    while True:
+        try:
+            if tier_reset_due() and is_feature_enabled("role_tiers"):
+                await reset_tier_roles()
+        except Exception as e:
+            print(f"[Tier Reset] Loop error: {e}")
+        await asyncio.sleep(1800)
+
+
+def build_verification_panel_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="🛡️ TIKTOK ACCOUNT VERIFICATION",
+        description=(
+            "Welcome to the server!\n\n"
+            "To get your role and unlock access to every server channel, "
+            "you must first **verify your TikTok account**.\n\n"
+            "📌 **How to verify:**\n"
+            "1. Click the **[ 🔑 Verify TikTok Account ]** button below.\n"
+            "2. Enter your TikTok username in the form.\n"
+            "3. The conversation is **100% private (only you and the bot can see it)**.\n"
+            "4. Choose a verification method (**Live Greeting**, **Live Chat Code**, or **Bio**).\n"
+            "5. Once confirmed, your TikTok account is permanently linked and your server access role activates automatically!"
+        ),
+        color=discord.Color.from_rgb(0, 168, 255)
+    )
+    embed.set_footer(text="Dummy Dream Bot • Verification & Security System")
+    return embed
+
+
+async def send_verification_panel(channel):
+    msg = await channel.send(embed=build_verification_panel_embed(), view=VerificationChannelView())
+    set_setting("verification_panel_channel_id", str(channel.id))
+    set_setting("verification_panel_message_id", str(msg.id))
+
+
+async def move_verification_panel(old_channel_id, new_channel_id):
+    await bot.wait_until_ready()
+    # Delete the previous panel when the channel changes.
+    old_msg_id = str(get_setting("verification_panel_message_id", "") or "")
+    old_channel_id = str(old_channel_id or get_setting("verification_panel_channel_id", "") or "")
+    if old_msg_id.isdigit() and old_channel_id.isdigit():
+        try:
+            old_channel = bot.get_channel(int(old_channel_id)) or await bot.fetch_channel(int(old_channel_id))
+            old_msg = await old_channel.fetch_message(int(old_msg_id))
+            await old_msg.delete()
+        except Exception as e:
+            print(f"[Verification] Could not delete old panel message: {e}")
+    try:
+        channel = bot.get_channel(int(new_channel_id)) or await bot.fetch_channel(int(new_channel_id))
+        if channel:
+            await send_verification_panel(channel)
+            print(f"[Verification] Verification panel moved to channel {new_channel_id}.")
+    except Exception as e:
+        print(f"[Verification] Could not create panel in {new_channel_id}: {e}")
+
+
+def schedule_verification_panel_refresh(old_channel_id, new_channel_id):
+    try:
+        asyncio.run_coroutine_threadsafe(
+            move_verification_panel(old_channel_id, new_channel_id),
+            bot.loop
+        )
+    except Exception as e:
+        print(f"[Verification] Could not schedule panel move: {e}")
+
+
 
 MIN_COINS_FOR_STANDARD_VERIFICATION = 10
 
@@ -444,6 +734,12 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        if not is_feature_enabled("verification"):
+            await interaction.response.send_message(
+                "⛔ Verification is currently disabled. Please try again later.",
+                ephemeral=True
+            )
+            return
         u_clean = self.username_input.value.strip().lstrip('@').lower()
 
         # 1. Discord user already linked?
@@ -477,7 +773,7 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
 class VerificationMethodChoiceView(discord.ui.View):
     """Standard verification (10+ coins): bio code or live chat code."""
     def __init__(self, tiktok_user: str, code: str, total_coins: int):
-        super().__init__(timeout=900)
+        super().__init__(timeout=None)
         self.tiktok_user = tiktok_user
         self.code = code
         self.total_coins = total_coins
@@ -532,7 +828,7 @@ class VerificationMethodChoiceView(discord.ui.View):
 class LowActivityVerificationView(discord.ui.View):
     """Verification for accounts with fewer than 10 coins (or no transactions)."""
     def __init__(self, tiktok_user: str, total_coins: int):
-        super().__init__(timeout=900)
+        super().__init__(timeout=None)
         self.tiktok_user = tiktok_user
         self.total_coins = total_coins
 
@@ -590,31 +886,66 @@ def build_live_greeting_embed(tiktok_user: str, live_hosts: list) -> discord.Emb
     )
 
 class BioVerificationView(discord.ui.View):
-    def __init__(self, tiktok_user: str, code: str, total_coins: int, low_activity: bool = False):
-        super().__init__(timeout=900)
+    """Persistent bio verification: the button stays clickable and can be retried."""
+
+    def __init__(self, tiktok_user: str = None, code: str = None, total_coins: int = 0, low_activity: bool = False):
+        super().__init__(timeout=None)
         self.tiktok_user = tiktok_user
         self.code = code
         self.total_coins = total_coins
         self.low_activity = low_activity
 
-    @discord.ui.button(label="Verify Bio", style=discord.ButtonStyle.success, emoji="🔍")
-    async def check_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+    def _resolve_pending(self, discord_id: int):
+        pending = get_pending_verification(discord_id)
+        tiktok_user = (pending or {}).get("tiktok_user") or self.tiktok_user
+        if not tiktok_user:
+            return None, None
+        code = (pending or {}).get("code")
+        if not pending or pending.get("method") != "bio" or \
+                (pending.get("tiktok_user") or "").lower() != tiktok_user.lower():
+            code = create_pending_verification(discord_id, tiktok_user, method="bio")
+        self.tiktok_user = tiktok_user
+        self.code = code
+        return tiktok_user, code
 
-        is_valid, current_bio = await async_verify_tiktok_bio(self.tiktok_user, self.code)
+    @discord.ui.button(
+        label="Verify Bio",
+        style=discord.ButtonStyle.success,
+        emoji="🔍",
+        custom_id="bio_verify_persistent"
+    )
+    async def check_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_feature_enabled("verification"):
+            await interaction.response.send_message(
+                "⛔ Verification is currently disabled. Please try again later.",
+                ephemeral=True
+            )
+            return
+
+        tiktok_user, code = self._resolve_pending(interaction.user.id)
+        if not tiktok_user:
+            await interaction.response.send_message(
+                "⌛ Your verification session expired. Open the verification panel and start again.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        is_valid, current_bio = await async_verify_tiktok_bio(tiktok_user, code)
 
         if is_valid:
-            bind_user_mapping(interaction.user.id, self.tiktok_user)
+            bind_user_mapping(interaction.user.id, tiktok_user)
             cancel_pending_verification(interaction.user.id)
+            _, total_coins, _ = is_tiktok_user_in_db(tiktok_user)
             log_activity_event(
                 "verification",
-                f"[BIO] @{self.tiktok_user} verified via TikTok bio.",
-                self.tiktok_user
+                f"[BIO] @{tiktok_user} verified via TikTok bio.",
+                tiktok_user
             )
 
             if isinstance(interaction.user, discord.Member):
                 _, role_info = await grant_verified_access(
-                    interaction.user, self.tiktok_user, self.total_coins
+                    interaction.user, tiktok_user, total_coins
                 )
             else:
                 role_info = " Server access has been unlocked."
@@ -623,10 +954,10 @@ class BioVerificationView(discord.ui.View):
                 title="🎉 Verification Successful!",
                 description=(
                     f"Congratulations {interaction.user.mention}!\n\n"
-                    f"✅ TikTok account **@{self.tiktok_user}** has been linked to your Discord account.\n"
+                    f"✅ TikTok account **@{tiktok_user}** has been linked to your Discord account.\n"
                     f"🔒 The account is locked and cannot be claimed by anyone else.\n"
                     f"🌟{role_info}\n\n"
-                    f"*You can now remove `{self.code}` from your TikTok bio. Have fun!*"
+                    f"*You can now remove `{code}` from your TikTok bio. Have fun!*"
                 ),
                 color=discord.Color.green()
             )
@@ -635,38 +966,61 @@ class BioVerificationView(discord.ui.View):
             embed = discord.Embed(
                 title="⚠️ Verification Text Not Found in Bio",
                 description=(
-                    f"The text **`{self.code}`** was not found in the TikTok bio of **@{self.tiktok_user}**.\n\n"
+                    f"The text **`{code}`** was not found in the TikTok bio of **@{tiktok_user}**.\n\n"
                     f"📄 **Bio currently read:**\n"
                     f"> *\"{current_bio or '(empty bio)'}\"*\n\n"
                     f"💡 **Tips:**\n"
                     f"1. Make sure you pressed **Save** in your TikTok profile.\n"
                     f"2. Wait 5–10 seconds after saving so TikTok updates the data.\n"
-                    f"3. Make sure the full text `{self.code}` is in your bio."
+                    f"3. Make sure the full text `{code}` is in your bio.\n\n"
+                    f"🔁 *You can click **Verify Bio** again as many times as you need.*"
                 ),
                 color=discord.Color.orange()
             )
             await interaction.edit_original_response(embed=embed, view=self)
 
-    @discord.ui.button(label="Change Method", style=discord.ButtonStyle.secondary, emoji="🔙")
+    @discord.ui.button(
+        label="Change Method",
+        style=discord.ButtonStyle.secondary,
+        emoji="🔙",
+        custom_id="bio_change_method_persistent"
+    )
     async def change_method(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.low_activity:
+        pending = get_pending_verification(interaction.user.id)
+        tiktok_user = (pending or {}).get("tiktok_user") or self.tiktok_user
+        if not tiktok_user:
+            await interaction.response.send_message(
+                "⌛ Your verification session expired. Open the verification panel and start again.",
+                ephemeral=True
+            )
+            return
+        _, total_coins, _ = is_tiktok_user_in_db(tiktok_user)
+        self.tiktok_user = tiktok_user
+        self.total_coins = total_coins
+
+        if total_coins < MIN_COINS_FOR_STANDARD_VERIFICATION:
             embed = discord.Embed(
                 title="🔒 Choose Verification Method",
-                description=f"Choose a verification method for TikTok account **@{self.tiktok_user}**:",
+                description=f"Choose a verification method for TikTok account **@{tiktok_user}**:",
                 color=discord.Color.blue()
             )
-            view = LowActivityVerificationView(self.tiktok_user, self.total_coins)
+            view = LowActivityVerificationView(tiktok_user, total_coins)
         else:
-            code = create_pending_verification(interaction.user.id, self.tiktok_user, method='choice')
+            code = create_pending_verification(interaction.user.id, tiktok_user, method='choice')
             embed = discord.Embed(
                 title="🔒 Choose Verification Method",
-                description=f"Choose a verification method for TikTok account **@{self.tiktok_user}**:",
+                description=f"Choose a verification method for TikTok account **@{tiktok_user}**:",
                 color=discord.Color.blue()
             )
-            view = VerificationMethodChoiceView(self.tiktok_user, code, self.total_coins)
+            view = VerificationMethodChoiceView(tiktok_user, code, total_coins)
         await interaction.response.edit_message(embed=embed, view=view)
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
+    @discord.ui.button(
+        label="Cancel",
+        style=discord.ButtonStyle.secondary,
+        emoji="❌",
+        custom_id="bio_cancel_persistent"
+    )
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         cancel_pending_verification(interaction.user.id)
         await interaction.response.edit_message(content="❌ Verification cancelled.", embed=None, view=None)
@@ -674,7 +1028,7 @@ class BioVerificationView(discord.ui.View):
 class LiveVerificationView(discord.ui.View):
     """Standard live chat code verification (10+ coins)."""
     def __init__(self, tiktok_user: str, code: str, total_coins: int):
-        super().__init__(timeout=900)
+        super().__init__(timeout=None)
         self.tiktok_user = tiktok_user
         self.code = code
         self.total_coins = total_coins
@@ -740,7 +1094,7 @@ class LiveVerificationView(discord.ui.View):
 class LiveGreetingVerificationView(discord.ui.View):
     """Live greeting verification for accounts with fewer than 10 coins."""
     def __init__(self, tiktok_user: str, total_coins: int):
-        super().__init__(timeout=900)
+        super().__init__(timeout=None)
         self.tiktok_user = tiktok_user
         self.total_coins = total_coins
 
@@ -803,6 +1157,8 @@ async def handle_live_comment_verification(tiktok_user: str, comment_text: str, 
     Supports both the standard verification code and the English welcome-message
     flow used for accounts with fewer than 10 coins.
     """
+    if not is_feature_enabled("verification"):
+        return
     pending = find_pending_live_verification(tiktok_user, comment_text)
     greeting_used = False
 
@@ -852,11 +1208,16 @@ async def handle_live_comment_verification(tiktok_user: str, comment_text: str, 
     try:
         user_obj = await bot.fetch_user(discord_id)
         if user_obj:
+            trigger = (
+                f"Your welcome message in **@{target_host}**'s live chat was detected!"
+                if greeting_used
+                else f"Your verification code in **@{target_host}**'s live chat was detected!"
+            )
             embed = discord.Embed(
                 title="🎉 TikTok Verification Successful!",
                 description=(
                     f"Hello {user_obj.name}!\n\n"
-                    f"Your welcome message in **@{target_host}**'s live chat was detected!\n"
+                    f"{trigger}\n"
                     f"TikTok account **@{u_clean}** has been linked to your Discord account.\n"
                     f"✅ The verified role has been granted and server access is now open!"
                 ),
@@ -871,12 +1232,39 @@ async def handle_live_comment_verification(tiktok_user: str, comment_text: str, 
 @bot.event
 async def on_ready():
     print(f"[Discord] Bot logged in as {bot.user}")
-    # Register the persistent view so the verification button always works
+    runtime_status.set_bot_ready(str(bot.user))
+    # Register persistent views so verification buttons keep working after restarts
     bot.add_view(VerificationChannelView())
-    # After a restart, clean up announcement sessions that are no longer live
-    if not getattr(bot, "_announcement_reconcile_started", False):
-        bot._announcement_reconcile_started = True
+    bot.add_view(BioVerificationView())
+    if not getattr(bot, "_background_tasks_started", False):
+        bot._background_tasks_started = True
         asyncio.create_task(reconcile_announcement_sessions())
+        asyncio.create_task(leaderboard_loop())
+        asyncio.create_task(tier_reset_loop())
+
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CheckFailure):
+        key = str(error)
+        if "bot_disabled" in key:
+            message = "⛔ The bot is currently disabled by an administrator."
+        elif "channel_not_allowed" in key:
+            message = "⛔ This channel is not allowed to use bot commands."
+        else:
+            message = "🛡️ This command is restricted to administrators."
+        try:
+            await ctx.send(message, delete_after=10)
+        except Exception:
+            pass
+        return
+    if isinstance(error, commands.MissingRequiredArgument):
+        try:
+            await ctx.send(f"❌ Missing argument: `{error.param.name}`.", delete_after=10)
+        except Exception:
+            pass
+        return
+    print(f"[Command Error] {ctx.command}: {error}")
 
 @bot.event
 async def on_member_join(member: discord.Member):
@@ -887,83 +1275,34 @@ async def on_member_join(member: discord.Member):
         await grant_verified_access(member, tt_user, total_coins)
 
 @bot.command(name="setup_verification")
-@commands.has_permissions(administrator=True)
+@commands.check(is_admin)
 async def setup_verification(ctx):
     """Admin command: send the TikTok verification panel to this channel."""
-    embed = discord.Embed(
-        title="🛡️ TIKTOK ACCOUNT VERIFICATION",
-        description=(
-            "Welcome to the server!\n\n"
-            "To get your role and unlock access to every server channel, "
-            "you must first **claim & verify your TikTok account**.\n\n"
-            "📌 **How to verify:**\n"
-            "1. Click the **[ 🔑 Verify TikTok Account ]** button below.\n"
-            "2. Enter your TikTok username in the form.\n"
-            "3. The conversation is **100% private (only you and the bot can see it)**.\n"
-            "4. Choose a verification method (**Live Greeting**, **Live Chat Code**, or **Bio**).\n"
-            "5. Once confirmed, your TikTok account is permanently linked and your server access role activates automatically!"
-        ),
-        color=discord.Color.from_rgb(0, 168, 255)
-    )
-    embed.set_footer(text="Dummy Dream Bot • Verification & Security System")
-    view = VerificationChannelView()
-    await ctx.send(embed=embed, view=view)
+    old_channel_id = get_setting("verification_panel_channel_id", "") or get_setting("verification_channel_id", "") or ""
+    old_msg_id = get_setting("verification_panel_message_id", "") or ""
+    if old_msg_id.isdigit() and old_channel_id.isdigit() and str(ctx.channel.id) != old_channel_id:
+        try:
+            old_channel = bot.get_channel(int(old_channel_id)) or await bot.fetch_channel(int(old_channel_id))
+            old_msg = await old_channel.fetch_message(int(old_msg_id))
+            await old_msg.delete()
+        except Exception:
+            pass
     set_setting("verification_channel_id", str(ctx.channel.id))
+    await send_verification_panel(ctx.channel)
     try:
         await ctx.message.delete()
     except Exception:
         pass
 
 @bot.command(name="set_verified_role")
-@commands.has_permissions(administrator=True)
+@commands.check(is_admin)
 async def set_verified_role_cmd(ctx, role: discord.Role):
     """Admin command: set the role granted after successful verification."""
     set_setting("verified_role_id", str(role.id))
     await ctx.send(f"✅ Verified role set to: **{role.name}** (`{role.id}`)")
 
-@bot.command(name="claim", aliases=["verify"])
-async def claim(ctx, tiktok_user: str = None):
-    """Start the TikTok account claim / verification process."""
-    if not tiktok_user:
-        view = VerificationChannelView()
-        embed = discord.Embed(
-            title="🔑 Verify TikTok Account",
-            description="Click the button below to start verifying your TikTok account privately.",
-            color=discord.Color.blue()
-        )
-        await ctx.send(embed=embed, view=view)
-        return
-
-    u_clean = tiktok_user.strip().lstrip('@').lower()
-    existing_tiktok = get_user_mapping(ctx.author.id)
-    if existing_tiktok:
-        await ctx.send(f"ℹ️ Your Discord account is already verified with TikTok **@{existing_tiktok}**.")
-        return
-
-    is_claimed, claimed_discord_id = is_user_already_claimed(u_clean)
-    if is_claimed:
-        await ctx.send(f"❌ TikTok account **@{u_clean}** is already linked to another Discord account.")
-        return
-
-    exists, total_coins, display_name = is_tiktok_user_in_db(u_clean)
-    embed, view = build_verification_start(
-        ctx.author.id, u_clean, total_coins, display_name
-    )
-    try:
-        await ctx.author.send(embed=embed, view=view)
-        await ctx.send(
-            f"📬 {ctx.author.mention}, verification instructions have been sent to your Direct Messages!",
-            delete_after=10
-        )
-    except discord.Forbidden:
-        await ctx.send(
-            f"⚠️ {ctx.author.mention}, your DMs are closed. "
-            f"Please use the button in the verification channel for private interaction.",
-            delete_after=15
-        )
-
 @bot.command(name="unclaim")
-@commands.has_permissions(administrator=True)
+@commands.check(is_admin)
 async def unclaim(ctx, member: discord.Member):
     """Admin command: remove a member's linked TikTok account."""
     conn = get_db_connection()
@@ -989,7 +1328,7 @@ async def mycoins(ctx):
         if not mapping:
             await ctx.send(
                 f"❌ {ctx.author.mention}, you have not verified a TikTok account yet! "
-                f"Use `!claim` or the button in the verification channel."
+                f"Use the button in the verification channel."
             )
             return
 
@@ -1013,7 +1352,7 @@ async def myhistory(ctx):
         if not mapping:
             await ctx.send(
                 f"❌ {ctx.author.mention}, you have not linked an account yet! "
-                f"Use `!claim` or the button in the verification channel."
+                f"Use the button in the verification channel."
             )
             return
 
@@ -1043,24 +1382,15 @@ async def topsupporter(ctx):
     """Show the all-time top supporters leaderboard."""
     conn = get_db_connection()
     try:
-        res = conn.execute("SELECT tiktok_user, display_name, total_coins FROM tiktok_gifts ORDER BY total_coins DESC LIMIT 10")
-        rows = res.fetchall()
-        if not rows:
-            await ctx.send("❌ No gift data recorded yet.")
-            return
-
-        table = "```text\n"
-        table += f"{'NO':<4} | {'NAME / USERNAME':<24} | {'TOTAL COINS':<10}\n"
-        table += "-" * 46 + "\n"
-        for idx, (username, display_name, coins) in enumerate(rows, start=1):
-            name_str = display_name if display_name else f"@{username}"
-            if len(name_str) > 23:
-                name_str = name_str[:20] + "..."
-            table += f"{idx:<4} | {name_str:<24} | {coins:<10} c\n"
-        table += "```"
-        await ctx.send(f"🏆 **TIKTOK LIVE TOP SUPPORTERS LEADERBOARD**\n{table}")
+        rows = conn.execute(
+            "SELECT tiktok_user, display_name, total_coins FROM tiktok_gifts ORDER BY total_coins DESC LIMIT 10"
+        ).fetchall()
     finally:
         conn.close()
+    if not rows:
+        await ctx.send("❌ No gift data recorded yet.")
+        return
+    await ctx.send(embed=build_leaderboard_embed("🏆 All-Time Top Supporters", rows, "All-Time Coins"))
 
 @bot.command(name="dailyrank", aliases=["daily", "today"])
 async def dailyrank(ctx):
@@ -1069,17 +1399,7 @@ async def dailyrank(ctx):
     if not rows:
         await ctx.send("❌ No coin data recorded for today yet.")
         return
-
-    table = "```text\n"
-    table += f"{'NO':<4} | {'NAME / USERNAME':<24} | {'TODAY COINS':<10}\n"
-    table += "-" * 46 + "\n"
-    for idx, (username, display_name, coins) in enumerate(rows, start=1):
-        name_str = display_name if display_name else f"@{username}"
-        if len(name_str) > 23:
-            name_str = name_str[:20] + "..."
-        table += f"{idx:<4} | {name_str:<24} | {coins:<10} c\n"
-    table += "```"
-    await ctx.send(f"🏆 **TIKTOK LIVE DAILY RANKING (TODAY)**\n{table}")
+    await ctx.send(embed=build_leaderboard_embed("🏆 Today's Coin Ranking", rows, "Today's Coins"))
 
 @bot.command(name="livesessions", aliases=["sessions"])
 async def livesessions(ctx, host_username: str = None):
@@ -1129,8 +1449,7 @@ async def help_command(ctx):
     embed.add_field(
         name="🔑 Verification & Account",
         value=(
-            "`!claim` — start TikTok account verification (private buttons via DM)\n"
-            "`!claim <username>` — verify with your TikTok username directly\n"
+            "Use the **Verify TikTok Account** button in the verification channel.\n"
             "`!mycoins` — show your total coins (`!check`, `!coins`)\n"
             "`!myhistory` — your 5 most recent gift transactions"
         ),
@@ -1148,8 +1467,8 @@ async def help_command(ctx):
         inline=False
     )
 
-    is_admin = isinstance(ctx.author, discord.Member) and ctx.author.guild_permissions.administrator
-    if is_admin:
+    admin_viewer = is_admin_member(ctx.author)
+    if admin_viewer:
         embed.add_field(
             name="🛡️ Admin",
             value=(
@@ -1175,6 +1494,8 @@ async def help_command(ctx):
 
 async def main():
     init_db()
+    close_all_open_live_sessions()
+    set_verification_refresh_handler(schedule_verification_panel_refresh)
     keep_alive(handle_api_announcement)
 
     # Start observers with announcement, role, and live chat verification callbacks
@@ -1184,7 +1505,10 @@ async def main():
         comment_callback=handle_live_comment_verification
     ))
 
-    await bot.start(DISCORD_TOKEN)
+    try:
+        await bot.start(DISCORD_TOKEN)
+    finally:
+        runtime_status.set_bot_offline()
 
 if __name__ == "__main__":
     try:

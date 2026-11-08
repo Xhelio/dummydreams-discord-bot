@@ -111,6 +111,65 @@ button:hover { background: #0369a1; }
     color: #fbbf24;
     font-weight: 500;
 }
+
+/* Three live indicators */
+.status-cluster { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.status-indicator-pill.status-neutral { border-color: #475569; color: #cbd5e1; box-shadow: none; }
+.status-indicator-pill.status-neutral .status-pulse-dot { background-color: #64748b; animation: none; }
+.status-indicator-pill.status-warning { border-color: #f59e0b; color: #fbbf24; box-shadow: 0 0 12px rgba(245, 158, 11, 0.15); }
+.status-indicator-pill.status-warning .status-pulse-dot { background-color: #f59e0b; }
+.status-indicator-pill.status-offline { border-color: #ef4444; color: #f87171; box-shadow: 0 0 12px rgba(239, 68, 68, 0.12); }
+.status-indicator-pill.status-offline .status-pulse-dot { background-color: #ef4444; animation: none; }
+
+/* Settings page */
+.notice-success { background: rgba(16, 185, 129, 0.12); border: 1px solid #10b981; color: #6ee7b7; border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; font-weight: 600; }
+.muted { color: #94a3b8; font-size: 0.9rem; margin-bottom: 12px; }
+.switch-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 12px 0; border-bottom: 1px solid #334155; }
+.switch-row:last-child { border-bottom: none; }
+.switch-label { display: flex; align-items: center; gap: 10px; font-weight: 600; cursor: pointer; }
+.switch-label input[type="checkbox"], .inline-check input[type="checkbox"] { width: 18px; height: 18px; accent-color: #0284c7; }
+.switch-help { color: #94a3b8; font-size: 0.82rem; max-width: 480px; text-align: right; }
+.master-row { background: rgba(2, 132, 199, 0.08); border-radius: 8px; padding: 14px; margin-bottom: 8px; }
+.field-label { display: block; color: #cbd5e1; font-size: 0.8rem; font-weight: 700; margin: 10px 0 6px; text-transform: uppercase; letter-spacing: 0.03em; }
+.field-help { display: block; color: #64748b; font-size: 0.78rem; margin-top: 4px; }
+.form-grid.two-col { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.full-col { grid-column: 1 / -1; }
+.inline-check { display: flex; align-items: center; gap: 8px; font-size: 0.875rem; margin: 8px 0; color: #e2e8f0; }
+.inline-fields { display: flex; gap: 8px; }
+.inline-fields input { width: 100%; }
+.inline-form { display: inline-block; margin: 0; }
+.btn-save { width: 100%; padding: 14px; font-size: 1rem; background: #15803d; border-radius: 8px; margin-bottom: 24px; }
+.btn-save:hover { background: #166534; }
+.table-scroll { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.tier-form, .host-form, .alias-form { grid-template-columns: minmax(130px, 1fr) minmax(120px, 1fr) auto; align-items: end; }
+textarea { width: 100%; padding: 10px 12px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: white; font-size: 0.875rem; resize: vertical; font-family: inherit; }
+
+/* Responsive dashboard */
+@media (max-width: 760px) {
+    body { padding: 14px; }
+    h1 { font-size: 1.12rem; gap: 6px; }
+    h2 { font-size: 1rem; }
+    .header { margin-bottom: 16px; padding-bottom: 12px; }
+    .nav-bar-container { flex-direction: column; align-items: stretch; gap: 10px; margin-bottom: 16px; }
+    .nav-links { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; width: 100%; }
+    .nav-btn { justify-content: center; padding: 9px 8px; font-size: 0.78rem; text-align: center; }
+    .status-cluster { flex-direction: column; width: 100%; }
+    .status-indicator-pill { width: 100%; justify-content: center; }
+    .card { padding: 14px; border-radius: 8px; margin-bottom: 16px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .stat-grid { grid-template-columns: 1fr; gap: 10px; }
+    .form-grid, .form-grid.two-col, .tier-form, .host-form, .alias-form { grid-template-columns: 1fr; }
+    .switch-row { flex-direction: column; gap: 4px; }
+    .switch-help { text-align: left; max-width: none; }
+    .inline-fields { flex-direction: column; }
+    input, select, button, textarea { width: 100%; font-size: 0.9rem; }
+    .btn-action { padding: 6px 8px; }
+    th, td { padding: 8px 10px; font-size: 0.8rem; white-space: nowrap; }
+    table { min-width: 560px; }
+    .terminal-row { flex-direction: column; gap: 2px; }
+    .edit-form { flex-wrap: wrap; }
+    .edit-form input, .edit-form select { width: 100%; }
+    .log-tag-connect, .log-tag-disconnect, .log-tag-gift { align-self: flex-start; }
+}
 """
 
 NAV_HTML = """
@@ -121,75 +180,118 @@ NAV_HTML = """
         <a href="/admin/monitor" class="nav-btn">📹 Live Monitor</a>
         <a href="/admin/activity" class="nav-btn">📊 Activity Log</a>
         <a href="/admin/verifications" class="nav-btn">🔐 Account Verification</a>
+        <a href="/admin/settings" class="nav-btn">⚙️ Bot Settings</a>
     </div>
-    <div id="website-status-box" class="status-indicator-pill" title="Realtime System Indicator">
-        <span class="status-pulse-dot" id="status-pulse-dot"></span>
-        <span id="website-status-text">Website Stable</span>
-        <span id="website-ping-badge" class="ping-badge">&bull; Checking...</span>
+    <div class="status-cluster" title="Realtime System Indicators">
+        <div id="website-status-box" class="status-indicator-pill status-neutral">
+            <span class="status-pulse-dot" id="website-status-dot"></span>
+            <span id="website-status-text">Website</span>
+            <span id="website-ping-badge" class="ping-badge">&bull; Checking...</span>
+        </div>
+        <div id="tiktok-status-box" class="status-indicator-pill status-neutral">
+            <span class="status-pulse-dot" id="tiktok-status-dot"></span>
+            <span id="tiktok-status-text">TikTok Live</span>
+            <span id="tiktok-live-badge" class="ping-badge">&bull; Checking...</span>
+        </div>
+        <div id="discord-status-box" class="status-indicator-pill status-neutral">
+            <span class="status-pulse-dot" id="discord-status-dot"></span>
+            <span id="discord-status-text">Discord Bot</span>
+            <span id="discord-ping-badge" class="ping-badge">&bull; Checking...</span>
+        </div>
     </div>
 </div>
 """
 
 AUTO_REFRESH_JS = """
 <script>
-    // Realtime health & ping checker for the website status indicator
-    function updateWebsiteStatus() {
+    function setStatusPill(prefix, state, text, detail) {
+        const pill = document.getElementById(prefix + '-status-box');
+        const dot = document.getElementById(prefix + '-status-dot');
+        const label = document.getElementById(prefix + '-status-text');
+        const badge = document.getElementById(prefix + '-ping-badge');
+        if (!pill) return;
+        pill.classList.remove('status-neutral', 'status-warning', 'status-offline');
+        if (state === 'ok') {
+            pill.style.borderColor = '#10b981';
+            pill.style.color = '#34d399';
+            if (dot) dot.style.backgroundColor = '#10b981';
+        } else if (state === 'neutral') {
+            pill.classList.add('status-neutral');
+            pill.style.borderColor = '#475569';
+            pill.style.color = '#cbd5e1';
+            if (dot) dot.style.backgroundColor = '#64748b';
+        } else if (state === 'warning') {
+            pill.classList.add('status-warning');
+            pill.style.borderColor = '#f59e0b';
+            pill.style.color = '#fbbf24';
+            if (dot) dot.style.backgroundColor = '#f59e0b';
+        } else {
+            pill.classList.add('status-offline');
+            pill.style.borderColor = '#ef4444';
+            pill.style.color = '#f87171';
+            if (dot) dot.style.backgroundColor = '#ef4444';
+        }
+        if (label) label.innerText = text;
+        if (badge) badge.innerText = detail || '';
+    }
+
+    function updateSystemStatus() {
         const startTime = Date.now();
-        fetch('/api/health')
+        fetch('/api/health', { cache: 'no-store' })
             .then(res => res.json())
             .then(data => {
                 const latency = Date.now() - startTime;
-                const statusPill = document.getElementById('website-status-box');
-                const statusDot = document.getElementById('status-pulse-dot');
-                const statusText = document.getElementById('website-status-text');
-                const pingBadge = document.getElementById('website-ping-badge');
+                const websiteOk = data.website === true && data.database === 'connected';
+                setStatusPill(
+                    'website',
+                    websiteOk ? 'ok' : 'warning',
+                    websiteOk ? 'Website Stable' : 'Website Issue',
+                    '• ' + latency + 'ms'
+                );
 
-                if (statusText && data.status === 'ok') {
-                    statusText.innerText = 'Website Stable';
-                    pingBadge.innerText = '• ' + latency + 'ms';
-                    if (statusPill) {
-                        statusPill.style.borderColor = '#10b981';
-                        statusPill.style.color = '#34d399';
-                    }
-                    if (statusDot) {
-                        statusDot.style.backgroundColor = '#10b981';
-                    }
+                const bot = data.discord_bot || {};
+                setStatusPill(
+                    'discord',
+                    bot.online ? 'ok' : 'offline',
+                    bot.online ? 'Discord Online' : 'Discord Offline',
+                    bot.online ? ('• ' + (bot.user || 'ready')) : '• offline'
+                );
+
+                const tiktok = data.tiktok_live || {};
+                const count = tiktok.count || 0;
+                const names = Object.keys(tiktok.accounts || {});
+                setStatusPill(
+                    'tiktok',
+                    count > 0 ? 'ok' : 'neutral',
+                    count > 0 ? 'TikTok Live' : 'No Live Now',
+                    count > 0 ? ('• ' + count + ' live') : '• 0 live'
+                );
+                const tiktokPill = document.getElementById('tiktok-status-box');
+                if (tiktokPill) {
+                    tiktokPill.title = names.length ? ('Live: ' + names.join(', ')) : 'No target account is live';
                 }
             })
-            .catch(err => {
-                const statusPill = document.getElementById('website-status-box');
-                const statusDot = document.getElementById('status-pulse-dot');
-                const statusText = document.getElementById('website-status-text');
-                const pingBadge = document.getElementById('website-ping-badge');
-
-                if (statusText) {
-                    statusText.innerText = 'Website Issue';
-                    pingBadge.innerText = '• Offline';
-                    if (statusPill) {
-                        statusPill.style.borderColor = '#ef4444';
-                        statusPill.style.color = '#f87171';
-                    }
-                    if (statusDot) {
-                        statusDot.style.backgroundColor = '#ef4444';
-                    }
-                }
+            .catch(() => {
+                setStatusPill('website', 'offline', 'Website Offline', '• Offline');
+                setStatusPill('discord', 'offline', 'Discord Unknown', '• no data');
+                setStatusPill('tiktok', 'offline', 'TikTok Unknown', '• no data');
             });
     }
 
-    // Run the first check immediately and repeat every 4 seconds
-    updateWebsiteStatus();
-    setInterval(updateWebsiteStatus, 4000);
+    updateSystemStatus();
+    setInterval(updateSystemStatus, 4000);
 
-    // Realtime table synchronization
+    // Realtime table synchronization (safe: input forms are never replaced)
     setInterval(function() {
-        fetch(window.location.href)
+        if (window.location.pathname === '/admin/settings') return;
+        fetch(window.location.href, { cache: 'no-store' })
             .then(response => response.text())
             .then(html => {
                 const parser = new DOMParser();
                 const doc = parser.parseFromString(html, 'text/html');
                 const currentCards = document.querySelectorAll('.card');
                 const newCards = doc.querySelectorAll('.card');
-                
+
                 currentCards.forEach((card, index) => {
                     if (newCards[index] && !card.querySelector('form[action="/admin/reset-db"]') && !card.querySelector('form[action="/admin/clear-activity-logs"]')) {
                         const currentTable = card.querySelector('table');

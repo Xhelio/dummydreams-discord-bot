@@ -3,12 +3,14 @@ from threading import Thread
 import os
 from routes.admin import admin_bp
 from routes.api import api_bp, set_announcement_handler
+from routes.settings import settings_bp
 
 app = Flask(__name__)
 
 # Register Blueprints
 app.register_blueprint(admin_bp)
 app.register_blueprint(api_bp)
+app.register_blueprint(settings_bp)
 
 @app.route('/')
 def home():
