@@ -163,7 +163,7 @@ AUTO_REFRESH_JS = """
                 const pingBadge = document.getElementById('website-ping-badge');
 
                 if (statusText) {
-                    statusText.innerText = 'Website Gangguan';
+                    statusText.innerText = 'Website Issue';
                     pingBadge.innerText = '• Offline';
                     if (statusPill) {
                         statusPill.style.borderColor = '#ef4444';
@@ -180,7 +180,7 @@ AUTO_REFRESH_JS = """
     updateWebsiteStatus();
     setInterval(updateWebsiteStatus, 4000);
 
-    // Sinkronisasi Tabel Realtime
+    // Realtime table synchronization
     setInterval(function() {
         fetch(window.location.href)
             .then(response => response.text())
