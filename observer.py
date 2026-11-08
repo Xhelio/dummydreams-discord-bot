@@ -97,20 +97,20 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
     current_host = get_current_host_for_account(username_clean) or "Host"
 
     async def check_and_update_host_from_text(text: str):
-        """Membaca teks welcome message / chat / intro, mendeteksi nama host, dan meng-edit postingan Discord jika berubah."""
+        """Detect host only from messages that contain '#', then update host/announcement."""
         nonlocal current_host, current_session_id
-        if not text:
+        if not text or "#" not in text:
             return
         detected = detect_host_from_welcome_message(text)
         if detected and detected != current_host:
             current_host = detected
-            print(f"[{username_clean}] 🎯 Host detected from welcome message: {detected} (from text: {text!r})")
+            print(f"[{username_clean}] 🎯 Host detected from # message: {detected} (from text: {text!r})")
             runtime_status.set_live(username_clean, detected)
             if current_session_id:
                 update_live_session_host(current_session_id, detected)
             set_current_host_for_account(username_clean, detected)
             log_activity_event("host_detected", f"Host detected: {detected} on @{username_clean} ('{text}')", username_clean)
-            
+
             # Update/edit pesan pengumuman yang sudah ada di Discord
             await _trigger_announcement(announcement_callback, username_clean, True, host_name=detected)
 
