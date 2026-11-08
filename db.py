@@ -60,9 +60,11 @@ def get_channel_display_name(tiktok_username: str) -> str:
         conn.close()
     return u_clean
 
-def sync_valid_hosts():
+def sync_valid_hosts(conn=None):
     """Ensure the 6 official target accounts exist without deleting custom hosts."""
-    conn = get_db_connection()
+    own = conn is None
+    if own:
+        conn = get_db_connection()
     try:
         cur = conn.cursor()
         for host_id, uname, dname in VALID_TARGET_ACCOUNTS:
@@ -90,8 +92,13 @@ def sync_valid_hosts():
         conn.commit()
     except Exception as e:
         print(f"[Hosts Sync Error] {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
     finally:
-        conn.close()
+        if own:
+            conn.close()
 
 def get_recent_gift_activities(limit: int = 100, channel_filter: str = "") -> list:
     """Mengambil riwayat aktivitas gift: tanggal, nama akun, user, nama gift, jumlah koin, total koin saat ini."""
@@ -306,22 +313,28 @@ def close_all_open_live_sessions():
         conn.close()
 
 def init_db():
+    """Initialize schema and seed defaults.
+
+    Uses short commit checkpoints because Turso/LibSQL Hrana connections can
+    roll back an interactive transaction if the stream is idle for too long.
+    """
     conn = get_db_connection()
     try:
-        conn.execute("""
+        for statement in [
+            """
             CREATE TABLE IF NOT EXISTS tiktok_gifts (
                 tiktok_user TEXT PRIMARY KEY,
                 display_name TEXT,
                 total_coins INTEGER DEFAULT 0
             )
-        """)
-        conn.execute("""
+            """,
+            """
             CREATE TABLE IF NOT EXISTS user_mappings (
                 discord_id INTEGER PRIMARY KEY,
                 tiktok_user TEXT UNIQUE
             )
-        """)
-        conn.execute("""
+            """,
+            """
             CREATE TABLE IF NOT EXISTS active_live_announcements (
                 tiktok_username TEXT NOT NULL,
                 channel_id TEXT NOT NULL,
@@ -330,8 +343,8 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (tiktok_username, channel_id)
             )
-        """)
-        conn.execute("""
+            """,
+            """
             CREATE TABLE IF NOT EXISTS daily_tiktok_gifts (
                 tiktok_user TEXT,
                 display_name TEXT,
@@ -339,16 +352,16 @@ def init_db():
                 date TEXT,
                 PRIMARY KEY (tiktok_user, date)
             )
-        """)
-        conn.execute("""
+            """,
+            """
             CREATE TABLE IF NOT EXISTS hosts (
                 host_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 tiktok_username TEXT UNIQUE NOT NULL,
                 display_name TEXT,
                 is_active INTEGER DEFAULT 1
             )
-        """)
-        conn.execute("""
+            """,
+            """
             CREATE TABLE IF NOT EXISTS live_sessions (
                 session_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 tiktok_username TEXT NOT NULL,
@@ -358,10 +371,8 @@ def init_db():
                 total_coins INTEGER DEFAULT 0,
                 scheduled_host TEXT
             )
-        """)
-        
-        # Tabel log gift diperbarui sesuai kolom spesifik yang diminta
-        conn.execute("""
+            """,
+            """
             CREATE TABLE IF NOT EXISTS gift_logs (
                 log_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id INTEGER,
@@ -377,19 +388,11 @@ def init_db():
                 scheduled_host TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-        """)
-
-                # Hapus tabel shift lama karena beralih ke dynamic welcome message tracking
-        conn.execute("DROP TABLE IF EXISTS host_schedules")
-        conn.execute("DROP TABLE IF EXISTS temp_schedules")
-        conn.execute("DROP TABLE IF EXISTS host_offlines")
-
-        
-
-        
-
-        # Tabel Log Activity untuk event koneksi, diskoneksi, dan gift
-        conn.execute("""
+            """,
+            "DROP TABLE IF EXISTS host_schedules",
+            "DROP TABLE IF EXISTS temp_schedules",
+            "DROP TABLE IF EXISTS host_offlines",
+            """
             CREATE TABLE IF NOT EXISTS activity_logs (
                 log_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_type TEXT NOT NULL,
@@ -397,10 +400,8 @@ def init_db():
                 message TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
-        """)
-
-        # Tabel Verifikasi Akun TikTok Pending
-        conn.execute("""
+            """,
+            """
             CREATE TABLE IF NOT EXISTS pending_verifications (
                 discord_id INTEGER PRIMARY KEY,
                 tiktok_user TEXT NOT NULL,
@@ -409,26 +410,20 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 expires_at TIMESTAMP NOT NULL
             )
-        """)
-
-        # Tabel Pengaturan Bot & Role
-        conn.execute("""
+            """,
+            """
             CREATE TABLE IF NOT EXISTS bot_settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             )
-        """)
-
-        # Case-insensitive host aliases managed from the admin panel
-        conn.execute("""
+            """,
+            """
             CREATE TABLE IF NOT EXISTS host_aliases (
                 alias TEXT PRIMARY KEY COLLATE NOCASE,
                 host_name TEXT NOT NULL
             )
-        """)
-
-        # Role tiers (reset group + permanent "all of the time" group)
-        conn.execute("""
+            """,
+            """
             CREATE TABLE IF NOT EXISTS role_tiers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 group_key TEXT NOT NULL DEFAULT 'reset',
@@ -437,7 +432,10 @@ def init_db():
                 min_coins INTEGER NOT NULL DEFAULT 0,
                 sort_order INTEGER DEFAULT 0
             )
-        """)
+            """,
+        ]:
+            conn.execute(statement)
+        conn.commit()
 
         # Migrate the old one-message-per-account announcement table to
         # one-message-per-account-per-channel.
@@ -446,6 +444,7 @@ def init_db():
             pk_cols = [r[1] for r in info if len(r) > 5 and r[5]]
             if pk_cols != ["tiktok_username", "channel_id"]:
                 conn.execute("ALTER TABLE active_live_announcements RENAME TO active_live_announcements_legacy")
+                conn.commit()
                 conn.execute("""
                     CREATE TABLE active_live_announcements (
                         tiktok_username TEXT NOT NULL,
@@ -456,14 +455,21 @@ def init_db():
                         PRIMARY KEY (tiktok_username, channel_id)
                     )
                 """)
+                conn.commit()
                 conn.execute("""
                     INSERT OR IGNORE INTO active_live_announcements
                         (tiktok_username, channel_id, message_id, host_name, created_at)
                     SELECT tiktok_username, channel_id, message_id, host_name, created_at
                     FROM active_live_announcements_legacy
                 """)
+                conn.commit()
                 conn.execute("DROP TABLE active_live_announcements_legacy")
+                conn.commit()
         except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             print(f"[DB Migration] Announcement table migration skipped: {e}")
 
         # Migrasi kolom jika tabel lama sudah ada
@@ -472,18 +478,26 @@ def init_db():
             ("log_time", "TEXT"),
             ("log_datetime", "TEXT"),
             ("target_username", "TEXT"),
-            ("scheduled_host", "TEXT")
+            ("scheduled_host", "TEXT"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE gift_logs ADD COLUMN {col} {dtype}")
+                conn.commit()
             except Exception:
-                pass
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
 
         # Migrasi kolom host_name pada sesi pengumuman live (database lama)
         try:
             conn.execute("ALTER TABLE active_live_announcements ADD COLUMN host_name TEXT")
+            conn.commit()
         except Exception:
-            pass
+            try:
+                conn.rollback()
+            except Exception:
+                pass
 
         # Default settings (never overwrite values saved by the admin)
         wib = pytz.timezone('Asia/Jakarta')
@@ -515,6 +529,7 @@ def init_db():
                 "INSERT OR IGNORE INTO bot_settings (key, value) VALUES (?, ?)",
                 (key, str(value)),
             )
+        conn.commit()
 
         # Seed aliases once so existing welcome-message detection keeps working.
         alias_count = conn.execute("SELECT COUNT(*) FROM host_aliases").fetchone()[0]
@@ -524,6 +539,7 @@ def init_db():
                     "INSERT OR IGNORE INTO host_aliases (alias, host_name) VALUES (?, ?)",
                     (alias, host_name),
                 )
+            conn.commit()
 
         # Seed role tiers from the legacy JSON config only once.
         seeded = conn.execute("SELECT value FROM bot_settings WHERE key = 'tiers_seeded'").fetchone()
@@ -548,19 +564,10 @@ def init_db():
             conn.execute(
                 "INSERT OR IGNORE INTO bot_settings (key, value) VALUES ('tiers_seeded', '1')"
             )
+            conn.commit()
 
-        cur = conn.cursor()
-        
-        # Target Hosts Default:
-        # @clarissadreams (Jeremy Jean)
-        # @georgevilora (George Vilora)
-        # @stefannyalisha (Steffany Alisha)
-        # @julliannedreams (Julianne)
-        # @dummydreamsentertaiment (Dummy Dreams Entertaiment)
-        # @franklyndreams (Frank Lynn)
-        # Sinkronisasi 6 akun target resmi dengan ID 1-6
-        sync_valid_hosts()
-
+        # Sinkronisasi 6 akun target resmi dengan ID 1-6 (reusing this connection)
+        sync_valid_hosts(conn)
         conn.commit()
     finally:
         conn.close()
