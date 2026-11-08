@@ -963,16 +963,20 @@ class BioVerificationView(discord.ui.View):
             )
             await interaction.edit_original_response(embed=embed, view=None)
         else:
+            wib = pytz.timezone("Asia/Jakarta")
+            checked_at = datetime.now(wib).strftime("%H:%M:%S WIB")
+            shown_bio = current_bio if current_bio not in (None, "") else "(empty bio)"
             embed = discord.Embed(
                 title="⚠️ Verification Text Not Found in Bio",
                 description=(
                     f"The text **`{code}`** was not found in the TikTok bio of **@{tiktok_user}**.\n\n"
-                    f"📄 **Bio currently read:**\n"
-                    f"> *\"{current_bio or '(empty bio)'}\"*\n\n"
+                    f"📄 **Bio currently read (last checked {checked_at}):**\n"
+                    f"> *\"{shown_bio}\"*\n\n"
                     f"💡 **Tips:**\n"
                     f"1. Make sure you pressed **Save** in your TikTok profile.\n"
-                    f"2. Wait 5–10 seconds after saving so TikTok updates the data.\n"
-                    f"3. Make sure the full text `{code}` is in your bio.\n\n"
+                    f"2. Wait 5–15 seconds after saving so TikTok updates the data.\n"
+                    f"3. Make sure the full text `{code}` is in your bio.\n"
+                    f"4. If your bio is private or unavailable, try another method.\n\n"
                     f"🔁 *You can click **Verify Bio** again as many times as you need.*"
                 ),
                 color=discord.Color.orange()
