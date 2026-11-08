@@ -138,30 +138,34 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         @client.on(ConnectEvent)
         async def on_connect(event: ConnectEvent):
             nonlocal current_session_id, is_connected, disconnect_timer_task, current_host
-            
-            # Jika sebelumnya ada pending disconnect timer, batalkan karena sudah terhubung kembali
-            if disconnect_timer_task and not disconnect_timer_task.done():
-                disconnect_timer_task.cancel()
-                disconnect_timer_task = None
-                print(f"[{username_clean}] Reconnected within grace period. Live status maintained.")
+            try:
+                # Jika sebelumnya ada pending disconnect timer, batalkan karena sudah terhubung kembali
+                if disconnect_timer_task and not disconnect_timer_task.done():
+                    disconnect_timer_task.cancel()
+                    disconnect_timer_task = None
+                    print(f"[{username_clean}] Reconnected within grace period. Live status maintained.")
 
-            is_connected = True
-            runtime_status.set_live(username_clean, current_host)
-            print(f"[{username_clean}] Connected to live stream.")
-            
-            # Cek apakah judul / room_info memuat nama host dari welcome message
-            if hasattr(client, 'room_info') and client.room_info:
-                title = getattr(client.room_info, 'title', '')
-                if title:
-                    await check_and_update_host_from_text(title)
+                is_connected = True
+                runtime_status.set_live(username_clean, current_host)
+                print(f"[{username_clean}] Connected to live stream.")
 
-            current_session_id = start_live_session(username_clean, initial_host=current_host)
-            
-            connect_msg = f"Connected to @{username_clean}'s live (Host: {current_host})"
-            log_activity_event("connect", connect_msg, username_clean)
-            
-            # Kirim pengumuman (hanya 1 kali per sesi live)
-            await _trigger_announcement(announcement_callback, username_clean, True, host_name=current_host)
+                # Cek apakah judul / room_info memuat nama host dari welcome message
+                if hasattr(client, 'room_info') and client.room_info:
+                    title = getattr(client.room_info, 'title', '')
+                    if title:
+                        await check_and_update_host_from_text(title)
+
+                current_session_id = start_live_session(username_clean, initial_host=current_host)
+
+                connect_msg = f"Connected to @{username_clean}'s live (Host: {current_host})"
+                log_activity_event("connect", connect_msg, username_clean)
+
+                # Kirim pengumuman (hanya 1 kali per sesi live)
+                await _trigger_announcement(announcement_callback, username_clean, True, host_name=current_host)
+            except Exception as e:
+                # Keep runtime live status even if DB/announcement side effects fail.
+                runtime_status.set_live(username_clean, current_host)
+                print(f"[{username_clean}] Connect handler error (live status preserved): {e}")
 
         @client.on(DisconnectEvent)
         async def on_disconnect(event: DisconnectEvent):
@@ -302,9 +306,24 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         try:
             # Jalankan client koneksi TikTok Live
             await client.start()
+        except asyncio.CancelledError:
+            # Observer stopped by supervisor (host paused/removed/restarted).
+            if disconnect_timer_task and not disconnect_timer_task.done():
+                disconnect_timer_task.cancel()
+            if is_connected and current_session_id:
+                try:
+                    end_live_session(current_session_id)
+                except Exception:
+                    pass
+            runtime_status.clear_live(username_clean)
+            raise
         except Exception as e:
             # Log santai jika stream offline
-            print(f"[{username_clean}] Stream offline or reconnecting ({e}). Next check in 30s...")
+            err = str(e)
+            if "LIVE" in err.upper() or "offline" in err.lower() or "not found" in err.lower():
+                print(f"[{username_clean}] Not live/offline check: {e}")
+            else:
+                print(f"[{username_clean}] Observer error while checking live: {e}")
         finally:
             if is_connected:
                 is_connected = False
@@ -338,6 +357,7 @@ async def run_all_observers(announcement_callback, role_callback, comment_callba
                 if task and not task.done():
                     task.cancel()
                 tasks.pop(username, None)
+                runtime_status.clear_live(username)
                 print(f"[Observer System] Stopped observer for @{username} (no longer active).")
 
         # Start observers for newly added or previously failed hosts.
