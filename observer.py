@@ -145,20 +145,24 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
     disconnect_timer_task = None
     current_host = get_current_host_for_account(username_clean) or "Host"
 
-    async def check_and_update_host_from_text(text: str):
-        """Detect host only from messages that contain '#', then update host/announcement."""
+    async def check_and_update_host_from_text(text: str, sender_username: str = None):
+        """Detect host only from messages sent by the target account itself (with or without '#')."""
         nonlocal current_host, current_session_id
-        if not text or "#" not in text:
+        if not text:
+            return
+        sender = (sender_username or "").lower().lstrip("@")
+        # Only accept messages from the target account itself.
+        if not sender or sender != username_clean:
             return
         detected = detect_host_from_welcome_message(text)
         if detected and detected != current_host:
             current_host = detected
-            print(f"[{username_clean}] 🎯 Host detected from # message: {detected} (from text: {text!r})")
+            print(f"[{username_clean}] 🎯 Host detected from target account message: {detected} (sender={sender!r}, text={text!r})")
             runtime_status.set_live(username_clean, detected)
             if current_session_id:
                 update_live_session_host(current_session_id, detected)
             set_current_host_for_account(username_clean, detected)
-            log_activity_event("host_detected", f"Host detected: {detected} on @{username_clean} ('{text}')", username_clean)
+            log_activity_event("host_detected", f"Host detected: {detected} on @{username_clean} (sender @{sender}, '{text}')", username_clean)
 
             # Update/edit pesan pengumuman yang sudah ada di Discord
             await _trigger_announcement(announcement_callback, username_clean, True, host_name=detected)
@@ -212,11 +216,11 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 )
                 print(f"[{username_clean}] Connected to live stream.")
 
-                # Cek apakah judul / room_info memuat nama host dari welcome message
+                # Room title is owned by the target account; allow host detection from it.
                 if hasattr(client, 'room_info') and client.room_info:
                     title = getattr(client.room_info, 'title', '')
                     if title:
-                        await check_and_update_host_from_text(title)
+                        await check_and_update_host_from_text(title, sender_username=username_clean)
 
                 if not current_session_id:
                     current_session_id = start_live_session(username_clean, initial_host=current_host)
@@ -261,17 +265,18 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     else:
                         comment_callback(user, comment_text, username_clean)
 
-                # 2. Cek apakah komentar memuat welcome message atau nama host (misal: "ZIZE's here", "welcome Mommy", dsb.)
-                await check_and_update_host_from_text(comment_text)
+                # 2. Host detection: only from messages sent by the target account itself (with or without '#').
+                await check_and_update_host_from_text(comment_text, sender_username=user)
             except Exception as e:
                 print(f"[{username_clean}] Error in on_comment handler: {e}")
 
+        # Host detection rule: only messages sent by the target account itself are accepted.
+        # System events (greeting/intro/notice/pin) are not treated as target-account chat messages.
         if GreetingEvent:
             @client.on(GreetingEvent)
             async def on_greeting(event):
                 try:
-                    greeting_text = getattr(event, 'greeting_text', '') or getattr(event, 'guide_text', '')
-                    await check_and_update_host_from_text(greeting_text)
+                    _ = getattr(event, 'greeting_text', '') or getattr(event, 'guide_text', '')
                 except Exception as e:
                     print(f"[{username_clean}] Error in on_greeting handler: {e}")
 
@@ -279,8 +284,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             @client.on(LiveIntroEvent)
             async def on_live_intro(event):
                 try:
-                    content = getattr(event, 'content', '')
-                    await check_and_update_host_from_text(content)
+                    _ = getattr(event, 'content', '')
                 except Exception as e:
                     print(f"[{username_clean}] Error in on_live_intro handler: {e}")
 
@@ -288,8 +292,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             @client.on(NoticeEvent)
             async def on_notice(event):
                 try:
-                    notice_text = getattr(event, 'content', '') or getattr(event, 'notice_content', '')
-                    await check_and_update_host_from_text(notice_text)
+                    _ = getattr(event, 'content', '') or getattr(event, 'notice_content', '')
                 except Exception as e:
                     print(f"[{username_clean}] Error in on_notice handler: {e}")
 
@@ -300,7 +303,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     chat_msg = getattr(event, 'chat_message', '')
                     if hasattr(chat_msg, 'content'):
                         chat_msg = chat_msg.content
-                    await check_and_update_host_from_text(str(chat_msg or ''))
+                    _ = str(chat_msg or '')
                 except Exception as e:
                     print(f"[{username_clean}] Error in on_room_pin handler: {e}")
 
