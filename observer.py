@@ -180,11 +180,14 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             if session_to_close:
                 end_live_session(session_to_close)
             # Saat offline, bot Discord akan MENGHAPUS pesan pengumuman lewat sesi tersimpan.
-            # JANGAN hapus sesi lebih dulu, karena message_id dibutuhkan untuk menghapus pesan.
-            await _trigger_announcement(announcement_callback, username_clean, False)
-            # Fallback: pastikan sesi tidak tertinggal jika callback tidak tersedia.
-            clear_active_live_status(username_clean)
-            print(f"[{username_clean}] Live confirmed offline after grace period. Announcement message deleted.")
+            # JANGAN hapus sesi DB lebih dulu, karena message_id dibutuhkan untuk menghapus pesan Discord.
+            if announcement_callback:
+                await _trigger_announcement(announcement_callback, username_clean, False)
+            else:
+                # Fallback only when no callback exists; this cannot delete Discord messages.
+                clear_active_live_status(username_clean)
+                print(f"[{username_clean}] No announcement callback; cleared announcement DB status only.")
+            print(f"[{username_clean}] Live confirmed offline after grace period.")
         except asyncio.CancelledError:
             # Reconnected within grace period
             pass

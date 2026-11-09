@@ -294,99 +294,110 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
     - Channels removed from the admin panel are cleaned up automatically.
     """
     user_key = username.lower().lstrip("@")
-    async with NOTIFICATION_LOCK:
-        if not bot.is_ready():
-            await bot.wait_until_ready()
+    try:
+        async with NOTIFICATION_LOCK:
+            if not bot.is_ready():
+                await bot.wait_until_ready()
 
-        sessions = get_active_live_announcements_for_account(user_key)
+            sessions = get_active_live_announcements_for_account(user_key)
 
-        # --- OFFLINE: remove all stored announcement messages ---
-        if not is_live:
-            for session in sessions:
-                channel = await _resolve_announcement_channel(session)
-                old_msg = await _fetch_announcement_message(
-                    channel, session.get("message_id")
-                )
-                if old_msg:
+            # --- OFFLINE: remove all stored announcement messages ---
+            if not is_live:
+                for session in sessions:
                     try:
-                        await old_msg.delete()
-                        print(f"[Discord] Deleted live announcement for @{user_key} in channel {session.get('channel_id')}.")
+                        channel = await _resolve_announcement_channel(session)
+                        old_msg = await _fetch_announcement_message(
+                            channel, session.get("message_id")
+                        )
+                        if old_msg:
+                            try:
+                                await old_msg.delete()
+                                print(f"[Discord] Deleted live announcement for @{user_key} in channel {session.get('channel_id')}.")
+                            except Exception as e:
+                                print(f"[Discord] Failed to delete announcement message for @{user_key} in {session.get('channel_id')}: {e}")
+                        else:
+                            print(f"[Discord] Announcement message missing/unfetchable for @{user_key} in {session.get('channel_id')}; clearing session.")
                     except Exception as e:
-                        print(f"[Discord] Failed to delete message for @{user_key}: {e}")
-                delete_active_live_announcement(user_key, session.get("channel_id"))
-            if sessions:
-                print(f"[Discord] Announcement sessions cleared for @{user_key}.")
-            return
-
-        if not is_feature_enabled("announcements"):
-            return
-
-        configured_channels = get_announcement_channel_ids()
-        if not configured_channels:
-            print("[Discord] Notification failed: no announcement channel configured.")
-            return
-
-        sched_host, account_name = get_schedule_info(user_key)
-        final_host_name = host_name or sched_host or account_name or "Host"
-        live_url = f"https://www.tiktok.com/@{user_key}/live"
-        live_content = (
-            f"🔴 **{final_host_name} just live!**\n"
-            f"Currently streaming on **{account_name}** (@{user_key})\n\n"
-            f"Watch here:\n{live_url}"
-        )
-
-        # Remove sessions for channels that are no longer configured.
-        for session in sessions:
-            try:
-                stored_channel = int(session.get("channel_id"))
-            except (TypeError, ValueError):
-                stored_channel = None
-            if stored_channel not in configured_channels:
-                channel = await _resolve_announcement_channel(session)
-                old_msg = await _fetch_announcement_message(channel, session.get("message_id"))
-                if old_msg:
-                    try:
-                        await old_msg.delete()
-                    except Exception:
-                        pass
-                delete_active_live_announcement(user_key, session.get("channel_id"))
-
-        for channel_id in configured_channels:
-            session = get_active_live_announcement(user_key, channel_id)
-            channel = await _resolve_announcement_channel({"channel_id": channel_id})
-            if not channel:
-                continue
-
-            if session:
-                old_msg = await _fetch_announcement_message(channel, session.get("message_id"))
-                if old_msg:
-                    if old_msg.content != live_content:
-                        try:
-                            await old_msg.edit(content=live_content)
-                            print(f"[Discord] Updated live announcement for @{user_key} in {channel_id}.")
-                        except Exception as e:
-                            print(f"[Discord] Failed to edit announcement for @{user_key}: {e}")
-                    # Session exists and message is valid: never send a duplicate.
-                    continue
-                print(f"[Discord] Stored announcement message missing for @{user_key} in {channel_id}; sending a replacement.")
-
-            try:
-                new_msg = await channel.send(live_content)
-            except Exception as e:
-                print(f"[Discord] Failed to send announcement for @{user_key} in {channel_id}: {e}")
-                continue
-
-            try:
-                saved = save_active_live_announcement(user_key, channel.id, new_msg.id, final_host_name)
-                if not saved:
-                    print(f"[Discord] Announcement sent but session was not saved for @{user_key} in {channel.id} (Msg ID: {new_msg.id}).")
+                        print(f"[Discord] Error while cleaning announcement for @{user_key} in {session.get('channel_id')}: {e}")
+                    finally:
+                        delete_active_live_announcement(user_key, session.get("channel_id"))
+                if sessions:
+                    print(f"[Discord] Announcement sessions cleared for @{user_key}.")
                 else:
-                    print(f"[Discord] Sent live announcement for @{user_key} in {channel.id} (Msg ID: {new_msg.id}).")
-            except Exception as e:
-                # If we sent a message but failed to save its ID, duplicates can happen on next trigger.
-                print(f"[Discord] CRITICAL: sent announcement but failed to save session for @{user_key} in {channel.id} (Msg ID: {new_msg.id}): {e}")
+                    print(f"[Discord] No stored announcement sessions to clear for @{user_key}.")
+                return
 
-        update_active_live_announcement_host(user_key, final_host_name)
+            if not is_feature_enabled("announcements"):
+                return
+
+            configured_channels = get_announcement_channel_ids()
+            if not configured_channels:
+                print("[Discord] Notification failed: no announcement channel configured.")
+                return
+
+            sched_host, account_name = get_schedule_info(user_key)
+            final_host_name = host_name or sched_host or account_name or "Host"
+            live_url = f"https://www.tiktok.com/@{user_key}/live"
+            live_content = (
+                f"🔴 **{final_host_name} just live!**\n"
+                f"Currently streaming on **{account_name}** (@{user_key})\n\n"
+                f"Watch here:\n{live_url}"
+            )
+
+            # Remove sessions for channels that are no longer configured.
+            for session in sessions:
+                try:
+                    stored_channel = int(session.get("channel_id"))
+                except (TypeError, ValueError):
+                    stored_channel = None
+                if stored_channel not in configured_channels:
+                    channel = await _resolve_announcement_channel(session)
+                    old_msg = await _fetch_announcement_message(channel, session.get("message_id"))
+                    if old_msg:
+                        try:
+                            await old_msg.delete()
+                        except Exception:
+                            pass
+                    delete_active_live_announcement(user_key, session.get("channel_id"))
+
+            for channel_id in configured_channels:
+                session = get_active_live_announcement(user_key, channel_id)
+                channel = await _resolve_announcement_channel({"channel_id": channel_id})
+                if not channel:
+                    continue
+
+                if session:
+                    old_msg = await _fetch_announcement_message(channel, session.get("message_id"))
+                    if old_msg:
+                        if old_msg.content != live_content:
+                            try:
+                                await old_msg.edit(content=live_content)
+                                print(f"[Discord] Updated live announcement for @{user_key} in {channel_id}.")
+                            except Exception as e:
+                                print(f"[Discord] Failed to edit announcement for @{user_key}: {e}")
+                        # Session exists and message is valid: never send a duplicate.
+                        continue
+                    print(f"[Discord] Stored announcement message missing for @{user_key} in {channel_id}; sending a replacement.")
+
+                try:
+                    new_msg = await channel.send(live_content)
+                except Exception as e:
+                    print(f"[Discord] Failed to send announcement for @{user_key} in {channel_id}: {e}")
+                    continue
+
+                try:
+                    saved = save_active_live_announcement(user_key, channel.id, new_msg.id, final_host_name)
+                    if not saved:
+                        print(f"[Discord] Announcement sent but session was not saved for @{user_key} in {channel.id} (Msg ID: {new_msg.id}).")
+                    else:
+                        print(f"[Discord] Sent live announcement for @{user_key} in {channel.id} (Msg ID: {new_msg.id}).")
+                except Exception as e:
+                    # If we sent a message but failed to save its ID, duplicates can happen on next trigger.
+                    print(f"[Discord] CRITICAL: sent announcement but failed to save session for @{user_key} in {channel.id} (Msg ID: {new_msg.id}): {e}")
+
+            update_active_live_announcement_host(user_key, final_host_name)
+    except Exception as e:
+        print(f"[Discord] process_live_announcement error for @{user_key} (is_live={is_live}): {e}")
 
 async def reconcile_announcement_sessions(delay_seconds: int = 180):
     """Clean stale announcement sessions after restart without deleting active lives.
