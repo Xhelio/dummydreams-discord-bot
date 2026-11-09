@@ -1296,7 +1296,25 @@ async def on_ready():
     bot.add_view(BioVerificationView())
 
     debug_mode = str(os.environ.get("DEBUG_MODE", "")).strip().lower() in ("1", "true", "yes", "on")
-    presence_name = "DEBUG MODE | !help" if debug_mode else "!help | TikTok live monitor"
+    push_code = (
+        os.environ.get("PUSH_CODE")
+        or os.environ.get("BOT_VERSION")
+        or os.environ.get("RENDER_GIT_COMMIT", "")[:7]
+    )
+    if not push_code:
+        try:
+            import subprocess
+            push_code = subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=os.path.dirname(__file__) or ".",
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=2,
+            ).strip()
+        except Exception:
+            push_code = "unknown"
+    presence_name = f"DEBUG {push_code} | !help" if debug_mode else "!help | TikTok live monitor"
+    print(f"[Discord] Push/version code: {push_code} (debug={debug_mode})")
     try:
         await bot.change_presence(
             activity=discord.Activity(type=discord.ActivityType.watching, name=presence_name)
