@@ -44,7 +44,7 @@ from utils import get_schedule_info, load_summary_config
 from server import keep_alive
 from observer import run_all_observers, get_current_live_hosts, is_any_host_live, probe_room_live
 from verification import async_verify_tiktok_bio
-from routes.settings import set_verification_refresh_handler
+from routes.settings import set_verification_refresh_handler, set_presence_refresh_handler
 import runtime_status
 
 DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN')
@@ -55,7 +55,7 @@ NOTIFICATION_LOCK = asyncio.Lock()
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+bot = commands.Bot(command_prefix="/", intents=intents, help_command=None)
 
 
 def is_admin_member(member) -> bool:
@@ -618,6 +618,50 @@ def schedule_verification_panel_refresh(old_channel_id, new_channel_id):
         )
     except Exception as e:
         print(f"[Verification] Could not schedule panel move: {e}")
+
+
+def get_push_code() -> str:
+    push_code = (
+        os.environ.get("PUSH_CODE")
+        or os.environ.get("BOT_VERSION")
+        or os.environ.get("RENDER_GIT_COMMIT", "")[:7]
+    )
+    if not push_code:
+        try:
+            import subprocess
+            push_code = subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=os.path.dirname(__file__) or ".",
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=2,
+            ).strip()
+        except Exception:
+            push_code = "unknown"
+    return push_code or "unknown"
+
+
+async def apply_bot_presence():
+    if not bot.is_ready():
+        return
+    env_debug = str(os.environ.get("DEBUG_MODE", "")).strip().lower() in ("1", "true", "yes", "on")
+    debug_mode = get_bool_setting("debug_mode", False) or env_debug
+    push_code = get_push_code()
+    presence_name = f"DEBUG {push_code} | /help" if debug_mode else "/help | TikTok live monitor"
+    print(f"[Discord] Presence updated: {presence_name} (debug={debug_mode})")
+    try:
+        await bot.change_presence(
+            activity=discord.Activity(type=discord.ActivityType.watching, name=presence_name)
+        )
+    except Exception as e:
+        print(f"[Discord] Failed to set presence: {e}")
+
+
+def schedule_presence_refresh():
+    try:
+        asyncio.run_coroutine_threadsafe(apply_bot_presence(), bot.loop)
+    except Exception as e:
+        print(f"[Discord] Could not schedule presence refresh: {e}")
 
 
 
@@ -1295,32 +1339,7 @@ async def on_ready():
     bot.add_view(VerificationChannelView())
     bot.add_view(BioVerificationView())
 
-    debug_mode = str(os.environ.get("DEBUG_MODE", "")).strip().lower() in ("1", "true", "yes", "on")
-    push_code = (
-        os.environ.get("PUSH_CODE")
-        or os.environ.get("BOT_VERSION")
-        or os.environ.get("RENDER_GIT_COMMIT", "")[:7]
-    )
-    if not push_code:
-        try:
-            import subprocess
-            push_code = subprocess.check_output(
-                ["git", "rev-parse", "--short", "HEAD"],
-                cwd=os.path.dirname(__file__) or ".",
-                stderr=subprocess.DEVNULL,
-                text=True,
-                timeout=2,
-            ).strip()
-        except Exception:
-            push_code = "unknown"
-    presence_name = f"DEBUG {push_code} | !help" if debug_mode else "!help | TikTok live monitor"
-    print(f"[Discord] Push/version code: {push_code} (debug={debug_mode})")
-    try:
-        await bot.change_presence(
-            activity=discord.Activity(type=discord.ActivityType.watching, name=presence_name)
-        )
-    except Exception as e:
-        print(f"[Discord] Failed to set presence: {e}")
+    await apply_bot_presence()
 
     if not getattr(bot, "_background_tasks_started", False):
         bot._background_tasks_started = True
@@ -1488,8 +1507,9 @@ async def dailyrank(ctx):
     await ctx.send(embed=build_leaderboard_embed("🏆 Today's Coin Ranking", rows, "Today's Coins"))
 
 @bot.command(name="livesessions", aliases=["sessions"])
+@commands.check(is_admin)
 async def livesessions(ctx, host_username: str = None):
-    """Show the most recent live sessions."""
+    """Admin command: show the most recent live sessions, optionally filtered by host account."""
     conn = get_db_connection()
     try:
         if host_username:
@@ -1528,7 +1548,7 @@ async def help_command(ctx):
         title="📖 Dummy Dream Bot Help",
         description=(
             f"Hello {ctx.author.mention}! Here are the available commands.\n"
-            f"Prefix: `!` • Example: `!mycoins`"
+            f"Prefix: `/` • Example: `/mycoins`"
         ),
         color=discord.Color.from_rgb(0, 168, 255)
     )
@@ -1536,19 +1556,17 @@ async def help_command(ctx):
         name="🔑 Verification & Account",
         value=(
             "Use the **Verify TikTok Account** button in the verification channel.\n"
-            "`!mycoins` — show your total coins (`!check`, `!coins`)\n"
-            "`!myhistory` — your 5 most recent gift transactions"
+            "`/mycoins` — show your total coins (`/check`, `/coins`)\n"
+            "`/myhistory` — your 5 most recent gift transactions"
         ),
         inline=False
     )
     embed.add_field(
         name="🏆 Stats & Live",
         value=(
-            "`!topsupporter` — supporter leaderboard (`!leaderboard`, `!topdonator`)\n"
-            "`!dailyrank` — today's coin ranking (`!daily`, `!today`)\n"
-            "`!livesessions` — most recent live sessions (`!sessions`)\n"
-            "`!livesessions <username>` — live sessions for a specific account\n"
-            "`!help` — show this help message"
+            "`/topsupporter` — supporter leaderboard (`/leaderboard`, `/topdonator`)\n"
+            "`/dailyrank` — today's coin ranking (`/daily`, `/today`)\n"
+            "`/help` — show this help message"
         ),
         inline=False
     )
@@ -1558,9 +1576,11 @@ async def help_command(ctx):
         embed.add_field(
             name="🛡️ Admin",
             value=(
-                "`!setup_verification` — send the verification panel to this channel\n"
-                "`!set_verified_role @role` — set the role granted after verification\n"
-                "`!unclaim @member` — remove a member's linked TikTok account"
+                "`/setup_verification` — send the verification panel to this channel\n"
+                "`/set_verified_role @role` — set the role granted after verification\n"
+                "`/unclaim @member` — remove a member's linked TikTok account\n"
+                "`/livesessions` — recent live sessions (`/sessions`)\n"
+                "`/livesessions <username>` — live sessions for a specific account"
             ),
             inline=False
         )
@@ -1575,13 +1595,14 @@ async def help_command(ctx):
             inline=False
         )
 
-    embed.set_footer(text="Dummy Dream Bot • Type !help anytime")
+    embed.set_footer(text="Dummy Dream Bot • Type /help anytime")
     await ctx.send(embed=embed)
 
 async def main():
     init_db()
     close_all_open_live_sessions()
     set_verification_refresh_handler(schedule_verification_panel_refresh)
+    set_presence_refresh_handler(schedule_presence_refresh)
     keep_alive(handle_api_announcement)
 
     # Start observers with announcement, role, and live chat verification callbacks

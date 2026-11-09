@@ -529,6 +529,7 @@ def init_db():
         now_str = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
         defaults = {
             "master_enabled": "1",
+            "debug_mode": "0",
             "feature_announcements": "1",
             "feature_verification": "1",
             "feature_role_tiers": "1",

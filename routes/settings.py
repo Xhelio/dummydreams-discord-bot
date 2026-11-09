@@ -29,11 +29,17 @@ from styles import BASE_CSS, NAV_HTML, AUTO_REFRESH_JS
 settings_bp = Blueprint("settings", __name__, url_prefix="/admin")
 
 _verification_refresh_handler = None
+_presence_refresh_handler = None
 
 
 def set_verification_refresh_handler(handler):
     global _verification_refresh_handler
     _verification_refresh_handler = handler
+
+
+def set_presence_refresh_handler(handler):
+    global _presence_refresh_handler
+    _presence_refresh_handler = handler
 
 
 def _parse_id_list(raw: str) -> list:
@@ -52,6 +58,7 @@ def _checkbox(name: str) -> str:
 @settings_bp.route("/settings", methods=["GET"])
 def view_settings():
     master = get_bool_setting("master_enabled", True)
+    debug_mode = get_bool_setting("debug_mode", False)
     feature_keys = [
         ("feature_announcements", "📣 Live Announcements", "Send and remove live notifications in the announcement channels."),
         ("feature_verification", "🔐 Verification Bot", "Allow members to verify their TikTok account."),
@@ -117,6 +124,13 @@ def view_settings():
                         <span>Master Discord Bot</span>
                     </label>
                     <span class="switch-help">Turn the whole Discord bot on or off. Turning it off remembers every feature state below.</span>
+                </div>
+                <div class="switch-row">
+                    <label class="switch-label" for="debug_mode">
+                        <input type="checkbox" id="debug_mode" name="debug_mode" value="1" {% if debug_mode %}checked{% endif %}>
+                        <span>🧪 Debug Mode</span>
+                    </label>
+                    <span class="switch-help">Show the current push/version code in the bot presence (admin toggle).</span>
                 </div>
                 <div id="feature-list">
                     {% for f in features %}
@@ -373,6 +387,7 @@ def view_settings():
     return render_template_string(
         html,
         master=master,
+        debug_mode=debug_mode,
         features=features,
         s=setting_values,
         tier_cfg=tier_cfg,
@@ -387,7 +402,9 @@ def view_settings():
 @settings_bp.route("/settings/save", methods=["POST"])
 def save_settings():
     master = _checkbox("master_enabled")
+    old_debug_mode = get_bool_setting("debug_mode", False)
     set_setting("master_enabled", master)
+    set_setting("debug_mode", _checkbox("debug_mode"))
 
     # Only overwrite feature flags while the master switch is on. While it is
     # off the UI shows every feature as off but their previous state is kept
@@ -404,7 +421,6 @@ def save_settings():
 
     old_verification_channel = get_setting("verification_channel_id", "") or ""
     new_verification_channel = request.form.get("verification_channel_id", "").strip()
-
     for key in ("verified_role_id", "admin_role_id", "leaderboard_channel_id", "role_tier_announce_channel_id"):
         set_setting(key, request.form.get(key, "").strip())
 
@@ -452,6 +468,12 @@ def save_settings():
                 _verification_refresh_handler(old_verification_channel, new_verification_channel)
             except Exception as e:
                 print(f"[Settings] Verification panel refresh failed: {e}")
+
+    if get_bool_setting("debug_mode", False) != old_debug_mode and _presence_refresh_handler:
+        try:
+            _presence_refresh_handler()
+        except Exception as e:
+            print(f"[Settings] Presence refresh failed: {e}")
 
     return redirect("/admin/settings?saved=1")
 
