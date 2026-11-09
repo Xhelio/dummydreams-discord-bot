@@ -575,7 +575,7 @@ def build_verification_panel_embed() -> discord.Embed:
             "📌 **How to verify:**\n"
             "1. Click the **[ 🔑 Verify TikTok Account ]** button below.\n"
             "2. Enter your TikTok username in the form.\n"
-            "3. The conversation is **100% private (only you and the bot can see it)**.\n"
+            "3. Verification continues in your **Direct Messages** (so it won't disappear).\n"
             "4. Choose a verification method (**Live Greeting**, **Live Chat Code**, or **Bio**).\n"
             "5. Once confirmed, your TikTok account is permanently linked and your server access role activates automatically!"
         ),
@@ -847,7 +847,21 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
         embed, view = build_verification_start(
             interaction.user.id, u_clean, total_coins, display_name
         )
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        try:
+            await interaction.user.send(embed=embed, view=view)
+            await interaction.followup.send(
+                "📬 Verification steps were sent to your **Direct Messages**. Please continue there (DMs won't disappear like ephemeral messages).",
+                ephemeral=True
+            )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "⚠️ I couldn't DM you. Please enable DMs from this server, or continue here (this message may disappear if dismissed).",
+                ephemeral=True
+            )
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        except Exception as e:
+            print(f"[Verification] Failed to DM verification flow: {e}")
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
 class VerificationMethodChoiceView(discord.ui.View):
     """Standard verification (10+ coins): bio code or live chat code."""
