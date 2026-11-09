@@ -21,17 +21,26 @@ def get_db_connection():
 from datetime import datetime, timedelta
 import pytz
 
+_DB_HEALTH_CACHE = {"ok": True, "at": 0.0}
+
+
 def check_database_health() -> bool:
+    now = time.time()
+    if now - _DB_HEALTH_CACHE["at"] < 10:
+        return bool(_DB_HEALTH_CACHE["ok"])
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("SELECT 1")
         row = cur.fetchone()
         conn.close()
-        return bool(row and row[0] == 1)
+        ok = bool(row and row[0] == 1)
     except Exception as e:
         print(f"[HealthCheck Error] {e}")
-        return False
+        ok = False
+    _DB_HEALTH_CACHE["ok"] = ok
+    _DB_HEALTH_CACHE["at"] = now
+    return ok
 
 VALID_TARGET_ACCOUNTS = [
     (1, "georgevilora", "George Vilora"),

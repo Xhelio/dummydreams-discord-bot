@@ -279,10 +279,11 @@ AUTO_REFRESH_JS = """
     }
 
     updateSystemStatus();
-    setInterval(updateSystemStatus, 4000);
+    setInterval(updateSystemStatus, 15000);
 
     // Realtime table synchronization (safe: input forms are never replaced)
     setInterval(function() {
+        if (document.hidden) return;
         if (window.location.pathname === '/admin/settings') return;
         fetch(window.location.href, { cache: 'no-store' })
             .then(response => response.text())
@@ -308,6 +309,6 @@ AUTO_REFRESH_JS = """
                 });
             })
             .catch(err => console.log('Realtime sync error:', err));
-    }, 4000);
+    }, 15000);
 </script>
 """
