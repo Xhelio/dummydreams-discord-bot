@@ -3,6 +3,7 @@ import os
 import json
 import re
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from db import (
@@ -55,17 +56,18 @@ NOTIFICATION_LOCK = asyncio.Lock()
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-bot = commands.Bot(command_prefix="/", intents=intents, help_command=None)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 
 def is_admin_member(member) -> bool:
     """Admin = configured admin role, or server administrator when no role is set."""
-    if not isinstance(member, discord.Member):
+    if member is None:
         return False
     role_id = get_setting("admin_role_id", "") or ""
-    if role_id.isdigit():
+    if role_id.isdigit() and isinstance(member, discord.Member):
         return any(r.id == int(role_id) for r in member.roles)
-    return bool(member.guild_permissions.administrator)
+    perms = getattr(member, "guild_permissions", None)
+    return bool(perms and perms.administrator)
 
 
 def is_admin(ctx) -> bool:
@@ -647,7 +649,7 @@ async def apply_bot_presence():
     env_debug = str(os.environ.get("DEBUG_MODE", "")).strip().lower() in ("1", "true", "yes", "on")
     debug_mode = get_bool_setting("debug_mode", False) or env_debug
     push_code = get_push_code()
-    presence_name = f"DEBUG {push_code} | /help" if debug_mode else "/help | TikTok live monitor"
+    presence_name = f"DEBUG {push_code} | !help / /help" if debug_mode else "!help | /help | TikTok live monitor"
     print(f"[Discord] Presence updated: {presence_name} (debug={debug_mode})")
     try:
         await bot.change_presence(
@@ -1343,6 +1345,11 @@ async def on_ready():
 
     if not getattr(bot, "_background_tasks_started", False):
         bot._background_tasks_started = True
+        try:
+            synced = await bot.tree.sync()
+            print(f"[Discord] Synced {len(synced)} slash command(s).")
+        except Exception as e:
+            print(f"[Discord] Slash command sync failed: {e}")
         asyncio.create_task(reconcile_announcement_sessions())
         asyncio.create_task(leaderboard_loop())
         asyncio.create_task(tier_reset_loop())
@@ -1541,14 +1548,12 @@ async def livesessions(ctx, host_username: str = None):
     finally:
         conn.close()
 
-@bot.command(name="help", aliases=["commands"])
-async def help_command(ctx):
-    """Show all available bot commands."""
+def build_help_embed(user) -> discord.Embed:
     embed = discord.Embed(
         title="📖 Dummy Dream Bot Help",
         description=(
-            f"Hello {ctx.author.mention}! Here are the available commands.\n"
-            f"Prefix: `/` • Example: `/mycoins`"
+            f"Hello {getattr(user, 'mention', user)}! Here are the available commands.\n"
+            f"Text prefix: `!` • Slash commands: `/` (Discord menu)"
         ),
         color=discord.Color.from_rgb(0, 168, 255)
     )
@@ -1556,31 +1561,30 @@ async def help_command(ctx):
         name="🔑 Verification & Account",
         value=(
             "Use the **Verify TikTok Account** button in the verification channel.\n"
-            "`/mycoins` — show your total coins (`/check`, `/coins`)\n"
-            "`/myhistory` — your 5 most recent gift transactions"
+            "`!mycoins` or `/mycoins` — show your total coins\n"
+            "`!myhistory` or `/myhistory` — your 5 most recent gift transactions"
         ),
         inline=False
     )
     embed.add_field(
         name="🏆 Stats & Live",
         value=(
-            "`/topsupporter` — supporter leaderboard (`/leaderboard`, `/topdonator`)\n"
-            "`/dailyrank` — today's coin ranking (`/daily`, `/today`)\n"
-            "`/help` — show this help message"
+            "`!topsupporter` or `/topsupporter` — supporter leaderboard\n"
+            "`!dailyrank` or `/dailyrank` — today's coin ranking\n"
+            "`!help` or `/help` — show this help message"
         ),
         inline=False
     )
 
-    admin_viewer = is_admin_member(ctx.author)
+    admin_viewer = is_admin_member(user)
     if admin_viewer:
         embed.add_field(
             name="🛡️ Admin",
             value=(
-                "`/setup_verification` — send the verification panel to this channel\n"
-                "`/set_verified_role @role` — set the role granted after verification\n"
-                "`/unclaim @member` — remove a member's linked TikTok account\n"
-                "`/livesessions` — recent live sessions (`/sessions`)\n"
-                "`/livesessions <username>` — live sessions for a specific account"
+                "`!setup_verification` or `/setup_verification` — send the verification panel\n"
+                "`!set_verified_role` or `/set_verified_role` — set the verified role\n"
+                "`!unclaim` or `/unclaim` — remove a member's linked TikTok account\n"
+                "`!livesessions` or `/livesessions` — recent live sessions (admin only)"
             ),
             inline=False
         )
@@ -1589,14 +1593,197 @@ async def help_command(ctx):
     if live_hosts:
         embed.add_field(
             name="🟢 Live Now",
-            value="\n".join(
-                [f"• @{h} — https://www.tiktok.com/@{h}/live" for h in live_hosts]
-            ),
+            value="\n".join([f"• @{h} — https://www.tiktok.com/@{h}/live" for h in live_hosts]),
             inline=False
         )
+    embed.set_footer(text="Dummy Dream Bot • !help or /help")
+    return embed
 
-    embed.set_footer(text="Dummy Dream Bot • Type /help anytime")
-    await ctx.send(embed=embed)
+
+@bot.command(name="help", aliases=["commands"])
+async def help_command(ctx):
+    """Show all available bot commands."""
+    await ctx.send(embed=build_help_embed(ctx.author))
+
+# --- Discord Slash Commands (hybrid with ! text commands) ---
+
+@bot.tree.command(name="help", description="Show all available bot commands")
+async def slash_help(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=build_help_embed(interaction.user), ephemeral=True)
+
+
+@bot.tree.command(name="mycoins", description="Show the coin balance of your linked TikTok account")
+async def slash_mycoins(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    conn = get_db_connection()
+    try:
+        res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (interaction.user.id,))
+        mapping = res.fetchone()
+        if not mapping:
+            await interaction.followup.send("❌ Your account is not verified yet. Use the button in the verification channel.", ephemeral=True)
+            return
+        tt_user = mapping[0]
+        res = conn.execute("SELECT display_name, total_coins FROM tiktok_gifts WHERE LOWER(tiktok_user) = ?", (tt_user.lower(),))
+        row = res.fetchone()
+        if not row:
+            await interaction.followup.send(f"ℹ️ TikTok account **@{tt_user}** is linked, but no coin data was found yet.", ephemeral=True)
+            return
+        display_name, total_coins = row
+        msg = (
+            f"👤 **Account Info**\n"
+            f"• Discord: {interaction.user.mention}\n"
+            f"• TikTok: **@{tt_user}** ({display_name or 'No name'})\n"
+            f"• **Total Coins: {int(total_coins or 0):,} c**"
+        )
+        await interaction.followup.send(msg, ephemeral=True)
+    finally:
+        conn.close()
+
+
+@bot.tree.command(name="myhistory", description="Show your 5 most recent gift transactions")
+async def slash_myhistory(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    conn = get_db_connection()
+    try:
+        res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (interaction.user.id,))
+        mapping = res.fetchone()
+        if not mapping:
+            await interaction.followup.send("❌ Your account is not verified yet. Use the button in the verification channel.", ephemeral=True)
+            return
+        tt_user = mapping[0]
+        res = conn.execute("""
+            SELECT target_username, gift_name, gift_count, coins, log_datetime
+            FROM gift_logs
+            WHERE LOWER(viewer_username) = ?
+            ORDER BY log_id DESC LIMIT 5
+        """, (tt_user.lower(),))
+        rows = res.fetchall()
+        if not rows:
+            await interaction.followup.send(f"❌ No gift history found for **@{tt_user}** yet.", ephemeral=True)
+            return
+        msg = f"📜 **Last 5 Gift Transactions (@{tt_user})**\n\n"
+        for target, gift, count, coins, dt in rows:
+            msg += f"• `{dt}`: **{gift}** x{count} ({coins} c) on @{target}\n"
+        await interaction.followup.send(msg, ephemeral=True)
+    finally:
+        conn.close()
+
+
+@bot.tree.command(name="topsupporter", description="Show the all-time top supporters leaderboard")
+async def slash_topsupporter(interaction: discord.Interaction):
+    await interaction.response.defer()
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT tiktok_user, display_name, total_coins FROM tiktok_gifts ORDER BY total_coins DESC LIMIT 10"
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        await interaction.followup.send("❌ No gift data recorded yet.")
+        return
+    await interaction.followup.send(embed=build_leaderboard_embed("🏆 All-Time Top Supporters", rows, "All-Time Coins"))
+
+
+@bot.tree.command(name="dailyrank", description="Show today's coin ranking")
+async def slash_dailyrank(interaction: discord.Interaction):
+    await interaction.response.defer()
+    rows = get_daily_top_supporters()
+    if not rows:
+        await interaction.followup.send("❌ No coin data recorded for today yet.")
+        return
+    await interaction.followup.send(embed=build_leaderboard_embed("🏆 Today's Coin Ranking", rows, "Today's Coins"))
+
+
+@bot.tree.command(name="livesessions", description="Admin: show recent live sessions")
+@app_commands.describe(host_username="Optional TikTok host username filter")
+async def slash_livesessions(interaction: discord.Interaction, host_username: str = None):
+    await interaction.response.defer(ephemeral=True)
+    if not is_admin_member(interaction.user):
+        await interaction.followup.send("🛡️ This command is restricted to administrators.", ephemeral=True)
+        return
+    conn = get_db_connection()
+    try:
+        if host_username:
+            u_clean = host_username.lstrip("@").lower()
+            rows = conn.execute("""
+                SELECT tiktok_username, start_time, end_time, duration_seconds, total_coins, scheduled_host
+                FROM live_sessions
+                WHERE LOWER(tiktok_username) = ?
+                ORDER BY start_time DESC LIMIT 5
+            """, (u_clean,)).fetchall()
+            title = f"@{u_clean}"
+        else:
+            rows = conn.execute("""
+                SELECT tiktok_username, start_time, end_time, duration_seconds, total_coins, scheduled_host
+                FROM live_sessions
+                ORDER BY start_time DESC LIMIT 10
+            """).fetchall()
+            title = "All Hosts"
+        if not rows:
+            await interaction.followup.send("❌ No live session data found yet.", ephemeral=True)
+            return
+        msg = f"📹 **Recent Live Sessions ({title})**\n\n"
+        for user, start, end, dur, coins, host in rows:
+            end_str = end if end else "🟢 Live now"
+            dur_str = f"{dur // 3600}h {(dur % 3600) // 60}m" if dur else "-"
+            msg += f"• **@{user}** [{start} - {end_str}] ({dur_str})\n  Host: {host} | {coins} c\n\n"
+        await interaction.followup.send(msg, ephemeral=True)
+    finally:
+        conn.close()
+
+
+@bot.tree.command(name="setup_verification", description="Admin: send the TikTok verification panel to this channel")
+async def slash_setup_verification(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    if not is_admin_member(interaction.user) or not interaction.guild or not interaction.channel:
+        await interaction.followup.send("🛡️ This command is restricted to administrators in a server channel.", ephemeral=True)
+        return
+    old_channel_id = get_setting("verification_panel_channel_id", "") or get_setting("verification_channel_id", "") or ""
+    old_msg_id = get_setting("verification_panel_message_id", "") or ""
+    if old_msg_id.isdigit() and old_channel_id.isdigit() and str(interaction.channel.id) != old_channel_id:
+        try:
+            old_channel = bot.get_channel(int(old_channel_id)) or await bot.fetch_channel(int(old_channel_id))
+            old_msg = await old_channel.fetch_message(int(old_msg_id))
+            await old_msg.delete()
+        except Exception:
+            pass
+    set_setting("verification_channel_id", str(interaction.channel.id))
+    await send_verification_panel(interaction.channel)
+    await interaction.followup.send("✅ Verification panel sent to this channel.", ephemeral=True)
+
+
+@bot.tree.command(name="set_verified_role", description="Admin: set the role granted after verification")
+@app_commands.describe(role="Role to grant after successful verification")
+async def slash_set_verified_role(interaction: discord.Interaction, role: discord.Role):
+    await interaction.response.defer(ephemeral=True)
+    if not is_admin_member(interaction.user):
+        await interaction.followup.send("🛡️ This command is restricted to administrators.", ephemeral=True)
+        return
+    set_setting("verified_role_id", str(role.id))
+    await interaction.followup.send(f"✅ Verified role set to: **{role.name}** (`{role.id}`)", ephemeral=True)
+
+
+@bot.tree.command(name="unclaim", description="Admin: remove a member's linked TikTok account")
+@app_commands.describe(member="Member to unclaim")
+async def slash_unclaim(interaction: discord.Interaction, member: discord.Member):
+    await interaction.response.defer(ephemeral=True)
+    if not is_admin_member(interaction.user):
+        await interaction.followup.send("🛡️ This command is restricted to administrators.", ephemeral=True)
+        return
+    conn = get_db_connection()
+    try:
+        res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (member.id,)).fetchone()
+        if not res:
+            await interaction.followup.send(f"❌ {member.mention} has no linked TikTok account.", ephemeral=True)
+            return
+        tt_user = res[0]
+        conn.execute("DELETE FROM user_mappings WHERE discord_id = ?", (member.id,))
+        conn.commit()
+        await interaction.followup.send(f"✅ Removed the link to TikTok account `@{tt_user}` from {member.mention}.", ephemeral=True)
+    finally:
+        conn.close()
+
 
 async def main():
     init_db()
