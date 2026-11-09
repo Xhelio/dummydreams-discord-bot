@@ -245,17 +245,42 @@ def save_active_live_announcement(tiktok_username: str, channel_id, message_id, 
     u_clean = tiktok_username.lower().lstrip("@")
     conn = get_db_connection()
     try:
-        conn.execute(
-            """
-            INSERT INTO active_live_announcements (tiktok_username, channel_id, message_id, host_name)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(tiktok_username, channel_id) DO UPDATE SET
-                message_id = excluded.message_id,
-                host_name = COALESCE(excluded.host_name, active_live_announcements.host_name)
-            """,
-            (u_clean, str(channel_id), str(message_id), host_name),
-        )
-        conn.commit()
+        try:
+            conn.execute(
+                """
+                INSERT INTO active_live_announcements (tiktok_username, channel_id, message_id, host_name)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(tiktok_username, channel_id) DO UPDATE SET
+                    message_id = excluded.message_id,
+                    host_name = COALESCE(excluded.host_name, active_live_announcements.host_name)
+                """,
+                (u_clean, str(channel_id), str(message_id), host_name),
+            )
+            conn.commit()
+            return True
+        except Exception as e:
+            # Compatibility fallback if a legacy single-channel PK schema remains.
+            err = str(e).lower()
+            if "conflict" in err or "constraint" in err or "on conflict" in err:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                conn.execute(
+                    """
+                    INSERT INTO active_live_announcements (tiktok_username, channel_id, message_id, host_name)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(tiktok_username) DO UPDATE SET
+                        channel_id = excluded.channel_id,
+                        message_id = excluded.message_id,
+                        host_name = COALESCE(excluded.host_name, active_live_announcements.host_name)
+                    """,
+                    (u_clean, str(channel_id), str(message_id), host_name),
+                )
+                conn.commit()
+                print(f"[DB] Announcement save used legacy schema fallback for @{u_clean}: {e}")
+                return True
+            raise
     finally:
         conn.close()
 

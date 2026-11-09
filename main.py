@@ -42,7 +42,7 @@ from db import (
 )
 from utils import get_schedule_info, load_summary_config
 from server import keep_alive
-from observer import run_all_observers, get_current_live_hosts, is_any_host_live
+from observer import run_all_observers, get_current_live_hosts, is_any_host_live, probe_room_live
 from verification import async_verify_tiktok_bio
 from routes.settings import set_verification_refresh_handler
 import runtime_status
@@ -364,23 +364,32 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
                             print(f"[Discord] Updated live announcement for @{user_key} in {channel_id}.")
                         except Exception as e:
                             print(f"[Discord] Failed to edit announcement for @{user_key}: {e}")
+                    # Session exists and message is valid: never send a duplicate.
                     continue
+                print(f"[Discord] Stored announcement message missing for @{user_key} in {channel_id}; sending a replacement.")
 
             try:
                 new_msg = await channel.send(live_content)
-                save_active_live_announcement(user_key, channel.id, new_msg.id, final_host_name)
-                print(f"[Discord] Sent live announcement for @{user_key} in {channel.id} (Msg ID: {new_msg.id}).")
             except Exception as e:
                 print(f"[Discord] Failed to send announcement for @{user_key} in {channel_id}: {e}")
+                continue
+
+            try:
+                saved = save_active_live_announcement(user_key, channel.id, new_msg.id, final_host_name)
+                if not saved:
+                    print(f"[Discord] Announcement sent but session was not saved for @{user_key} in {channel.id} (Msg ID: {new_msg.id}).")
+                else:
+                    print(f"[Discord] Sent live announcement for @{user_key} in {channel.id} (Msg ID: {new_msg.id}).")
+            except Exception as e:
+                # If we sent a message but failed to save its ID, duplicates can happen on next trigger.
+                print(f"[Discord] CRITICAL: sent announcement but failed to save session for @{user_key} in {channel.id} (Msg ID: {new_msg.id}): {e}")
 
         update_active_live_announcement_host(user_key, final_host_name)
 
-async def reconcile_announcement_sessions(delay_seconds: int = 120):
-    """Bersihkan sesi/pesan pengumuman basi setelah bot restart.
+async def reconcile_announcement_sessions(delay_seconds: int = 180):
+    """Clean stale announcement sessions after restart without deleting active lives.
 
-    Sesi yang tersimpan tetapi akunnya tidak sedang live (tidak ada observer yang
-    terhubung) akan dihapus beserta pesan Discord-nya, supaya tidak ada pesan
-    "just live" yang menggantung.
+    Runtime status can be empty shortly after restart, so we probe before deleting.
     """
     await asyncio.sleep(delay_seconds)
     try:
@@ -388,11 +397,27 @@ async def reconcile_announcement_sessions(delay_seconds: int = 120):
         if not sessions:
             return
         live_now = set(get_current_live_hosts())
+        checked = {}
         for item in sessions:
             username = (item.get("tiktok_username") or "").lower()
-            if username and username not in live_now:
-                print(f"[Discord] Stale announcement session for @{username} found after restart, cleaning up.")
+            if not username or username in live_now:
+                continue
+            if username not in checked:
+                try:
+                    checked[username] = await probe_room_live(username)
+                except Exception as e:
+                    print(f"[Discord] Reconcile probe failed for @{username}: {e}")
+                    checked[username] = None
+            probe = checked[username]
+            if probe is True:
+                print(f"[Discord] Reconcile kept @{username}: probe reports live.")
+                # Do not send a duplicate here; the observer/probe fallback handles live announcements.
+                continue
+            if probe is False:
+                print(f"[Discord] Stale announcement session for @{username} found, cleaning up.")
                 await process_live_announcement(username, False)
+            else:
+                print(f"[Discord] Reconcile skipped @{username}: live status unknown.")
     except Exception as e:
         print(f"[Discord] Announcement reconciliation failed: {e}")
 
