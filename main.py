@@ -1294,6 +1294,16 @@ async def on_ready():
     # Register persistent views so verification buttons keep working after restarts
     bot.add_view(VerificationChannelView())
     bot.add_view(BioVerificationView())
+
+    debug_mode = str(os.environ.get("DEBUG_MODE", "")).strip().lower() in ("1", "true", "yes", "on")
+    presence_name = "DEBUG MODE | !help" if debug_mode else "!help | TikTok live monitor"
+    try:
+        await bot.change_presence(
+            activity=discord.Activity(type=discord.ActivityType.watching, name=presence_name)
+        )
+    except Exception as e:
+        print(f"[Discord] Failed to set presence: {e}")
+
     if not getattr(bot, "_background_tasks_started", False):
         bot._background_tasks_started = True
         asyncio.create_task(reconcile_announcement_sessions())
