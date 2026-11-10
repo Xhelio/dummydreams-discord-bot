@@ -811,10 +811,13 @@ def detect_host_from_welcome_message(text: str):
     return None
 
 def get_current_host_for_account(tiktok_username: str) -> str:
-    """Mengambil nama host yang sedang atau terakhir terdeteksi untuk akun TikTok ini."""
+    """Mengambil nama host live yang sedang/terakhir terdeteksi untuk akun TikTok ini.
+
+    Jangan fallback ke hosts.display_name karena itu nama channel/akun, bukan host live terdeteksi.
+    """
     u_clean = tiktok_username.lower().lstrip("@")
     val = get_setting(f"current_host_{u_clean}")
-    if val:
+    if val and val != "Host":
         return val
 
     conn = get_db_connection()
@@ -827,10 +830,6 @@ def get_current_host_for_account(tiktok_username: str) -> str:
         """, (u_clean,)).fetchone()
         if row and row[0] and row[0] != "Host":
             return row[0]
-
-        h_row = cur.execute("SELECT display_name FROM hosts WHERE tiktok_username = ?", (u_clean,)).fetchone()
-        if h_row and h_row[0]:
-            return h_row[0]
     finally:
         conn.close()
     return "Host"
