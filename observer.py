@@ -601,12 +601,20 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
 
                 connect_msg = f"{'Reconnected to' if reconnected_in_grace else 'Connected to'} @{username_clean}'s live (Host: {current_host})"
                 log_activity_event("connect", connect_msg, username_clean)
+                if LiveIntroEvent:
+                    attach_msg = f"LiveIntroEvent (WebcastLiveIntroMessage) listener attached for @{username_clean}."
+                    print(f"[{username_clean}] {attach_msg}")
+                    log_activity_event("system", attach_msg, username_clean)
+                    try:
+                        runtime_status.update_observer_diag(username_clean, live_intro_listener_attached=True)
+                    except Exception:
+                        pass
                 log_activity_event(
                     "system",
-                    f"Connected to @{username_clean}; listening for LiveIntroEvent (WebcastLiveIntroMessage) for host detection.",
+                    f"Connected to @{username_clean} (online); listening for LiveIntroEvent (WebcastLiveIntroMessage) output until host is detected.",
                     username_clean,
                 )
-                print(f"[{username_clean}] Listening for LiveIntroEvent (WebcastLiveIntroMessage) for host detection...")
+                print(f"[{username_clean}] Connected (online); listening for LiveIntroEvent (WebcastLiveIntroMessage) output until host is detected...")
 
                 # Kirim/update pengumuman agar status tetap sinkron setelah (re)connect.
                 await _trigger_announcement(announcement_callback, username_clean, True, host_name=current_host)
