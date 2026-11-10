@@ -42,13 +42,8 @@ def check_database_health() -> bool:
     _DB_HEALTH_CACHE["at"] = now
     return ok
 
+# Hanya host asli yang digunakan untuk deteksi host.
 VALID_TARGET_ACCOUNTS = [
-    (1, "georgevilora", "George Vilora"),
-    (2, "clarissadreams", "Jeremy Jean"),
-    (3, "juliannedreams", "Julianne"),
-    (4, "franklyndreams", "Frank Lynn"),
-    (5, "stefannyalisha", "Steffanny Alisha"),
-    (6, "dummydreamsentertaiment", "Dummy Dreams Entertaiment")
 ]
 
 def get_channel_display_name(tiktok_username: str) -> str:
@@ -699,44 +694,28 @@ def clear_activity_logs():
         conn.close()
 
 
+# Host asli yang dideteksi (selain ini dihapus)
 HOST_ALIASES = {
-    # Sinta / Mommy
-    "mommy": "Sinta",
-    "momy": "Sinta",
+    # Luna
+    "luna": "Luna",
+    # Sinta
     "sinta": "Sinta",
     "shinta": "Sinta",
+    "mommy": "Sinta",
+    "momy": "Sinta",
     # Zize
     "zize": "Zize",
     "zeze": "Zize",
-    # Solen
-    "solen": "Solen",
+    # Beatrix
+    "beatrix": "Beatrix",
+    "bea": "Beatrix",
+    # Fearless
+    "fearless": "Fearless",
     # Yosa
     "yosa": "Yosa",
-    # Ielya
-    "ielya": "Ielya",
-    "ilya": "Ielya",
     # Yuca
     "yuca": "Yuca",
     "yuc": "Yuca",
-    # Cole
-    "cole": "Cole",
-    # Luna
-    "luna": "Luna",
-    # Target Accounts Aliases
-    "george": "George Vilora",
-    "vilora": "George Vilora",
-    "jeremy": "Jeremy Jean",
-    "jean": "Jeremy Jean",
-    "clarissa": "Jeremy Jean",
-    "stefanny": "Steffanny Alisha",
-    "steffany": "Steffanny Alisha",
-    "alisha": "Steffanny Alisha",
-    "julianne": "Julianne",
-    "julian": "Julianne",
-    "frank": "Frank Lynn",
-    "franklyn": "Frank Lynn",
-    "dummy": "Dummy Dreams Entertaiment",
-    "dummydreams": "Dummy Dreams Entertaiment",
 }
 
 _HOST_ALIAS_CACHE = {"loaded_at": 0, "items": None}
