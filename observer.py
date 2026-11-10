@@ -51,7 +51,8 @@ from db import (
     set_current_host_for_account,
     update_live_session_host,
     get_channel_display_name,
-    is_feature_enabled
+    is_feature_enabled,
+    set_setting
 )
 import runtime_status
 
@@ -65,6 +66,8 @@ _ACTIVE_CLIENTS = {}
 _ACTIVE_CLIENTS_LOCK = threading.Lock()
 _RECONNECT_REQUESTED = set()
 _RECONNECT_REQUESTED_LOCK = threading.Lock()
+_HOST_RECONFIRM_REQUESTED = set()
+_HOST_RECONFIRM_REQUESTED_LOCK = threading.Lock()
 
 def get_current_live_hosts() -> list:
     """Mengembalikan daftar username host yang saat ini sedang terhubung dan live."""
@@ -277,10 +280,26 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 consecutive_failures = 0
                 probed_live = False
 
-                # Refresh host/session context on (re)connect so host detection can continue/update.
-                stored_host = get_current_host_for_account(username_clean)
-                if stored_host and stored_host != "Host":
-                    current_host = stored_host
+                # On manual refresh/reconnect request, reconfirm host instead of trusting stale stored value.
+                force_reconfirm_host = False
+                with _HOST_RECONFIRM_REQUESTED_LOCK:
+                    if username_clean in _HOST_RECONFIRM_REQUESTED:
+                        _HOST_RECONFIRM_REQUESTED.discard(username_clean)
+                        force_reconfirm_host = True
+
+                if force_reconfirm_host:
+                    print(f"[{username_clean}] Reconfirming host on reconnect (clearing stale host state).")
+                    try:
+                        set_setting(f"current_host_{username_clean}", "")
+                    except Exception:
+                        pass
+                    # Use neutral placeholder until a real host is detected from target account/title.
+                    current_host = "Host"
+                else:
+                    # Refresh host/session context on (re)connect so host detection can continue/update.
+                    stored_host = get_current_host_for_account(username_clean)
+                    if stored_host and stored_host != "Host":
+                        current_host = stored_host
 
                 if not current_session_id:
                     current_session_id = start_live_session(username_clean, initial_host=current_host)
@@ -298,6 +317,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 if hasattr(client, 'room_info') and client.room_info:
                     title = getattr(client.room_info, 'title', '')
                     if title:
+                        print(f"[{username_clean}] [HostDetect] room title on connect: {str(title)!r}")
                         await check_and_update_host_from_text(title, sender_username=username_clean)
 
                 connect_msg = f"{'Reconnected to' if reconnected_in_grace else 'Connected to'} @{username_clean}'s live (Host: {current_host})"
@@ -564,6 +584,10 @@ def request_tiktok_reconnect(username: str = None):
         for target in targets:
             if target:
                 _RECONNECT_REQUESTED.add(target)
+    with _HOST_RECONFIRM_REQUESTED_LOCK:
+        for target in targets:
+            if target:
+                _HOST_RECONFIRM_REQUESTED.add(target)
     return targets
 
 async def run_all_observers(announcement_callback, role_callback, comment_callback=None):
