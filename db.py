@@ -716,6 +716,8 @@ HOST_ALIASES = {
     # Yuca
     "yuca": "Yuca",
     "yuc": "Yuca",
+    # Angel
+    "angel": "Angel",
 }
 
 _HOST_ALIAS_CACHE = {"loaded_at": 0, "items": None}
