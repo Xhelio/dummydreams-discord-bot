@@ -154,18 +154,49 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         # Only accept messages from the target account itself.
         if not sender or sender != username_clean:
             return
+
+        msg_preview = str(text).replace("\n", " ").strip()
+        if len(msg_preview) > 200:
+            msg_preview = msg_preview[:197] + "..."
+
         detected = detect_host_from_welcome_message(text)
+        if detected:
+            if detected != current_host:
+                conclusion = f"host changed: {current_host} -> {detected}"
+            else:
+                conclusion = f"host unchanged: {detected}"
+        else:
+            conclusion = f"no host match (current: {current_host})"
+
+        print(f"[{username_clean}] [HostDetect] sender=@{sender} message={msg_preview!r} => {conclusion}")
+
         if detected and detected != current_host:
+            old_host = current_host
             current_host = detected
-            print(f"[{username_clean}] 🎯 Host detected from target account message: {detected} (sender={sender!r}, text={text!r})")
             runtime_status.set_live(username_clean, detected)
             if current_session_id:
                 update_live_session_host(current_session_id, detected)
             set_current_host_for_account(username_clean, detected)
-            log_activity_event("host_detected", f"Host detected: {detected} on @{username_clean} (sender @{sender}, '{text}')", username_clean)
+            log_activity_event(
+                "host_detected",
+                f"Host changed {old_host} -> {detected} on @{username_clean} from @{sender}: \"{msg_preview}\"",
+                username_clean,
+            )
 
             # Update/edit pesan pengumuman yang sudah ada di Discord
             await _trigger_announcement(announcement_callback, username_clean, True, host_name=detected)
+        elif detected:
+            log_activity_event(
+                "host_check",
+                f"Host unchanged ({detected}) on @{username_clean} from @{sender}: \"{msg_preview}\"",
+                username_clean,
+            )
+        else:
+            log_activity_event(
+                "host_check",
+                f"No host match on @{username_clean} from @{sender}: \"{msg_preview}\" (current: {current_host})",
+                username_clean,
+            )
 
     consecutive_failures = 0
     probed_live = False
