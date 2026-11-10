@@ -200,8 +200,9 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         async def on_connect(event: ConnectEvent):
             nonlocal current_session_id, is_connected, disconnect_timer_task, current_host, connected_this_cycle, consecutive_failures, probed_live
             try:
+                reconnected_in_grace = bool(disconnect_timer_task and not disconnect_timer_task.done())
                 # Jika sebelumnya ada pending disconnect timer, batalkan karena sudah terhubung kembali
-                if disconnect_timer_task and not disconnect_timer_task.done():
+                if reconnected_in_grace:
                     disconnect_timer_task.cancel()
                     disconnect_timer_task = None
                     print(f"[{username_clean}] Reconnected within grace period. Live status maintained.")
@@ -210,14 +211,23 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 connected_this_cycle = True
                 consecutive_failures = 0
                 probed_live = False
+
+                # Refresh host/session context on (re)connect so host detection can continue/update.
+                stored_host = get_current_host_for_account(username_clean)
+                if stored_host and stored_host != "Host":
+                    current_host = stored_host
+
+                if not current_session_id:
+                    current_session_id = start_live_session(username_clean, initial_host=current_host)
+
                 runtime_status.set_live(username_clean, current_host, source="event")
                 runtime_status.update_observer_diag(
                     username_clean,
-                    status="connected",
+                    status="reconnected" if reconnected_in_grace else "connected",
                     consecutive_failures=0,
                     last_error=None,
                 )
-                print(f"[{username_clean}] Connected to live stream.")
+                print(f"[{username_clean}] {'Reconnected to' if reconnected_in_grace else 'Connected to'} live stream (Host: {current_host}). Host detection active.")
 
                 # Room title is owned by the target account; allow host detection from it.
                 if hasattr(client, 'room_info') and client.room_info:
@@ -225,13 +235,10 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     if title:
                         await check_and_update_host_from_text(title, sender_username=username_clean)
 
-                if not current_session_id:
-                    current_session_id = start_live_session(username_clean, initial_host=current_host)
-
-                connect_msg = f"Connected to @{username_clean}'s live (Host: {current_host})"
+                connect_msg = f"{'Reconnected to' if reconnected_in_grace else 'Connected to'} @{username_clean}'s live (Host: {current_host})"
                 log_activity_event("connect", connect_msg, username_clean)
 
-                # Kirim pengumuman (hanya 1 kali per sesi live)
+                # Kirim/update pengumuman agar status tetap sinkron setelah (re)connect.
                 await _trigger_announcement(announcement_callback, username_clean, True, host_name=current_host)
             except Exception as e:
                 # Keep runtime live status even if DB/announcement side effects fail.
