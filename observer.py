@@ -710,19 +710,12 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     print(f"[{username_clean}] Error in on_greeting handler: {e}")
 
         if LiveIntroEvent:
-            try:
-                print(f"[{username_clean}] Attaching LiveIntroEvent (WebcastLiveIntroMessage) listener directly to client.")
-                log_activity_event(
-                    "system",
-                    f"LiveIntroEvent (WebcastLiveIntroMessage) listener attached for @{username_clean}.",
-                    username_clean,
-                )
-                runtime_status.update_observer_diag(username_clean, live_intro_listener_attached=True)
-            except Exception:
-                pass
             @client.on(LiveIntroEvent)
             async def on_live_intro(event):
                 try:
+                    # Only process LiveIntroEvent for accounts detected as active/online (connected).
+                    if not is_connected:
+                        return
                     text, field_name, candidates = _extract_live_intro_text(event)
                     try:
                         attr_names = [n for n in dir(event) if not n.startswith("_")][:40]
@@ -731,12 +724,12 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     candidate_names = [name for name, _ in candidates]
                     msg_preview_raw = _safe_preview(text, 200)
                     print(
-                        f"[{username_clean}] [HostDetect:live_intro] WebcastLiveIntroMessage received; "
+                        f"[{username_clean}] [HostDetect:live_intro] WebcastLiveIntroMessage received (online/connected); "
                         f"field={field_name or 'none'} candidates={candidate_names} attrs={attr_names} text={msg_preview_raw!r}"
                     )
                     log_activity_event(
                         "host_check",
-                        f"LiveIntroEvent (WebcastLiveIntroMessage) received on @{username_clean} | field={field_name or 'unknown'} | text={msg_preview_raw or '(empty)'}",
+                        f"LiveIntroEvent (WebcastLiveIntroMessage) received on @{username_clean} (online/connected) | field={field_name or 'unknown'} | text={msg_preview_raw or '(empty)'}",
                         username_clean,
                     )
                     if not text:
@@ -768,15 +761,8 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     print(f"[{username_clean}] Error in on_live_intro handler: {e}")
                     log_activity_event("error", f"LiveIntroEvent (WebcastLiveIntroMessage) handler error on @{username_clean}: {e}", username_clean)
         else:
-            try:
-                print(f"[{username_clean}] LiveIntroEvent not available in installed TikTokLive; will rely on strict Live Intro fallback only.")
-                log_activity_event(
-                    "system",
-                    f"LiveIntroEvent (WebcastLiveIntroMessage) unavailable for @{username_clean}; using strict Live Intro fallback only.",
-                    username_clean,
-                )
-            except Exception:
-                pass
+            # LiveIntroEvent unavailable in library; fallback (only when connected) will be used.
+            pass
 
         if NoticeEvent:
             @client.on(NoticeEvent)
