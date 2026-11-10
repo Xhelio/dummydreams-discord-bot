@@ -405,11 +405,22 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             room_info = getattr(room_info, "__dict__", None) or {}
 
         texts = _collect_intro_texts_from_room_info(room_info) if room_info else []
+        if log_missing:
+            log_activity_event(
+                "host_check",
+                f"Trying strict Live Intro fallback for @{username_clean} ({reason}); intro_fields={len(texts)}.",
+                username_clean,
+            )
         if texts:
             for path, text in texts[:3]:
                 print(
                     f"[{username_clean}] [HostDetect:live_intro_fallback] room_info field={path} "
                     f"text={_safe_preview(text)!r}"
+                )
+                log_activity_event(
+                    "host_check",
+                    f"Live Intro fallback (room_info:{path}, {reason}) on @{username_clean}: {_safe_preview(text)}",
+                    username_clean,
                 )
                 await check_and_update_host_from_text(
                     text,
@@ -424,6 +435,11 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             print(
                 f"[{username_clean}] [HostDetect:live_intro_fallback] using cached Live Intro "
                 f"({reason}): {_safe_preview(cached)!r}"
+            )
+            log_activity_event(
+                "host_check",
+                f"Live Intro fallback using cached intro ({reason}) on @{username_clean}: {_safe_preview(cached)}",
+                username_clean,
             )
             await check_and_update_host_from_text(
                 cached,
@@ -581,6 +597,12 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
 
                 connect_msg = f"{'Reconnected to' if reconnected_in_grace else 'Connected to'} @{username_clean}'s live (Host: {current_host})"
                 log_activity_event("connect", connect_msg, username_clean)
+                log_activity_event(
+                    "system",
+                    f"Connected to @{username_clean}; listening for LiveIntroEvent (WebcastLiveIntroMessage) for host detection.",
+                    username_clean,
+                )
+                print(f"[{username_clean}] Listening for LiveIntroEvent (WebcastLiveIntroMessage) for host detection...")
 
                 # Kirim/update pengumuman agar status tetap sinkron setelah (re)connect.
                 await _trigger_announcement(announcement_callback, username_clean, True, host_name=current_host)
@@ -634,6 +656,16 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     print(f"[{username_clean}] Error in on_greeting handler: {e}")
 
         if LiveIntroEvent:
+            try:
+                print(f"[{username_clean}] Attaching LiveIntroEvent (WebcastLiveIntroMessage) listener directly to client.")
+                log_activity_event(
+                    "system",
+                    f"LiveIntroEvent (WebcastLiveIntroMessage) listener attached for @{username_clean}.",
+                    username_clean,
+                )
+                runtime_status.update_observer_diag(username_clean, live_intro_listener_attached=True)
+            except Exception:
+                pass
             @client.on(LiveIntroEvent)
             async def on_live_intro(event):
                 try:
@@ -643,14 +675,20 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     except Exception:
                         attr_names = []
                     candidate_names = [name for name, _ in candidates]
+                    msg_preview_raw = _safe_preview(text, 200)
                     print(
-                        f"[{username_clean}] [HostDetect:live_intro] event received; "
-                        f"field={field_name or 'none'} candidates={candidate_names} attrs={attr_names}"
+                        f"[{username_clean}] [HostDetect:live_intro] WebcastLiveIntroMessage received; "
+                        f"field={field_name or 'none'} candidates={candidate_names} attrs={attr_names} text={msg_preview_raw!r}"
+                    )
+                    log_activity_event(
+                        "host_check",
+                        f"LiveIntroEvent (WebcastLiveIntroMessage) received on @{username_clean} | field={field_name or 'unknown'} | text={msg_preview_raw or '(empty)'}",
+                        username_clean,
                     )
                     if not text:
                         log_activity_event(
                             "host_check",
-                            f"LiveIntroEvent received on @{username_clean} but no intro text was extracted "
+                            f"LiveIntroEvent (WebcastLiveIntroMessage) received on @{username_clean} but no intro text was extracted "
                             f"(fields: {attr_names}).",
                             username_clean,
                         )
@@ -674,7 +712,17 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     )
                 except Exception as e:
                     print(f"[{username_clean}] Error in on_live_intro handler: {e}")
-                    log_activity_event("error", f"LiveIntroEvent handler error on @{username_clean}: {e}", username_clean)
+                    log_activity_event("error", f"LiveIntroEvent (WebcastLiveIntroMessage) handler error on @{username_clean}: {e}", username_clean)
+        else:
+            try:
+                print(f"[{username_clean}] LiveIntroEvent not available in installed TikTokLive; will rely on strict Live Intro fallback only.")
+                log_activity_event(
+                    "system",
+                    f"LiveIntroEvent (WebcastLiveIntroMessage) unavailable for @{username_clean}; using strict Live Intro fallback only.",
+                    username_clean,
+                )
+            except Exception:
+                pass
 
         if NoticeEvent:
             @client.on(NoticeEvent)
