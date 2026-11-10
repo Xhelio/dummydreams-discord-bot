@@ -20,6 +20,7 @@ from db import (
 )
 from runtime_status import get_live_snapshot
 from verification import fetch_tiktok_display_name
+from observer import request_tiktok_reconnect
 from styles import BASE_CSS, NAV_HTML, AUTO_REFRESH_JS
 
 admin_bp = Blueprint('admin', __name__, url_prefix='/admin')
@@ -486,6 +487,9 @@ def view_monitor():
                 <form action="/admin/sync-hosts" method="POST" onsubmit="return confirm('Reorganize and sync the 6 official target accounts with IDs 1-6?');" style="margin: 0;">
                     <button type="submit" style="background: #15803d; padding: 8px 14px;">🔄 Sync 6 Official Accounts (IDs 1-6)</button>
                 </form>
+                <form action="/admin/tiktok-reconnect" method="POST" onsubmit="return confirm('Disconnect and reconnect TikTok livestream observers now?');" style="margin: 0;">
+                    <button type="submit" style="background: #7c3aed; padding: 8px 14px;">🔌 Refresh TikTok Connection</button>
+                </form>
             </div>
             <form action="/admin/add-host" method="POST" class="form-grid" style="grid-template-columns: 1fr auto;">
                 <input type="text" name="tiktok_username" placeholder="TikTok username (@...) — channel name is fetched automatically" required>
@@ -903,3 +907,12 @@ def reset_db():
     conn.commit()
     conn.close()
     return redirect('/admin/data')
+
+@admin_bp.route('/tiktok-reconnect', methods=['POST'])
+def tiktok_reconnect():
+    try:
+        targets = request_tiktok_reconnect()
+        print(f"[Admin] TikTok reconnect requested for: {targets}")
+    except Exception as e:
+        print(f"[Admin] Failed to request TikTok reconnect: {e}")
+    return redirect('/admin/monitor')

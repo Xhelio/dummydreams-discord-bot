@@ -58,6 +58,14 @@ import runtime_status
 # Set global untuk melacak host yang saat ini sedang LIVE
 CURRENT_LIVE_HOSTS = set()
 
+# Active observer clients and reconnect requests (for admin-triggered reconnects)
+import threading
+
+_ACTIVE_CLIENTS = {}
+_ACTIVE_CLIENTS_LOCK = threading.Lock()
+_RECONNECT_REQUESTED = set()
+_RECONNECT_REQUESTED_LOCK = threading.Lock()
+
 def get_current_live_hosts() -> list:
     """Mengembalikan daftar username host yang saat ini sedang terhubung dan live."""
     return runtime_status.get_live_usernames()
@@ -226,6 +234,32 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
     while True:
         client = TikTokLiveClient(unique_id=username_clean)
         connected_this_cycle = False
+        with _ACTIVE_CLIENTS_LOCK:
+            _ACTIVE_CLIENTS[username_clean] = client
+
+        async def _watch_reconnect_request(active_client):
+            while True:
+                await asyncio.sleep(2)
+                if active_client is not client:
+                    return
+                requested = False
+                with _RECONNECT_REQUESTED_LOCK:
+                    if username_clean in _RECONNECT_REQUESTED:
+                        _RECONNECT_REQUESTED.discard(username_clean)
+                        requested = True
+                if requested:
+                    print(f"[{username_clean}] Reconnect requested by admin; stopping current client.")
+                    try:
+                        stopper = getattr(active_client, "stop", None) or getattr(active_client, "disconnect", None)
+                        if stopper:
+                            res = stopper()
+                            if asyncio.iscoroutine(res):
+                                await res
+                    except Exception as e:
+                        print(f"[{username_clean}] Failed to stop client for reconnect: {e}")
+                    return
+
+        reconnect_watch_task = asyncio.create_task(_watch_reconnect_request(client))
 
         @client.on(ConnectEvent)
         async def on_connect(event: ConnectEvent):
@@ -443,6 +477,11 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             else:
                 print(f"[{username_clean}] Observer error while checking live (failures={consecutive_failures}): {e}")
         finally:
+            if reconnect_watch_task and not reconnect_watch_task.done():
+                reconnect_watch_task.cancel()
+            with _ACTIVE_CLIENTS_LOCK:
+                if _ACTIVE_CLIENTS.get(username_clean) is client:
+                    _ACTIVE_CLIENTS.pop(username_clean, None)
             if is_connected:
                 is_connected = False
                 disconnect_msg = f"Disconnected from @{username_clean}'s live"
@@ -502,7 +541,30 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             wait_seconds = 60
         if not connected_this_cycle and consecutive_failures >= 10:
             wait_seconds = 120
-        await asyncio.sleep(wait_seconds)
+        # If reconnect was requested while waiting, skip delay.
+        for _ in range(wait_seconds):
+            with _RECONNECT_REQUESTED_LOCK:
+                requested = username_clean in _RECONNECT_REQUESTED
+            if requested:
+                break
+            await asyncio.sleep(1)
+
+
+def request_tiktok_reconnect(username: str = None):
+    """Request observer reconnect for one host or all active hosts."""
+    with _ACTIVE_CLIENTS_LOCK:
+        targets = [username.lower().lstrip("@")] if username else list(_ACTIVE_CLIENTS.keys())
+    if not targets:
+        # No active clients registered; target active hosts so next cycle picks up quickly.
+        try:
+            targets = [u.lower().lstrip("@") for u in get_active_hosts() if u]
+        except Exception:
+            targets = []
+    with _RECONNECT_REQUESTED_LOCK:
+        for target in targets:
+            if target:
+                _RECONNECT_REQUESTED.add(target)
+    return targets
 
 async def run_all_observers(announcement_callback, role_callback, comment_callback=None):
     """Supervise one observer task per active host, refreshing from the DB.

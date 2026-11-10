@@ -190,8 +190,8 @@ NAV_HTML = """
         </div>
         <div id="tiktok-status-box" class="status-indicator-pill status-neutral">
             <span class="status-pulse-dot" id="tiktok-status-dot"></span>
-            <span id="tiktok-status-text">TikTok Live</span>
-            <span id="tiktok-live-badge" class="ping-badge">&bull; Checking...</span>
+            <span id="tiktok-status-text">Live: -</span>
+            <span id="tiktok-live-badge" class="ping-badge">&bull; -</span>
         </div>
         <div id="discord-status-box" class="status-indicator-pill status-neutral">
             <span class="status-pulse-dot" id="discord-status-dot"></span>
@@ -259,16 +259,23 @@ AUTO_REFRESH_JS = """
 
                 const tiktok = data.tiktok_live || {};
                 const count = tiktok.count || 0;
-                const names = Object.keys(tiktok.accounts || {});
+                const accounts = tiktok.accounts || {};
+                const names = Object.keys(accounts);
+                const liveHosts = names.map(u => {
+                    const info = accounts[u] || {};
+                    return info.host || u || 'Host';
+                });
+                const uniqueHosts = [...new Set(liveHosts.filter(Boolean))];
+                const liveText = uniqueHosts.length ? ('Live: ' + uniqueHosts.join(', ')) : 'Live: tidak ada';
                 setStatusPill(
                     'tiktok',
                     count > 0 ? 'ok' : 'neutral',
-                    count > 0 ? 'TikTok Live' : 'No Live Now',
-                    count > 0 ? ('• ' + count + ' live') : '• 0 live'
+                    liveText,
+                    count > 0 ? ('• ' + count + ' akun') : '• 0 akun'
                 );
                 const tiktokPill = document.getElementById('tiktok-status-box');
                 if (tiktokPill) {
-                    tiktokPill.title = names.length ? ('Live: ' + names.join(', ')) : 'No target account is live';
+                    tiktokPill.title = names.length ? ('Akun live: ' + names.join(', ')) : 'Tidak ada akun live';
                 }
             })
             .catch(() => {
