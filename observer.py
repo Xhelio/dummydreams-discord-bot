@@ -156,14 +156,14 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
     disconnect_timer_task = None
     current_host = get_current_host_for_account(username_clean) or "Host"
 
-    async def check_and_update_host_from_text(text: str, sender_username: str = None):
-        """Detect host only from messages sent by the target account itself (with or without '#')."""
+    async def check_and_update_host_from_text(text: str, sender_username: str = None, source: str = "message"):
+        """Detect host from LiveIntroEvent only."""
         nonlocal current_host, current_session_id
         if not text:
             return
         sender = (sender_username or "").lower().lstrip("@")
-        # Only accept messages from the target account itself.
-        if not sender or sender != username_clean:
+        # Only accept host detection from LiveIntroEvent (target account context).
+        if source != "live_intro" or sender != username_clean:
             return
 
         msg_preview = str(text).replace("\n", " ").strip()
@@ -179,7 +179,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         else:
             conclusion = f"no host match (current: {current_host})"
 
-        print(f"[{username_clean}] [HostDetect] sender=@{sender} message={msg_preview!r} => {conclusion}")
+        print(f"[{username_clean}] [HostDetect:{source}] sender=@{sender} message={msg_preview!r} => {conclusion}")
 
         if detected and detected != current_host:
             old_host = current_host
@@ -313,12 +313,11 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 )
                 print(f"[{username_clean}] {'Reconnected to' if reconnected_in_grace else 'Connected to'} live stream (Host: {current_host}). Host detection active.")
 
-                # Room title is owned by the target account; allow host detection from it.
+                # Host detection source is now LiveIntroEvent only.
                 if hasattr(client, 'room_info') and client.room_info:
                     title = getattr(client.room_info, 'title', '')
                     if title:
-                        print(f"[{username_clean}] [HostDetect] room title on connect: {str(title)!r}")
-                        await check_and_update_host_from_text(title, sender_username=username_clean)
+                        print(f"[{username_clean}] [HostDetect] room title ignored (host detection uses LiveIntroEvent only): {str(title)!r}")
 
                 connect_msg = f"{'Reconnected to' if reconnected_in_grace else 'Connected to'} @{username_clean}'s live (Host: {current_host})"
                 log_activity_event("connect", connect_msg, username_clean)
@@ -360,13 +359,12 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     else:
                         comment_callback(user, comment_text, username_clean)
 
-                # 2. Host detection: only from messages sent by the target account itself (with or without '#').
-                await check_and_update_host_from_text(comment_text, sender_username=user)
+                # Host detection uses LiveIntroEvent only.
+                # (comment text ignored for host detection)
             except Exception as e:
                 print(f"[{username_clean}] Error in on_comment handler: {e}")
 
-        # Host detection rule: only messages sent by the target account itself are accepted.
-        # System events (greeting/intro/notice/pin) are not treated as target-account chat messages.
+        # Host detection source: LiveIntroEvent only.
         if GreetingEvent:
             @client.on(GreetingEvent)
             async def on_greeting(event):
@@ -379,7 +377,8 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             @client.on(LiveIntroEvent)
             async def on_live_intro(event):
                 try:
-                    _ = getattr(event, 'content', '')
+                    content = getattr(event, 'content', '') or getattr(event, 'description', '') or ''
+                    await check_and_update_host_from_text(content, sender_username=username_clean, source="live_intro")
                 except Exception as e:
                     print(f"[{username_clean}] Error in on_live_intro handler: {e}")
 
