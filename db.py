@@ -866,21 +866,33 @@ def delete_host_alias(alias: str):
         conn.close()
 
 
+def detect_host_match_from_welcome_message(text: str):
+    """
+    Deteksi host dari teks Live Intro/welcome.
+
+    Returns:
+        (host_name, matched_alias) jika ada alias cocok di database host_aliases,
+        atau (None, None) jika tidak ada alias yang cocok.
+    """
+    if not text:
+        return None, None
+    for kw, host_name in get_host_aliases():
+        # Match alias as a token, allowing common possessive suffixes ('s, ’s, `s, s)
+        # so "luna's" / "angel's" is detected as "luna" / "angel".
+        pattern = rf"(?<![A-Za-z0-9]){re.escape(kw)}(?:['\u2019`s]+s|s)?(?![A-Za-z0-9])"
+        if re.search(pattern, text, re.IGNORECASE):
+            return host_name, kw
+    return None, None
+
+
 def detect_host_from_welcome_message(text: str):
     """
     Mendeteksi nama host dari welcome message / chat / intro di TikTok.
     Case-insensitive, alias dikelola dari admin panel.
     Mendukung bentuk possessive seperti luna's / angel's / luna’s.
     """
-    if not text:
-        return None
-    for kw, host_name in get_host_aliases():
-        # Match alias as a token, allowing common possessive suffixes ('s, ’s, `s, s)
-        # so "luna's" / "angel's" is detected as "luna" / "angel".
-        pattern = rf"(?<![A-Za-z0-9]){re.escape(kw)}(?:['\u2019`s]+s|s)?(?![A-Za-z0-9])"
-        if re.search(pattern, text, re.IGNORECASE):
-            return host_name
-    return None
+    host_name, _alias = detect_host_match_from_welcome_message(text)
+    return host_name
 
 def get_current_host_for_account(tiktok_username: str) -> str:
     """Mengambil nama host live yang sedang/terakhir terdeteksi untuk akun TikTok ini.

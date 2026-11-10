@@ -48,6 +48,7 @@ from db import (
     get_user_today_spent,
     get_user_total_spent,
     detect_host_from_welcome_message,
+    detect_host_match_from_welcome_message,
     get_current_host_for_account,
     set_current_host_for_account,
     update_live_session_host,
@@ -354,14 +355,14 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         except Exception:
             pass
 
-        detected = detect_host_from_welcome_message(text)
+        detected, matched_alias = detect_host_match_from_welcome_message(text)
         if detected:
             if detected != current_host:
-                conclusion = f"host changed: {current_host} -> {detected}"
+                conclusion = f"host changed: {current_host} -> {detected} (alias match: {matched_alias!r})"
             else:
-                conclusion = f"host unchanged: {detected}"
+                conclusion = f"host unchanged: {detected} (alias match: {matched_alias!r})"
         else:
-            conclusion = f"no host match (current: {current_host})"
+            conclusion = f"no alias match in database host_aliases (current: {current_host})"
 
         print(f"[{username_clean}] [HostDetect:{source}] origin={origin} sender=@{sender} message={msg_preview!r} => {conclusion}")
 
@@ -374,7 +375,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             set_current_host_for_account(username_clean, detected)
             log_activity_event(
                 "host_detected",
-                f"Host changed {old_host} -> {detected} on @{username_clean} from {origin}: \"{msg_preview}\"",
+                f"Alias match in database: '{matched_alias}' -> {detected}. Host changed {old_host} -> {detected} on @{username_clean} from {origin}: \"{msg_preview}\"",
                 username_clean,
             )
 
@@ -383,33 +384,59 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         elif detected:
             log_activity_event(
                 "host_check",
-                f"Host unchanged ({detected}) on @{username_clean} from {origin}: \"{msg_preview}\"",
+                f"Alias match in database: '{matched_alias}' -> {detected}. Host unchanged ({detected}) on @{username_clean} from {origin}: \"{msg_preview}\"",
                 username_clean,
             )
         else:
             log_activity_event(
                 "host_check",
-                f"No host match on @{username_clean} from {origin}: \"{msg_preview}\" (current: {current_host})",
+                f"No alias match in database (host_aliases) on @{username_clean} from {origin}: \"{msg_preview}\" (current: {current_host})",
                 username_clean,
             )
 
+    async def _get_fresh_intro_room_info(client):
+        """Best-effort: return room_info dict that may contain intro fields."""
+        try:
+            room_info = getattr(client, "room_info", None)
+            if isinstance(room_info, dict):
+                return room_info
+            web = getattr(client, "web", None)
+            fetcher = getattr(web, "fetch_room_info", None)
+            if web and fetcher:
+                result = fetcher()
+                if asyncio.iscoroutine(result):
+                    result = await result
+                if isinstance(result, dict):
+                    return result
+        except Exception as e:
+            print(f"[{username_clean}] [HostDetect:live_intro_fallback] room_info refresh failed: {e}")
+        return None
+
     async def try_live_intro_fallback(client, reason: str, log_missing: bool = True):
-        """Strict Live Intro fallback: room-info intro fields, then last intro text.
+        """Strict Live Intro fallback: intro-named room-info fields, then last intro text.
 
         We never use room title, comments or other arbitrary text. The cached
         text is itself a previously received LiveIntroEvent, so a reconnect
         mid-live can still restore the host until a fresh event arrives.
         """
-        room_info = getattr(client, "room_info", None)
-        if room_info is not None and not isinstance(room_info, dict):
-            room_info = getattr(room_info, "__dict__", None) or {}
+        if not is_connected:
+            # Only act on accounts detected as active (connected websocket).
+            if log_missing:
+                print(f"[{username_clean}] [HostDetect:live_intro_fallback] skipped ({reason}): account not connected.")
+            return False
 
+        room_info = await _get_fresh_intro_room_info(client)
         texts = _collect_intro_texts_from_room_info(room_info) if room_info else []
         if log_missing:
+            keys = sorted(room_info.keys())[:40] if isinstance(room_info, dict) else []
             log_activity_event(
                 "host_check",
-                f"Trying strict Live Intro fallback for @{username_clean} ({reason}); intro_fields={len(texts)}.",
+                f"Trying strict Live Intro fallback for @{username_clean} ({reason}); intro_fields={len(texts)}; room_info_keys={keys or 'unavailable'}.",
                 username_clean,
+            )
+            print(
+                f"[{username_clean}] [HostDetect:live_intro_fallback] trying ({reason}); "
+                f"intro_fields={len(texts)} room_info_keys={keys}"
             )
         if texts:
             for path, text in texts[:3]:
@@ -438,7 +465,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             )
             log_activity_event(
                 "host_check",
-                f"Live Intro fallback using cached intro ({reason}) on @{username_clean}: {_safe_preview(cached)}",
+                f"Live Intro fallback using cached Live Intro ({reason}) on @{username_clean}: {_safe_preview(cached)}",
                 username_clean,
             )
             await check_and_update_host_from_text(
@@ -451,10 +478,6 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
 
         if log_missing:
             keys = sorted(room_info.keys())[:40] if isinstance(room_info, dict) else []
-            print(
-                f"[{username_clean}] [HostDetect:live_intro_fallback] no strict intro source "
-                f"for {reason}; room_info keys={keys}"
-            )
             log_activity_event(
                 "host_check",
                 f"Strict Live Intro fallback on @{username_clean} ({reason}) found no intro text "
@@ -519,6 +542,34 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     return
 
         reconnect_watch_task = asyncio.create_task(_watch_reconnect_request(client))
+        intro_watch_task = None
+
+        async def _watch_live_intro_until_detected(active_client):
+            # Only for accounts detected as active (connected). Repeat until a host is detected.
+            while True:
+                await asyncio.sleep(20)
+                if active_client is not client or not is_connected:
+                    return
+                if current_host and current_host != "Host":
+                    return
+                log_activity_event(
+                    "host_check",
+                    f"Waiting for LiveIntroEvent (WebcastLiveIntroMessage) on @{username_clean} (connected); retrying strict intro check...",
+                    username_clean,
+                )
+                print(f"[{username_clean}] Still connected; waiting for LiveIntroEvent and retrying strict intro check...")
+                try:
+                    await try_live_intro_fallback(active_client, "retry_connected", log_missing=False)
+                except Exception as e:
+                    print(f"[{username_clean}] Intro retry error: {e}")
+
+        def _start_intro_watch_if_needed():
+            nonlocal intro_watch_task
+            if not is_connected or (current_host and current_host != "Host"):
+                return
+            if intro_watch_task and not intro_watch_task.done():
+                return
+            intro_watch_task = asyncio.create_task(_watch_live_intro_until_detected(client))
 
         @client.on(ConnectEvent)
         async def on_connect(event: ConnectEvent):
@@ -606,6 +657,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
 
                 # Kirim/update pengumuman agar status tetap sinkron setelah (re)connect.
                 await _trigger_announcement(announcement_callback, username_clean, True, host_name=current_host)
+                _start_intro_watch_if_needed()
             except Exception as e:
                 # Keep runtime live status even if DB/announcement side effects fail.
                 runtime_status.set_live(username_clean, current_host, source="event")
@@ -614,11 +666,13 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
 
         @client.on(DisconnectEvent)
         async def on_disconnect(event: DisconnectEvent):
-            nonlocal current_session_id, is_connected, disconnect_timer_task
+            nonlocal current_session_id, is_connected, disconnect_timer_task, intro_watch_task
             print(f"[{username_clean}] Disconnected from live stream.")
 
             if is_connected:
                 is_connected = False
+                if intro_watch_task and not intro_watch_task.done():
+                    intro_watch_task.cancel()
                 disconnect_msg = f"Disconnected from @{username_clean}'s live"
                 log_activity_event("disconnect", disconnect_msg, username_clean)
 
@@ -854,6 +908,8 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         finally:
             if reconnect_watch_task and not reconnect_watch_task.done():
                 reconnect_watch_task.cancel()
+            if intro_watch_task and not intro_watch_task.done():
+                intro_watch_task.cancel()
             with _ACTIVE_CLIENTS_LOCK:
                 if _ACTIVE_CLIENTS.get(username_clean) is client:
                     _ACTIVE_CLIENTS.pop(username_clean, None)
