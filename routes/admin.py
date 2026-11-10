@@ -18,9 +18,10 @@ from db import (
     get_channel_display_name,
     sync_valid_hosts
 )
-from runtime_status import get_live_snapshot
+from runtime_status import get_live_snapshot, clear_all_live
 from verification import fetch_tiktok_display_name
 from observer import request_tiktok_reconnect
+from db import reset_live_state
 from styles import BASE_CSS, NAV_HTML, AUTO_REFRESH_JS
 
 admin_bp = Blueprint('admin', __name__, url_prefix='/admin')
@@ -490,6 +491,9 @@ def view_monitor():
                 <form action="/admin/tiktok-reconnect" method="POST" onsubmit="return confirm('Disconnect and reconnect TikTok livestream observers now?');" style="margin: 0;">
                     <button type="submit" style="background: #7c3aed; padding: 8px 14px;">🔌 Refresh TikTok Connection</button>
                 </form>
+                <form action="/admin/reset-live-state" method="POST" onsubmit="return confirm('Clear live sessions/announcements/host state and activity logs, then reconnect observers from scratch? Gift totals are not deleted.');" style="margin: 0;">
+                    <button type="submit" style="background: #b45309; padding: 8px 14px;">🧹 Reset Live State & Reconnect</button>
+                </form>
             </div>
             <form action="/admin/add-host" method="POST" class="form-grid" style="grid-template-columns: 1fr auto;">
                 <input type="text" name="tiktok_username" placeholder="TikTok username (@...) — channel name is fetched automatically" required>
@@ -915,4 +919,19 @@ def tiktok_reconnect():
         print(f"[Admin] TikTok reconnect requested for: {targets}")
     except Exception as e:
         print(f"[Admin] Failed to request TikTok reconnect: {e}")
+    return redirect('/admin/monitor')
+
+
+@admin_bp.route('/reset-live-state', methods=['POST'])
+def reset_live_state_route():
+    try:
+        reset_live_state(clear_logs=True)
+        try:
+            clear_all_live()
+        except Exception:
+            pass
+        targets = request_tiktok_reconnect()
+        print(f"[Admin] Live state reset and TikTok reconnect requested for: {targets}")
+    except Exception as e:
+        print(f"[Admin] Failed to reset live state/reconnect: {e}")
     return redirect('/admin/monitor')

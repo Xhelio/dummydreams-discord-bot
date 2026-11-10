@@ -341,6 +341,24 @@ def close_all_open_live_sessions():
     finally:
         conn.close()
 
+
+def reset_live_state(clear_logs: bool = True):
+    """Clear live/runtime-persisted state so observers can start from a clean slate.
+
+    Removes live sessions, announcement sessions, current detected host settings,
+    and optionally activity logs. Does NOT remove gift totals/history or user mappings.
+    """
+    conn = get_db_connection()
+    try:
+        if clear_logs:
+            conn.execute("DELETE FROM activity_logs")
+        conn.execute("DELETE FROM active_live_announcements")
+        conn.execute("DELETE FROM live_sessions")
+        conn.execute("DELETE FROM bot_settings WHERE key LIKE 'current_host_%'")
+        conn.commit()
+    finally:
+        conn.close()
+
 def init_db():
     """Initialize schema and seed defaults.
 
@@ -842,7 +860,8 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
     now_dt = datetime.now(wib)
     now_str = now_dt.strftime('%Y-%m-%d %H:%M:%S')
     user_clean = tiktok_username.lower().lstrip("@")
-    current_host = initial_host or get_current_host_for_account(user_clean)
+    explicit_host = initial_host is not None
+    current_host = initial_host if explicit_host else get_current_host_for_account(user_clean)
 
     conn = get_db_connection()
     try:
@@ -855,8 +874,8 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
         """, (user_clean,)).fetchone()
 
         if active_row:
-            if initial_host and initial_host != "Host":
-                cur.execute("UPDATE live_sessions SET scheduled_host = ? WHERE session_id = ?", (initial_host, active_row[0]))
+            if explicit_host:
+                cur.execute("UPDATE live_sessions SET scheduled_host = ? WHERE session_id = ?", (current_host, active_row[0]))
                 conn.commit()
             return active_row[0]
 

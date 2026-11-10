@@ -61,6 +61,11 @@ def clear_live(username: str):
         _LIVE.pop(username, None)
 
 
+def clear_all_live():
+    with _LOCK:
+        _LIVE.clear()
+
+
 def get_live_usernames() -> list:
     with _LOCK:
         return list(_LIVE.keys())

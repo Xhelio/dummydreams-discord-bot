@@ -293,7 +293,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                         set_setting(f"current_host_{username_clean}", "")
                     except Exception:
                         pass
-                    # Use neutral placeholder until a real host is detected from target account/title.
+                    # Use neutral placeholder until a real host is detected from LiveIntroEvent.
                     current_host = "Host"
                 else:
                     # Refresh host/session context on (re)connect so host detection can continue/update.
@@ -303,6 +303,11 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
 
                 if not current_session_id:
                     current_session_id = start_live_session(username_clean, initial_host=current_host)
+                elif force_reconfirm_host:
+                    try:
+                        update_live_session_host(current_session_id, "Host")
+                    except Exception:
+                        pass
 
                 runtime_status.set_live(username_clean, current_host, source="event")
                 runtime_status.update_observer_diag(
