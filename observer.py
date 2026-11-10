@@ -394,95 +394,48 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 username_clean,
             )
 
-    async def _get_fresh_intro_room_info(client):
-        """Best-effort: return room_info dict that may contain intro fields."""
-        try:
-            room_info = getattr(client, "room_info", None)
-            if isinstance(room_info, dict):
-                return room_info
-            web = getattr(client, "web", None)
-            fetcher = getattr(web, "fetch_room_info", None)
-            if web and fetcher:
-                result = fetcher()
-                if asyncio.iscoroutine(result):
-                    result = await result
-                if isinstance(result, dict):
-                    return result
-        except Exception as e:
-            print(f"[{username_clean}] [HostDetect:live_intro_fallback] room_info refresh failed: {e}")
-        return None
-
     async def try_live_intro_fallback(client, reason: str, log_missing: bool = True):
-        """Strict Live Intro fallback: intro-named room-info fields, then last intro text.
+        """Strict fallback using previously captured LiveIntroEvent output only.
 
-        We never use room title, comments or other arbitrary text. The cached
-        text is itself a previously received LiveIntroEvent, so a reconnect
-        mid-live can still restore the host until a fresh event arrives.
+        Per policy: host detection comes from LiveIntroEvent (WebcastLiveIntroMessage)
+        output text; we keep listening for that event until output is received.
+        Cached text here is a prior LiveIntroEvent output (not room title/comments).
         """
         if not is_connected:
-            # Only act on accounts detected as active (connected websocket).
+            # Only act on accounts detected as active (connected/online websocket).
             if log_missing:
-                print(f"[{username_clean}] [HostDetect:live_intro_fallback] skipped ({reason}): account not connected.")
+                print(f"[{username_clean}] [HostDetect:live_intro_fallback] skipped ({reason}): account not online/connected.")
             return False
-
-        room_info = await _get_fresh_intro_room_info(client)
-        texts = _collect_intro_texts_from_room_info(room_info) if room_info else []
-        if log_missing:
-            keys = sorted(room_info.keys())[:40] if isinstance(room_info, dict) else []
-            log_activity_event(
-                "host_check",
-                f"Trying strict Live Intro fallback for @{username_clean} ({reason}); intro_fields={len(texts)}; room_info_keys={keys or 'unavailable'}.",
-                username_clean,
-            )
-            print(
-                f"[{username_clean}] [HostDetect:live_intro_fallback] trying ({reason}); "
-                f"intro_fields={len(texts)} room_info_keys={keys}"
-            )
-        if texts:
-            for path, text in texts[:3]:
-                print(
-                    f"[{username_clean}] [HostDetect:live_intro_fallback] room_info field={path} "
-                    f"text={_safe_preview(text)!r}"
-                )
-                log_activity_event(
-                    "host_check",
-                    f"Live Intro fallback (room_info:{path}, {reason}) on @{username_clean}: {_safe_preview(text)}",
-                    username_clean,
-                )
-                await check_and_update_host_from_text(
-                    text,
-                    sender_username=username_clean,
-                    source="live_intro_fallback",
-                    origin=f"room_info:{path} ({reason})",
-                )
-            return True
 
         cached = _get_cached_live_intro_text(username_clean)
         if cached:
+            if log_missing:
+                log_activity_event(
+                    "host_check",
+                    f"Using cached LiveIntroEvent output for @{username_clean} ({reason}): {_safe_preview(cached)}",
+                    username_clean,
+                )
             print(
-                f"[{username_clean}] [HostDetect:live_intro_fallback] using cached Live Intro "
+                f"[{username_clean}] [HostDetect:live_intro_fallback] using cached LiveIntroEvent output "
                 f"({reason}): {_safe_preview(cached)!r}"
-            )
-            log_activity_event(
-                "host_check",
-                f"Live Intro fallback using cached Live Intro ({reason}) on @{username_clean}: {_safe_preview(cached)}",
-                username_clean,
             )
             await check_and_update_host_from_text(
                 cached,
                 sender_username=username_clean,
                 source="live_intro_fallback",
-                origin=f"cached_intro ({reason})",
+                origin=f"cached_live_intro_event_output ({reason})",
             )
             return True
 
         if log_missing:
-            keys = sorted(room_info.keys())[:40] if isinstance(room_info, dict) else []
             log_activity_event(
                 "host_check",
-                f"Strict Live Intro fallback on @{username_clean} ({reason}) found no intro text "
-                f"(room_info keys: {keys or 'unavailable'}).",
+                f"No cached LiveIntroEvent output for @{username_clean} ({reason}); still waiting for WebcastLiveIntroMessage output.",
                 username_clean,
+            )
+            print(
+                f"[{username_clean}] [HostDetect:live_intro_fallback] no cached LiveIntroEvent output "
+                f"for {reason}; waiting for WebcastLiveIntroMessage."
             )
         return False
 
