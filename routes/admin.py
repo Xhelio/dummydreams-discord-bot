@@ -739,11 +739,29 @@ def view_activity():
                         <span class="log-tag-disconnect">DISCONNECT</span>
                         <span style="color: #f87171; font-weight: 600;">{{ log[3] }}</span>
                     {% elif log[1] == 'host_detected' %}
-                        <span class="log-tag-gift" style="color: #38bdf8; background: rgba(56, 189, 248, 0.1); padding: 2px 6px; border-radius: 4px;">HOST</span>
+                        <span class="log-tag-gift" style="color: #38bdf8; background: rgba(56, 189, 248, 0.1);">HOST</span>
                         <span style="color: #38bdf8; font-weight: 600;">{{ log[3] }}</span>
-                    {% else %}
+                    {% elif log[1] == 'host_check' %}
+                        <span class="log-tag-gift" style="color: #a78bfa; background: rgba(167, 139, 250, 0.12);">HOST CHECK</span>
+                        <span style="color: #ddd6fe;">{{ log[3] }}</span>
+                    {% elif log[1] == 'gift' %}
                         <span class="log-tag-gift">🎁 GIFT</span>
                         <span style="color: #f8fafc;">{{ log[3] }}</span>
+                    {% elif log[1] == 'reconnect' %}
+                        <span class="log-tag-gift" style="color: #f59e0b; background: rgba(245, 158, 11, 0.12);">RECONNECT</span>
+                        <span style="color: #fde68a; font-weight: 600;">{{ log[3] }}</span>
+                    {% elif log[1] == 'system' %}
+                        <span class="log-tag-gift" style="color: #94a3b8; background: rgba(148, 163, 184, 0.12);">SYSTEM</span>
+                        <span style="color: #cbd5e1;">{{ log[3] }}</span>
+                    {% elif log[1] == 'tier_reset' %}
+                        <span class="log-tag-gift" style="color: #f472b6; background: rgba(244, 114, 182, 0.12);">TIER</span>
+                        <span style="color: #fbcfe8;">{{ log[3] }}</span>
+                    {% elif log[1] == 'error' %}
+                        <span class="log-tag-disconnect">ERROR</span>
+                        <span style="color: #fca5a5; font-weight: 600;">{{ log[3] }}</span>
+                    {% else %}
+                        <span class="log-tag-gift" style="color: #e2e8f0; background: rgba(226, 232, 240, 0.08);">{{ log[1]|upper }}</span>
+                        <span style="color: #e2e8f0;">{{ log[3] }}</span>
                     {% endif %}
                 </div>
                 {% else %}
@@ -925,12 +943,23 @@ def tiktok_reconnect():
 @admin_bp.route('/reset-live-state', methods=['POST'])
 def reset_live_state_route():
     try:
+        # Log intent before clearing activity logs so admin action is visible in console/history up to reset point.
+        try:
+            from db import log_activity_event
+            log_activity_event("system", "Admin requested reset live state and reconnect.", "")
+        except Exception:
+            pass
         reset_live_state(clear_logs=True)
         try:
             clear_all_live()
         except Exception:
             pass
         targets = request_tiktok_reconnect()
+        try:
+            from db import log_activity_event
+            log_activity_event("system", f"Live state reset completed; reconnect requested for: {targets}", "")
+        except Exception:
+            pass
         print(f"[Admin] Live state reset and TikTok reconnect requested for: {targets}")
     except Exception as e:
         print(f"[Admin] Failed to reset live state/reconnect: {e}")

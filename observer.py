@@ -538,6 +538,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     if not current_session_id:
                         current_session_id = start_live_session(username_clean, initial_host=current_host)
                     await _trigger_announcement(announcement_callback, username_clean, True, host_name=current_host)
+                    log_activity_event("connect", f"Connected to @{username_clean}'s live by probe fallback (Host: {current_host})", username_clean)
                     print(f"[{username_clean}] Live detected by probe fallback (event client not connected).")
                 else:
                     runtime_status.set_live(username_clean, current_host, source=runtime_status.get_live_snapshot().get(username_clean, {}).get("source", "probe"))
@@ -553,6 +554,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                             pass
                         current_session_id = None
                     await _trigger_announcement(announcement_callback, username_clean, False)
+                    log_activity_event("disconnect", f"Disconnected from @{username_clean}'s live (probe confirmed offline)", username_clean)
                     probed_live = False
                 if cycle_error is None:
                     runtime_status.update_observer_diag(username_clean, status="offline", consecutive_failures=0, last_error=None)
@@ -598,6 +600,11 @@ def request_tiktok_reconnect(username: str = None):
         for target in targets:
             if target:
                 _HOST_RECONFIRM_REQUESTED.add(target)
+    try:
+        label = ", ".join(f"@{t}" for t in targets if t) or "(no targets)"
+        log_activity_event("reconnect", f"TikTok reconnect requested for {label}.", (targets[0] if len(targets) == 1 else ""))
+    except Exception:
+        pass
     return targets
 
 async def run_all_observers(announcement_callback, role_callback, comment_callback=None):
@@ -608,6 +615,10 @@ async def run_all_observers(announcement_callback, role_callback, comment_callba
     """
     tasks = {}
     print("[Observer System] Starting supervised observers for target hosts in DB.")
+    try:
+        log_activity_event("system", "Observer supervisor started.", "")
+    except Exception:
+        pass
 
     while True:
         target_users = [u.lower().lstrip("@") for u in get_active_hosts() if u]
@@ -622,6 +633,10 @@ async def run_all_observers(announcement_callback, role_callback, comment_callba
                 tasks.pop(username, None)
                 runtime_status.clear_live(username)
                 print(f"[Observer System] Stopped observer for @{username} (no longer active).")
+                try:
+                    log_activity_event("system", f"Stopped observer for @{username} (no longer active).", username)
+                except Exception:
+                    pass
 
         # Start observers for newly added or previously failed hosts.
         for username in target_users:
@@ -633,5 +648,9 @@ async def run_all_observers(announcement_callback, role_callback, comment_callba
                     )
                 )
                 print(f"[Observer System] Started observer for @{username}.")
+                try:
+                    log_activity_event("system", f"Started observer task for @{username}.", username)
+                except Exception:
+                    pass
 
         await asyncio.sleep(60)

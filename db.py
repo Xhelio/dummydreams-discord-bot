@@ -621,23 +621,34 @@ def init_db():
         conn.close()
 
 def log_activity_event(event_type: str, message: str, tiktok_username: str = ""):
-    """Mencatat aktivitas koneksi / diskoneksi / gift ke tabel activity_logs."""
+    """Mencatat aktivitas ke tabel activity_logs (dan selalu ke console)."""
+    event_type = str(event_type or "info")
+    message = str(message or "")
+    user_clean = (tiktok_username or "").lower().lstrip("@")
+
     wib = pytz.timezone('Asia/Jakarta')
     now_dt = datetime.now(wib)
     now_str = now_dt.strftime('%Y-%m-%d %H:%M:%S')
-    user_clean = tiktok_username.lower().lstrip("@")
-    
-    conn = get_db_connection()
+
+    # Always emit to console so logs remain visible in Render even if DB insert fails.
+    print(f"[ActivityLog] [{event_type}] @{user_clean or '-'} {message}")
+
+    conn = None
     try:
+        conn = get_db_connection()
         conn.execute("""
             INSERT INTO activity_logs (event_type, tiktok_username, message, created_at)
             VALUES (?, ?, ?, ?)
         """, (event_type, user_clean, message, now_str))
         conn.commit()
     except Exception as e:
-        print(f"[ActivityLog Error] Failed to log event: {e}")
+        print(f"[ActivityLog Error] Failed to persist event ({event_type} @{user_clean}): {e}")
     finally:
-        conn.close()
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
 
 def get_user_channel_spent(viewer_user: str, target_user: str) -> int:
     """Menghitung total koin yang sudah di-spent oleh viewer di target channel ini."""
