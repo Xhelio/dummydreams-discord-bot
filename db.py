@@ -780,11 +780,14 @@ def detect_host_from_welcome_message(text: str):
     """
     Mendeteksi nama host dari welcome message / chat / intro di TikTok.
     Case-insensitive, alias dikelola dari admin panel.
+    Mendukung bentuk possessive seperti luna's / angel's / luna’s.
     """
     if not text:
         return None
     for kw, host_name in get_host_aliases():
-        pattern = rf"(?:^|[\s\W_]){re.escape(kw)}(?:[\x27\u2019]s|s)?(?:$|[\s\W_])"
+        # Match alias as a token, allowing common possessive suffixes ('s, ’s, `s, s)
+        # so "luna's" / "angel's" is detected as "luna" / "angel".
+        pattern = rf"(?<![A-Za-z0-9]){re.escape(kw)}(?:['\u2019`s]+s|s)?(?![A-Za-z0-9])"
         if re.search(pattern, text, re.IGNORECASE):
             return host_name
     return None
