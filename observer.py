@@ -237,6 +237,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
     while True:
         client = TikTokLiveClient(unique_id=username_clean)
         connected_this_cycle = False
+        reconnect_state = {"triggered": False}
         with _ACTIVE_CLIENTS_LOCK:
             _ACTIVE_CLIENTS[username_clean] = client
 
@@ -251,6 +252,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                         _RECONNECT_REQUESTED.discard(username_clean)
                         requested = True
                 if requested:
+                    reconnect_state["triggered"] = True
                     print(f"[{username_clean}] Reconnect requested by admin; stopping current client.")
                     try:
                         stopper = getattr(active_client, "stop", None) or getattr(active_client, "disconnect", None)
@@ -560,11 +562,15 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             consecutive_failures = 0
 
         # Adaptive retry: back off slightly on repeated failures, but keep checking.
-        wait_seconds = 30
-        if not connected_this_cycle and consecutive_failures >= 5:
-            wait_seconds = 60
-        if not connected_this_cycle and consecutive_failures >= 10:
-            wait_seconds = 120
+        if reconnect_state.get("triggered"):
+            wait_seconds = 2
+            runtime_status.update_observer_diag(username_clean, status="reconnecting")
+        else:
+            wait_seconds = 30
+            if not connected_this_cycle and consecutive_failures >= 5:
+                wait_seconds = 60
+            if not connected_this_cycle and consecutive_failures >= 10:
+                wait_seconds = 120
         # If reconnect was requested while waiting, skip delay.
         for _ in range(wait_seconds):
             with _RECONNECT_REQUESTED_LOCK:
