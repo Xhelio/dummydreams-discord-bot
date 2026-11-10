@@ -1,4 +1,5 @@
 import asyncio
+import time
 from datetime import datetime
 import pytz
 from TikTokLive import TikTokLiveClient
@@ -51,7 +52,9 @@ from db import (
     set_current_host_for_account,
     update_live_session_host,
     get_channel_display_name,
+    get_host_aliases,
     is_feature_enabled,
+    get_setting,
     set_setting
 )
 import runtime_status
@@ -68,6 +71,171 @@ _RECONNECT_REQUESTED = set()
 _RECONNECT_REQUESTED_LOCK = threading.Lock()
 _HOST_RECONFIRM_REQUESTED = set()
 _HOST_RECONFIRM_REQUESTED_LOCK = threading.Lock()
+
+# Cached Live Intro text. This is only ever populated from LiveIntroEvent (or
+# intro-named fields in room info), so the fallback stays tied to the intro
+# source and never uses arbitrary chat / room titles.
+_LAST_INTRO_TEXT = {}
+_INTRO_CACHE_TTL_SECONDS = 6 * 3600
+
+
+def _safe_preview(value, limit: int = 180) -> str:
+    try:
+        text = str(value).replace("\n", " ").strip()
+    except Exception:
+        return ""
+    if len(text) > limit:
+        text = text[: max(0, limit - 3)] + "..."
+    return text
+
+
+def _text_from_value(value) -> str:
+    """Normalise a scalar / Text-proto / nested dict into intro text."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8", "replace").strip()
+        except Exception:
+            return ""
+    if isinstance(value, dict):
+        for key in ("default_pattern", "content", "text", "message", "value"):
+            nested = value.get(key)
+            if isinstance(nested, str) and nested.strip():
+                return nested.strip()
+        return ""
+    # TikTokLive's Text protobuf exposes the rendered text on default_pattern.
+    for attr in ("default_pattern", "content", "text", "message"):
+        try:
+            nested = getattr(value, attr, None)
+        except Exception:
+            nested = None
+        if isinstance(nested, str) and nested.strip():
+            return nested.strip()
+    return ""
+
+
+def _extract_live_intro_text(event):
+    """Extract intro text from LiveIntroEvent across TikTokLive versions.
+
+    Returns (text, field_name, candidate_fields). The event itself is the only
+    source here: we never read room titles or comments.
+    """
+    candidates = []
+    seen = set()
+
+    def add_candidate(name, value):
+        text = _text_from_value(value)
+        if text and (name, text) not in seen:
+            seen.add((name, text))
+            candidates.append((str(name), text))
+
+    for name in (
+        "content",
+        "description",
+        "intro",
+        "message",
+        "text",
+        "room_intro",
+        "live_intro",
+    ):
+        try:
+            add_candidate(name, getattr(event, name, None))
+        except Exception:
+            pass
+
+    try:
+        values = vars(event) if hasattr(event, "__dict__") else {}
+    except Exception:
+        values = {}
+    if isinstance(event, dict):
+        values = event
+    for key, value in list(values.items())[:80]:
+        if "intro" in str(key).lower():
+            add_candidate(key, value)
+
+    # Some protobuf fields are properties and do not appear in vars().
+    try:
+        names = [n for n in dir(event) if not n.startswith("_")]
+    except Exception:
+        names = []
+    for name in names[:160]:
+        if "intro" not in name.lower():
+            continue
+        try:
+            add_candidate(name, getattr(event, name))
+        except Exception:
+            pass
+
+    if candidates:
+        return candidates[0][1], candidates[0][0], candidates
+    return "", "", candidates
+
+
+def _collect_intro_texts_from_room_info(value, path: str = "", depth: int = 0, out=None):
+    """Collect only intro-named text fields from a room-info payload.
+
+    This is deliberately strict: only keys containing "intro" are considered,
+    so the fallback cannot accidentally use the room title, comments or other
+    arbitrary text.
+    """
+    if out is None:
+        out = []
+    if depth > 6 or len(out) >= 5:
+        return out
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_l = str(key).lower()
+            child_path = f"{path}.{key}" if path else str(key)
+            if "intro" in key_l:
+                text = _text_from_value(item)
+                if text:
+                    out.append((child_path, text))
+                elif isinstance(item, (dict, list)):
+                    _collect_intro_texts_from_room_info(item, child_path, depth + 1, out)
+            elif isinstance(item, (dict, list)):
+                _collect_intro_texts_from_room_info(item, child_path, depth + 1, out)
+    elif isinstance(value, list):
+        for idx, item in enumerate(value[:25]):
+            _collect_intro_texts_from_room_info(item, f"{path}[{idx}]", depth + 1, out)
+    return out
+
+
+def _cache_live_intro_text(username: str, text: str):
+    username = (username or "").lower().lstrip("@")
+    text = (text or "").strip()
+    if not username or not text:
+        return
+    _LAST_INTRO_TEXT[username] = text
+    try:
+        set_setting(f"last_live_intro_{username}", text)
+        set_setting(f"last_live_intro_at_{username}", str(time.time()))
+    except Exception as e:
+        print(f"[{username}] Failed to persist last Live Intro text: {e}")
+
+
+def _get_cached_live_intro_text(username: str) -> str:
+    username = (username or "").lower().lstrip("@")
+    if not username:
+        return ""
+    text = _LAST_INTRO_TEXT.get(username, "")
+    if not text:
+        try:
+            text = (get_setting(f"last_live_intro_{username}") or "").strip()
+        except Exception:
+            text = ""
+    if not text:
+        return ""
+    try:
+        cached_at = float(get_setting(f"last_live_intro_at_{username}") or 0)
+        if cached_at and (time.time() - cached_at) > _INTRO_CACHE_TTL_SECONDS:
+            return ""
+    except Exception:
+        pass
+    return text
+
 
 def get_current_live_hosts() -> list:
     """Mengembalikan daftar username host yang saat ini sedang terhubung dan live."""
@@ -156,19 +324,35 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
     disconnect_timer_task = None
     current_host = get_current_host_for_account(username_clean) or "Host"
 
-    async def check_and_update_host_from_text(text: str, sender_username: str = None, source: str = "message"):
-        """Detect host from LiveIntroEvent only."""
+    async def check_and_update_host_from_text(text: str, sender_username: str = None, source: str = "message", origin: str = "event"):
+        """Detect host from Live Intro data only (event or strict intro fallback)."""
         nonlocal current_host, current_session_id
-        if not text:
-            return
+        allowed_sources = ("live_intro", "live_intro_fallback")
         sender = (sender_username or "").lower().lstrip("@")
-        # Only accept host detection from LiveIntroEvent (target account context).
-        if source != "live_intro" or sender != username_clean:
+        # Only accept host detection from Live Intro data for the target account.
+        if source not in allowed_sources or sender != username_clean:
             return
 
-        msg_preview = str(text).replace("\n", " ").strip()
-        if len(msg_preview) > 200:
-            msg_preview = msg_preview[:197] + "..."
+        msg_preview = _safe_preview(text, 200)
+        if not msg_preview:
+            print(f"[{username_clean}] [HostDetect:{source}] received via {origin} but the intro text is empty.")
+            log_activity_event(
+                "host_check",
+                f"Live Intro received on @{username_clean} via {origin} but no text was extracted.",
+                username_clean,
+            )
+            return
+
+        try:
+            runtime_status.update_observer_diag(
+                username_clean,
+                last_intro_source=source,
+                last_intro_origin=origin,
+                last_intro_preview=msg_preview,
+                last_intro_at=datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%Y-%m-%d %H:%M:%S'),
+            )
+        except Exception:
+            pass
 
         detected = detect_host_from_welcome_message(text)
         if detected:
@@ -179,18 +363,18 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         else:
             conclusion = f"no host match (current: {current_host})"
 
-        print(f"[{username_clean}] [HostDetect:{source}] sender=@{sender} message={msg_preview!r} => {conclusion}")
+        print(f"[{username_clean}] [HostDetect:{source}] origin={origin} sender=@{sender} message={msg_preview!r} => {conclusion}")
 
         if detected and detected != current_host:
             old_host = current_host
             current_host = detected
-            runtime_status.set_live(username_clean, detected)
+            runtime_status.set_live(username_clean, detected, source=source)
             if current_session_id:
                 update_live_session_host(current_session_id, detected)
             set_current_host_for_account(username_clean, detected)
             log_activity_event(
                 "host_detected",
-                f"Host changed {old_host} -> {detected} on @{username_clean} from @{sender}: \"{msg_preview}\"",
+                f"Host changed {old_host} -> {detected} on @{username_clean} from {origin}: \"{msg_preview}\"",
                 username_clean,
             )
 
@@ -199,15 +383,69 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         elif detected:
             log_activity_event(
                 "host_check",
-                f"Host unchanged ({detected}) on @{username_clean} from @{sender}: \"{msg_preview}\"",
+                f"Host unchanged ({detected}) on @{username_clean} from {origin}: \"{msg_preview}\"",
                 username_clean,
             )
         else:
             log_activity_event(
                 "host_check",
-                f"No host match on @{username_clean} from @{sender}: \"{msg_preview}\" (current: {current_host})",
+                f"No host match on @{username_clean} from {origin}: \"{msg_preview}\" (current: {current_host})",
                 username_clean,
             )
+
+    async def try_live_intro_fallback(client, reason: str, log_missing: bool = True):
+        """Strict Live Intro fallback: room-info intro fields, then last intro text.
+
+        We never use room title, comments or other arbitrary text. The cached
+        text is itself a previously received LiveIntroEvent, so a reconnect
+        mid-live can still restore the host until a fresh event arrives.
+        """
+        room_info = getattr(client, "room_info", None)
+        if room_info is not None and not isinstance(room_info, dict):
+            room_info = getattr(room_info, "__dict__", None) or {}
+
+        texts = _collect_intro_texts_from_room_info(room_info) if room_info else []
+        if texts:
+            for path, text in texts[:3]:
+                print(
+                    f"[{username_clean}] [HostDetect:live_intro_fallback] room_info field={path} "
+                    f"text={_safe_preview(text)!r}"
+                )
+                await check_and_update_host_from_text(
+                    text,
+                    sender_username=username_clean,
+                    source="live_intro_fallback",
+                    origin=f"room_info:{path} ({reason})",
+                )
+            return True
+
+        cached = _get_cached_live_intro_text(username_clean)
+        if cached:
+            print(
+                f"[{username_clean}] [HostDetect:live_intro_fallback] using cached Live Intro "
+                f"({reason}): {_safe_preview(cached)!r}"
+            )
+            await check_and_update_host_from_text(
+                cached,
+                sender_username=username_clean,
+                source="live_intro_fallback",
+                origin=f"cached_intro ({reason})",
+            )
+            return True
+
+        if log_missing:
+            keys = sorted(room_info.keys())[:40] if isinstance(room_info, dict) else []
+            print(
+                f"[{username_clean}] [HostDetect:live_intro_fallback] no strict intro source "
+                f"for {reason}; room_info keys={keys}"
+            )
+            log_activity_event(
+                "host_check",
+                f"Strict Live Intro fallback on @{username_clean} ({reason}) found no intro text "
+                f"(room_info keys: {keys or 'unavailable'}).",
+                username_clean,
+            )
+        return False
 
     consecutive_failures = 0
     probed_live = False
@@ -320,11 +558,26 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 )
                 print(f"[{username_clean}] {'Reconnected to' if reconnected_in_grace else 'Connected to'} live stream (Host: {current_host}). Host detection active.")
 
-                # Host detection source is now LiveIntroEvent only.
-                if hasattr(client, 'room_info') and client.room_info:
-                    title = getattr(client.room_info, 'title', '')
-                    if title:
-                        print(f"[{username_clean}] [HostDetect] room title ignored (host detection uses LiveIntroEvent only): {str(title)!r}")
+                # Host detection source is LiveIntroEvent only. If the event has
+                # not arrived yet, try the strict Live Intro fallback (intro-named
+                # room-info fields or the last received intro text). Never use
+                # the room title, comments or other arbitrary text.
+                room_info = getattr(client, "room_info", None)
+                if isinstance(room_info, dict):
+                    print(
+                        f"[{username_clean}] room_info available for Live Intro fallback "
+                        f"(keys={sorted(room_info.keys())[:30]})."
+                    )
+                else:
+                    print(
+                        f"[{username_clean}] room_info unavailable "
+                        f"(type={type(room_info).__name__}); Live Intro fallback will use cached intro if any."
+                    )
+                if current_host == "Host":
+                    await try_live_intro_fallback(
+                        client,
+                        "reconnect" if reconnected_in_grace else "connect",
+                    )
 
                 connect_msg = f"{'Reconnected to' if reconnected_in_grace else 'Connected to'} @{username_clean}'s live (Host: {current_host})"
                 log_activity_event("connect", connect_msg, username_clean)
@@ -384,10 +637,44 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             @client.on(LiveIntroEvent)
             async def on_live_intro(event):
                 try:
-                    content = getattr(event, 'content', '') or getattr(event, 'description', '') or ''
-                    await check_and_update_host_from_text(content, sender_username=username_clean, source="live_intro")
+                    text, field_name, candidates = _extract_live_intro_text(event)
+                    try:
+                        attr_names = [n for n in dir(event) if not n.startswith("_")][:40]
+                    except Exception:
+                        attr_names = []
+                    candidate_names = [name for name, _ in candidates]
+                    print(
+                        f"[{username_clean}] [HostDetect:live_intro] event received; "
+                        f"field={field_name or 'none'} candidates={candidate_names} attrs={attr_names}"
+                    )
+                    if not text:
+                        log_activity_event(
+                            "host_check",
+                            f"LiveIntroEvent received on @{username_clean} but no intro text was extracted "
+                            f"(fields: {attr_names}).",
+                            username_clean,
+                        )
+                        try:
+                            runtime_status.update_observer_diag(
+                                username_clean,
+                                last_intro_source="live_intro",
+                                last_intro_origin="event_no_text",
+                                last_intro_preview="",
+                                last_intro_at=datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%Y-%m-%d %H:%M:%S'),
+                            )
+                        except Exception:
+                            pass
+                        return
+                    _cache_live_intro_text(username_clean, text)
+                    await check_and_update_host_from_text(
+                        text,
+                        sender_username=username_clean,
+                        source="live_intro",
+                        origin=f"live_intro_event:{field_name or 'content'}",
+                    )
                 except Exception as e:
                     print(f"[{username_clean}] Error in on_live_intro handler: {e}")
+                    log_activity_event("error", f"LiveIntroEvent handler error on @{username_clean}: {e}", username_clean)
 
         if NoticeEvent:
             @client.on(NoticeEvent)
@@ -473,11 +760,25 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 print(f"[{username_clean}] Error handling GiftEvent: {e}")
 
         cycle_error = None
+        client_task = None
         try:
-            # Jalankan client koneksi TikTok Live
-            await client.start()
+            # TikTokLive v7's start() is non-blocking: it returns the websocket
+            # task immediately. Await the task so the observer does not create a
+            # new client every cycle while old clients keep running.
+            try:
+                client_task = await client.start(fetch_room_info=True)
+            except Exception as room_info_error:
+                err_text = str(room_info_error).lower()
+                if "age" in err_text and "restrict" in err_text:
+                    print(f"[{username_clean}] Room info unavailable (age-restricted); connecting without it.")
+                    client_task = await client.start(fetch_room_info=False)
+                else:
+                    raise
+            await client_task
         except asyncio.CancelledError:
             # Observer stopped by supervisor (host paused/removed/restarted).
+            if client_task and not client_task.done():
+                client_task.cancel()
             if disconnect_timer_task and not disconnect_timer_task.done():
                 disconnect_timer_task.cancel()
             if is_connected and current_session_id:
@@ -517,6 +818,25 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     disconnect_timer_task = asyncio.create_task(delayed_disconnect_handler(current_session_id))
                     current_session_id = None
 
+            # Release this cycle's client. TikTokLive v7 starts non-blocking, so
+            # an un-awaited task would otherwise leave sockets running forever.
+            if client_task and not client_task.done():
+                client_task.cancel()
+                try:
+                    await client_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+            try:
+                disconnector = getattr(client, "disconnect", None)
+                if disconnector:
+                    result = disconnector(close_client=True)
+                    if asyncio.iscoroutine(result):
+                        await result
+            except Exception as e:
+                print(f"[{username_clean}] Client cleanup error: {e}")
+
         # Secondary probe: if the event client didn't connect but TikTok reports live,
         # mark status/announcement so the dashboard is not stuck on "No Live Now".
         grace_pending = bool(disconnect_timer_task and not disconnect_timer_task.done())
@@ -534,6 +854,8 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     print(f"[{username_clean}] Probe confirms live during grace period; keeping live status.")
                 if not probed_live and username_clean not in get_current_live_hosts():
                     probed_live = True
+                    if current_host == "Host":
+                        await try_live_intro_fallback(client, "probe", log_missing=False)
                     runtime_status.set_live(username_clean, current_host, source="probe")
                     if not current_session_id:
                         current_session_id = start_live_session(username_clean, initial_host=current_host)
@@ -619,6 +941,31 @@ async def run_all_observers(announcement_callback, role_callback, comment_callba
         log_activity_event("system", "Observer supervisor started.", "")
     except Exception:
         pass
+    if LiveIntroEvent is None:
+        print(
+            "[Observer System] LiveIntroEvent is unavailable in the installed TikTokLive; "
+            "host detection will use the strict room-info intro fallback only."
+        )
+        try:
+            log_activity_event(
+                "system",
+                "LiveIntroEvent is unavailable in the installed TikTokLive; strict intro fallback only.",
+                "",
+            )
+        except Exception:
+            pass
+    else:
+        print("[Observer System] LiveIntroEvent support enabled; host detection source is Live Intro only.")
+    try:
+        aliases = get_host_aliases()
+        alias_preview = ", ".join(f"{a}->{h}" for a, h in aliases[:40])
+        print(f"[Observer System] Host aliases loaded ({len(aliases)}): {alias_preview}")
+        try:
+            log_activity_event("system", f"Host aliases loaded ({len(aliases)}): {alias_preview}", "")
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[Observer System] Failed to load host aliases: {e}")
 
     while True:
         target_users = [u.lower().lstrip("@") for u in get_active_hosts() if u]

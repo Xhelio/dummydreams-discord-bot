@@ -589,6 +589,14 @@ def init_db():
                 )
             conn.commit()
 
+        # Repair stale/incorrect aliases once (e.g. an "angel" alias pointing
+        # to another host). This is safe: it only fills missing canonical
+        # aliases and corrects aliases whose name is itself a real host name.
+        try:
+            repair_host_aliases(conn)
+        except Exception as e:
+            print(f"[DB Migration] Host alias repair failed: {e}")
+
         # Seed role tiers from the legacy JSON config only once.
         seeded = conn.execute("SELECT value FROM bot_settings WHERE key = 'tiers_seeded'").fetchone()
         tier_count = conn.execute("SELECT COUNT(*) FROM role_tiers").fetchone()[0]
@@ -748,6 +756,59 @@ HOST_ALIASES = {
     # Angel
     "angel": "Angel",
 }
+
+
+def repair_host_aliases(conn=None):
+    """One-time repair of stale/corrupt host alias mappings.
+
+    - Adds missing canonical aliases from HOST_ALIASES.
+    - Corrects an alias that is itself a real host name but points elsewhere
+      (for example ``angel -> Sinta``).
+    - Leaves custom aliases such as ``mommy -> Sinta`` untouched.
+    """
+    own = conn is None
+    if own:
+        conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        marker = cur.execute(
+            "SELECT value FROM bot_settings WHERE key = 'host_aliases_repair_v1'"
+        ).fetchone()
+        if marker and str(marker[0]) == "1":
+            return
+
+        canonical = {str(k).lower(): str(v) for k, v in HOST_ALIASES.items()}
+        canonical_hosts = {host.lower(): host for host in set(canonical.values())}
+        changes = []
+        for alias, host in canonical.items():
+            row = cur.execute(
+                "SELECT host_name FROM host_aliases WHERE alias = ?", (alias,)
+            ).fetchone()
+            if not row:
+                cur.execute(
+                    "INSERT OR IGNORE INTO host_aliases (alias, host_name) VALUES (?, ?)",
+                    (alias, host),
+                )
+                changes.append(f"added {alias}->{host}")
+                continue
+            existing = str(row[0] or "").strip()
+            if alias in canonical_hosts and existing.lower() != host.lower():
+                cur.execute(
+                    "UPDATE host_aliases SET host_name = ? WHERE alias = ?",
+                    (host, alias),
+                )
+                changes.append(f"fixed {alias}: {existing or '(empty)'}->{host}")
+
+        cur.execute(
+            "INSERT OR REPLACE INTO bot_settings (key, value) VALUES ('host_aliases_repair_v1', '1')"
+        )
+        conn.commit()
+        invalidate_host_alias_cache()
+        if changes:
+            print("[DB Migration] Host alias repair: " + "; ".join(changes[:30]))
+    finally:
+        if own:
+            conn.close()
 
 _HOST_ALIAS_CACHE = {"loaded_at": 0, "items": None}
 
