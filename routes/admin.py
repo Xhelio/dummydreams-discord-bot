@@ -594,7 +594,7 @@ def add_host():
         )
         conn.commit()
         conn.close()
-    return redirect('/admin/monitor')
+    return redirect('/admin/monitor?msg=' + quote_plus('Host ditambahkan/diperbarui.') + '&msg_type=success')
 
 @admin_bp.route('/toggle-host/<int:host_id>')
 def toggle_host(host_id):
@@ -602,7 +602,7 @@ def toggle_host(host_id):
     conn.execute("UPDATE hosts SET is_active = CASE WHEN is_active = 1 THEN 0 ELSE 1 END WHERE host_id = ?", (host_id,))
     conn.commit()
     conn.close()
-    return redirect('/admin/monitor')
+    return redirect('/admin/monitor?msg=' + quote_plus('Status aktif host diperbarui.') + '&msg_type=success')
 
 @admin_bp.route('/delete-host/<int:host_id>')
 def delete_host(host_id):
@@ -610,7 +610,7 @@ def delete_host(host_id):
     conn.execute("DELETE FROM hosts WHERE host_id = ?", (host_id,))
     conn.commit()
     conn.close()
-    return redirect('/admin/monitor')
+    return redirect('/admin/monitor?msg=' + quote_plus('Host dihapus.') + '&msg_type=success')
 
 @admin_bp.route('/edit-coin', methods=['POST'])
 def edit_coin():
@@ -621,12 +621,12 @@ def edit_coin():
         conn.execute("UPDATE tiktok_gifts SET total_coins = ? WHERE LOWER(tiktok_user) = ?", (new_coins, username))
         conn.commit()
         conn.close()
-    return redirect('/admin/viewers')
+    return redirect('/admin/viewers?msg=' + quote_plus('Coins viewer diperbarui.') + '&msg_type=success')
 
 @admin_bp.route('/sync-hosts', methods=['POST'])
 def sync_hosts_action():
     sync_valid_hosts()
-    return redirect('/admin/monitor')
+    return redirect('/admin/monitor?msg=' + quote_plus('Sinkronisasi host selesai.') + '&msg_type=success')
 
 @admin_bp.route('/activity', methods=['GET'])
 def view_activity():
@@ -987,7 +987,7 @@ def unclaim_user_admin(discord_id):
 @admin_bp.route('/clear-activity-logs', methods=['POST'])
 def clear_activity():
     clear_activity_logs()
-    return redirect('/admin/activity')
+    return redirect('/admin/activity?msg=' + quote_plus('Activity log dibersihkan.') + '&msg_type=success')
 
 @admin_bp.route('/reset-db', methods=['POST'])
 def reset_db():
@@ -1000,7 +1000,7 @@ def reset_db():
     conn.execute("DELETE FROM activity_logs")
     conn.commit()
     conn.close()
-    return redirect('/admin/data')
+    return redirect('/admin/data?msg=' + quote_plus('Database live/gift/log di-reset.') + '&msg_type=warning')
 
 @admin_bp.route('/tiktok-reconnect', methods=['POST'])
 def tiktok_reconnect():
@@ -1009,7 +1009,7 @@ def tiktok_reconnect():
         print(f"[Admin] TikTok reconnect requested for: {targets}")
     except Exception as e:
         print(f"[Admin] Failed to request TikTok reconnect: {e}")
-    return redirect('/admin/monitor')
+    return redirect('/admin/monitor?msg=' + quote_plus('Reconnect observer diminta.') + '&msg_type=info')
 
 
 @admin_bp.route('/reset-live-state', methods=['POST'])
@@ -1035,4 +1035,4 @@ def reset_live_state_route():
         print(f"[Admin] Live state reset and TikTok reconnect requested for: {targets}")
     except Exception as e:
         print(f"[Admin] Failed to reset live state/reconnect: {e}")
-    return redirect('/admin/monitor')
+    return redirect('/admin/monitor?msg=' + quote_plus('Live state di-reset dan reconnect diminta.') + '&msg_type=warning')

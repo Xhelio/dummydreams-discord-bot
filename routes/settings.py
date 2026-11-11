@@ -3,8 +3,12 @@
 import json
 import re
 from datetime import datetime
+from urllib.parse import quote_plus
 import pytz
 from flask import Blueprint, render_template_string, request, redirect
+
+def _url_q(text: str) -> str:
+    return quote_plus(str(text or ""))
 
 from db import (
     get_setting,
@@ -97,6 +101,8 @@ def view_settings():
     tiers_reset = get_role_tiers("reset")
     tiers_permanent = get_role_tiers("permanent")
     saved = request.args.get("saved") == "1"
+    flash_msg = request.args.get("msg", "").strip()
+    flash_type = request.args.get("msg_type", "success").strip() or "success"
 
     html = """
     <!DOCTYPE html>
@@ -113,7 +119,9 @@ def view_settings():
         </div>
         NAV_HTML_PLACEHOLDER
 
-        {% if saved %}
+        {% if flash_msg %}
+        <div class="notice-{{ flash_type if flash_type in ['success','info','warning','danger'] else 'success' }}">{{ flash_msg }}</div>
+        {% elif saved %}
         <div class="notice-success">✅ Settings saved. Changes are applied by the bot immediately.</div>
         {% endif %}
 
@@ -431,6 +439,8 @@ def view_settings():
         tiers_reset=tiers_reset,
         tiers_permanent=tiers_permanent,
         saved=saved,
+        flash_msg=flash_msg,
+        flash_type=flash_type,
         non_priority_mode=non_priority_mode,
         non_priority_slow_seconds=non_priority_slow_seconds,
     )
@@ -512,7 +522,7 @@ def save_settings():
         except Exception as e:
             print(f"[Settings] Presence refresh failed: {e}")
 
-    return redirect("/admin/settings?saved=1")
+    return redirect("/admin/settings?msg=" + _url_q("✅ Settings disimpan. Perubahan diterapkan.") + "&msg_type=success")
 
 
 @settings_bp.route("/settings/tier/add", methods=["POST"])
@@ -525,13 +535,14 @@ def add_tier():
         min_coins = 0
     if role_id.isdigit():
         add_role_tier(group_key, role_id, min_coins)
-    return redirect("/admin/settings")
+        return redirect("/admin/settings?msg=" + _url_q("Tier ditambahkan.") + "&msg_type=success")
+    return redirect("/admin/settings?msg=" + _url_q("Role ID tidak valid.") + "&msg_type=warning")
 
 
 @settings_bp.route("/settings/tier/delete/<int:tier_id>", methods=["POST"])
 def remove_tier(tier_id):
     delete_role_tier(tier_id)
-    return redirect("/admin/settings")
+    return redirect("/admin/settings?msg=" + _url_q("Tier dihapus.") + "&msg_type=success")
 
 
 @settings_bp.route("/settings/host/add", methods=["POST"])
@@ -551,7 +562,7 @@ def add_target_host():
             conn.commit()
         finally:
             conn.close()
-    return redirect("/admin/settings")
+    return redirect("/admin/settings?msg=" + _url_q("Host ditambahkan/diperbarui.") + "&msg_type=success")
 
 
 @settings_bp.route("/settings/host/delete/<int:host_id>", methods=["POST"])
@@ -577,7 +588,7 @@ def save_host_priority_mode():
     set_setting("non_priority_mode", mode)
     set_setting("non_priority_slow_seconds", str(slow_seconds))
     log_activity_event("system", f"Host priority mode updated: non-priority={mode}, slow_seconds={slow_seconds}.", "")
-    return redirect("/admin/settings")
+    return redirect("/admin/settings?msg=" + _url_q("Mode prioritas host disimpan.") + "&msg_type=success")
 
 
 @settings_bp.route("/settings/hosts/save", methods=["POST"])
@@ -606,7 +617,7 @@ def save_hosts_batch():
     finally:
         conn.close()
     log_activity_event("system", f"Batch host settings saved (changed={changed}, deleted={deleted}).", "")
-    return redirect("/admin/settings?saved=1")
+    return redirect("/admin/settings?msg=" + _url_q(f"Perubahan host disimpan (changed={changed}, deleted={deleted}).") + "&msg_type=success")
 
 
 @settings_bp.route("/toggle-host-priority/<int:host_id>")
@@ -623,16 +634,16 @@ def toggle_host_priority_route(host_id):
             log_activity_event("system", f"Host @{(row[0] or '').lower()} set to {state}.", (row[0] or "").lower())
     finally:
         conn.close()
-    return redirect("/admin/settings")
+    return redirect("/admin/settings?msg=" + _url_q("Host dihapus.") + "&msg_type=success")
 
 
 @settings_bp.route("/settings/alias/add", methods=["POST"])
 def add_alias():
     add_host_alias(request.form.get("alias", ""), request.form.get("host_name", ""))
-    return redirect("/admin/settings")
+    return redirect("/admin/settings?msg=" + _url_q("Alias disimpan.") + "&msg_type=success")
 
 
 @settings_bp.route("/settings/alias/delete", methods=["POST"])
 def remove_alias():
     delete_host_alias(request.form.get("alias", ""))
-    return redirect("/admin/settings")
+    return redirect("/admin/settings?msg=" + _url_q("Alias dihapus.") + "&msg_type=success")
