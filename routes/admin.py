@@ -727,10 +727,13 @@ def view_activity():
 
         <!-- LIVE STREAM FEED TERMINAL -->
         <div class="card">
-            <h2>📜 Live Activity Feed (Stream Console)</h2>
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom: 8px;">
+                <h2 style="margin:0;">📜 Live Activity Feed (Stream Console)</h2>
+                <button type="button" class="btn" id="copy-all-log-btn" onclick="copyAllActivityLog()" style="background:#334155; border:1px solid #475569; padding:8px 12px;">📋 Copy All Log</button>
+            </div>
             <div class="terminal-container" id="terminal-feed">
                 {% for log in logs %}
-                <div class="terminal-row">
+                <div class="terminal-row" data-log-ts="{{ log[4] }}" data-log-type="{{ log[1] }}" data-log-msg="{{ log[3]|e }}">
                     <span style="color: #64748b; font-size: 0.75rem; min-width: 140px;">[{{ log[4] }}]</span>
                     {% if log[1] == 'connect' %}
                         <span class="log-tag-connect">CONNECT</span>
@@ -771,6 +774,42 @@ def view_activity():
                 {% endfor %}
             </div>
         </div>
+
+        <script>
+        async function copyAllActivityLog() {
+            const rows = Array.from(document.querySelectorAll('#terminal-feed .terminal-row'));
+            let text = rows.map(row => {
+                const ts = row.getAttribute('data-log-ts') || '';
+                const type = (row.getAttribute('data-log-type') || '').toUpper();
+                const msg = row.getAttribute('data-log-msg') || (row.innerText || '').trim();
+                return `[${ts}] [${type}] ${msg}`.trim();
+            }).filter(Boolean).join('\n');
+            if (!text) {
+                text = 'No activity log lines available.';
+            }
+            const btn = document.getElementById('copy-all-log-btn');
+            const original = btn ? btn.textContent : '';
+            try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(text);
+                } else {
+                    const ta = document.createElement('textarea');
+                    ta.value = text;
+                    ta.style.position = 'fixed';
+                    ta.style.opacity = '0';
+                    document.body.appendChild(ta);
+                    ta.focus();
+                    ta.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(ta);
+                }
+                if (btn) { btn.textContent = '✅ Copied'; setTimeout(() => btn.textContent = original, 1500); }
+            } catch (e) {
+                if (btn) { btn.textContent = '❌ Copy failed'; setTimeout(() => btn.textContent = original, 1500); }
+                console.error('Copy failed', e);
+            }
+        }
+        </script>
 
         AUTO_REFRESH_JS_PLACEHOLDER
     </body>

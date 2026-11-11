@@ -855,13 +855,23 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             cycle_error = e
             err = str(e)
             consecutive_failures += 1
+            err_lower = err.lower()
+            is_rate_limited = ("rate_limit" in err_lower) or ("too many connections" in err_lower) or ("eulerstream" in err_lower)
             runtime_status.update_observer_diag(
                 username_clean,
-                status="error",
+                status="rate_limited" if is_rate_limited else "error",
                 consecutive_failures=consecutive_failures,
                 last_error=err[:300],
+                rate_limited=is_rate_limited,
             )
-            if "offline" in err.lower() or "not found" in err.lower():
+            if is_rate_limited:
+                print(f"[{username_clean}] Websocket rate-limited (failures={consecutive_failures}): {e}")
+                log_activity_event(
+                    "error",
+                    f"[Debug @{username_clean}] Websocket RATE LIMITED (failures={consecutive_failures}, connected_this_cycle={connected_this_cycle}, host={current_host}) - backing off to avoid further rate limits: {err}",
+                    username_clean,
+                )
+            elif "offline" in err_lower or "not found" in err_lower:
                 print(f"[{username_clean}] Not live/offline check: {e}")
                 log_activity_event(
                     "system",
@@ -952,8 +962,11 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     runtime_status.touch_live(username_clean)
                     if current_host == "Host":
                         await try_live_intro_fallback(client, "probe_retry", log_missing=False, allow_when_not_connected=True)
-                # Reset backoff so we keep trying to establish websocket for LiveIntroEvent.
-                consecutive_failures = 0
+                # Reset backoff so we keep trying to establish websocket for LiveIntroEvent,
+                # unless we are rate-limited (must back off to recover).
+                last_err = str(cycle_error or "").lower()
+                if not (("rate_limit" in last_err) or ("too many connections" in last_err) or ("eulerstream" in last_err)):
+                    consecutive_failures = 0
             elif probe_result is False and not grace_pending:
                 if probed_live:
                     runtime_status.clear_live(username_clean)
@@ -975,9 +988,26 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             probe_result = False if connected_this_cycle else None
 
         # Adaptive retry: back off slightly on repeated failures, but keep checking.
+        err_lower_cycle = str(cycle_error or "").lower()
+        rate_limited_cycle = ("rate_limit" in err_lower_cycle) or ("too many connections" in err_lower_cycle) or ("eulerstream" in err_lower_cycle)
         if reconnect_state.get("triggered"):
             wait_seconds = 2
             runtime_status.update_observer_diag(username_clean, status="reconnecting")
+        elif rate_limited_cycle:
+            # Back off hard on sign-server/account rate limits to avoid prolonging lockout.
+            wait_seconds = 600
+            if consecutive_failures >= 5:
+                wait_seconds = 900
+            runtime_status.update_observer_diag(username_clean, status="rate_limited_backoff", wait_seconds=wait_seconds)
+            log_activity_event(
+                "system",
+                f"[Debug @{username_clean}] Rate-limited websocket; backing off {wait_seconds}s before retry (failures={consecutive_failures}, probe_online={probe_result is True}).",
+                username_clean,
+            )
+        elif probe_result is True and not connected_this_cycle:
+            # Account is online (probe) but websocket event client not connected: retry soon to receive LiveIntroEvent.
+            wait_seconds = 10
+            runtime_status.update_observer_diag(username_clean, status="online_waiting_websocket", wait_seconds=wait_seconds)
         else:
             wait_seconds = 30
             if not connected_this_cycle and consecutive_failures >= 5:
