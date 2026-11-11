@@ -1,6 +1,7 @@
 """Admin panel for bot toggles, channels, hosts, aliases and role tiers."""
 
 import json
+import os
 import re
 from datetime import datetime
 from urllib.parse import quote_plus
@@ -102,6 +103,7 @@ def view_settings():
     tiers_permanent = get_role_tiers("permanent")
     saved = request.args.get("saved") == "1"
     flash_msg = request.args.get("msg", "").strip()
+    signer_configured = bool((os.environ.get("SIGN_API_KEY") or os.environ.get("TIKTOK_SIGN_API_KEY") or "").strip())
     flash_type = request.args.get("msg_type", "success").strip() or "success"
 
     html = """
@@ -304,6 +306,17 @@ def view_settings():
 
         <div class="card">
             <h2>🎯 Target Hosts & Prioritas Koneksi</h2>
+            <div class="{{ 'notice-success' if signer_configured else 'notice-warning' }}">
+                {% if signer_configured %}
+                ✅ EulerStream sign API key terdeteksi (<code>SIGN_API_KEY</code>). Rate limit per akun harian lebih tinggi.
+                {% else %}
+                ⚠️ <strong>Belum ada EulerStream API key.</strong> Free tier membatasi koneksi per akun per hari
+                (<code>rate_limit_account_day</code>) sehingga websocket bisa gagal connect dan host tidak terdeteksi.
+                Set environment variable <code>SIGN_API_KEY</code> di Render (key dari
+                <a href="https://www.eulerstream.com/pricing" target="_blank" rel="noopener">eulerstream.com/pricing</a>),
+                lalu redeploy. Bot otomatis memakainya.
+                {% endif %}
+            </div>
             <p class="muted">Pilih akun prioritas untuk koneksi/deteksi rate normal. Akun non-prioritas akan mengikuti mode di bawah (lambat/non-aktif) untuk mengurangi beban/rate limit.</p>
             <form action="/admin/settings/host-priority-mode" method="POST" class="form-grid" style="grid-template-columns: 1fr 1fr auto; margin-bottom: 14px; align-items:end;">
                 <div>
@@ -440,6 +453,7 @@ def view_settings():
         tiers_permanent=tiers_permanent,
         saved=saved,
         flash_msg=flash_msg,
+        signer_configured=signer_configured,
         flash_type=flash_type,
         non_priority_mode=non_priority_mode,
         non_priority_slow_seconds=non_priority_slow_seconds,

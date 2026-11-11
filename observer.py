@@ -1,6 +1,7 @@
 import asyncio
+import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 from TikTokLive import TikTokLiveClient
 from TikTokLive.events import (
@@ -320,6 +321,83 @@ def clear_active_live_status(username: str):
     finally:
         conn.close()
 
+# --- Sign-server (EulerStream) API key -------------------------------------------
+# Rate limits are per account/day on the free tier. An API key raises them.
+# Priority: SIGN_API_KEY / TIKTOK_SIGN_API_KEY env var, then DB setting "sign_api_key".
+_SIGN_KEY_LOGGED = {"value": None}
+
+
+def _apply_sign_api_key() -> bool:
+    key = (os.environ.get("SIGN_API_KEY") or os.environ.get("TIKTOK_SIGN_API_KEY") or "").strip()
+    if not key:
+        try:
+            key = (get_setting("sign_api_key", "") or "").strip()
+        except Exception:
+            key = ""
+    if not key:
+        return False
+    try:
+        from TikTokLive.client.web.web_settings import WebDefaults
+        WebDefaults.tiktok_sign_api_key = key
+    except Exception as e:
+        print(f"[Signer] Could not apply EulerStream API key: {e}")
+        return False
+    if _SIGN_KEY_LOGGED["value"] != key[:6]:
+        _SIGN_KEY_LOGGED["value"] = key[:6]
+        print("[Signer] EulerStream API key applied (higher rate limits).")
+        log_activity_event("system", "[Debug] EulerStream sign API key detected; using it for websocket signing.", "")
+    return True
+
+
+# --- Rate limit cooldown helpers -------------------------------------------------
+# EulerStream/TikTokLive rate limits are per account (and often per day). Persist
+# the cooldown so a redeploy/restart does not immediately burn more attempts.
+_LAST_OFFLINE_LOG = {}
+_OFFLINE_LOG_INTERVAL_SECONDS = 600
+
+
+def _is_reconnect_requested(username: str) -> bool:
+    with _RECONNECT_REQUESTED_LOCK:
+        return username in _RECONNECT_REQUESTED
+
+
+def _clear_rate_limit_state(username: str) -> None:
+    """Reset persisted rate-limit strikes/cooldown for an account (cheap no-op if clean)."""
+    try:
+        if str(get_setting(f"rl_strikes:{username}", "0") or "0") == "0":
+            return
+        set_setting(f"rl_strikes:{username}", "0")
+        set_setting(f"rl_until:{username}", "0")
+    except Exception:
+        pass
+
+
+def _rate_limit_cooldown_seconds(username: str, err_text: str) -> int:
+    """Escalating, persisted cooldown for sign-server/account rate limits."""
+    key = f"rl_strikes:{username}"
+    try:
+        strikes = int(get_setting(key, "0") or 0) + 1
+    except Exception:
+        strikes = 1
+    try:
+        set_setting(key, str(strikes))
+    except Exception:
+        pass
+    cooldown = {1: 1800, 2: 3600, 3: 7200}.get(strikes, 10800)
+    text = (err_text or "").lower()
+    if "account_day" in text or "rate limit" in text:
+        # Daily per-account quota exhausted: wait for the next UTC day reset.
+        now = datetime.now(pytz.UTC)
+        next_reset = (now + timedelta(days=1)).replace(hour=0, minute=10, second=0, microsecond=0)
+        until_reset = max(1800, int((next_reset - now).total_seconds()))
+        cooldown = max(cooldown, min(until_reset, 6 * 3600))
+    try:
+        set_setting(f"rl_until:{username}", str(int(time.time()) + cooldown))
+    except Exception:
+        pass
+    return cooldown
+
+
 async def start_single_observer(tiktok_username: str, announcement_callback, role_callback, comment_callback=None):
     username_clean = tiktok_username.lower().lstrip("@")
     current_session_id = None
@@ -487,10 +565,39 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             runtime_status.update_observer_diag(username_clean, status="non_priority_off", connect_mode="off")
             await asyncio.sleep(60)
             continue
+        # Respect persisted rate-limit cooldown so restarts/redeploys don't burn
+        # more daily-quota attempts. Manual Reconnect/Reset overrides it.
+        try:
+            rl_until = int(float(get_setting(f"rl_until:{username_clean}", "0") or 0))
+        except Exception:
+            rl_until = 0
+        remaining_cooldown = rl_until - int(time.time())
+        if remaining_cooldown > 0 and not _is_reconnect_requested(username_clean):
+            runtime_status.update_observer_diag(
+                username_clean,
+                status="rate_limited_cooldown",
+                wait_seconds=remaining_cooldown,
+                rate_limited=True,
+            )
+            log_activity_event(
+                "system",
+                f"[Debug @{username_clean}] Rate-limit cooldown active; waiting {max(1, remaining_cooldown // 60)}m before retry "
+                f"(EulerStream daily quota per account). Manual Reconnect/Reset overrides.",
+                username_clean,
+            )
+            for _ in range(remaining_cooldown):
+                if _is_reconnect_requested(username_clean):
+                    break
+                await asyncio.sleep(1)
+            continue
         try:
             slow_seconds = max(60, int(get_setting("non_priority_slow_seconds", "300") or 300))
         except Exception:
             slow_seconds = 300
+        try:
+            _apply_sign_api_key()
+        except Exception:
+            pass
         client = TikTokLiveClient(unique_id=username_clean)
         connected_this_cycle = False
         reconnect_state = {"triggered": False}
@@ -886,12 +993,17 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     username_clean,
                 )
             elif "offline" in err_lower or "not found" in err_lower or "useroffline" in err_lower:
-                print(f"[{username_clean}] Not live/offline check: {err_detail}")
-                log_activity_event(
-                    "system",
-                    f"[Debug @{username_clean}] Websocket client not live/offline (failures={consecutive_failures}): {err_detail}",
-                    username_clean,
-                )
+                # Offline is a normal state, not an error: throttle logging so the
+                # activity feed stays readable while we keep polling.
+                last_log = _LAST_OFFLINE_LOG.get(username_clean, 0)
+                if time.time() - last_log >= _OFFLINE_LOG_INTERVAL_SECONDS:
+                    _LAST_OFFLINE_LOG[username_clean] = time.time()
+                    print(f"[{username_clean}] Not live/offline check: {err_detail}")
+                    log_activity_event(
+                        "system",
+                        f"[Debug @{username_clean}] Not live/offline (checks={consecutive_failures}, logged every {_OFFLINE_LOG_INTERVAL_SECONDS // 60}m): {err_detail}",
+                        username_clean,
+                    )
             else:
                 print(f"[{username_clean}] Observer error while checking live (failures={consecutive_failures}): {err_detail}")
                 log_activity_event(
@@ -1003,6 +1115,8 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         else:
             consecutive_failures = 0
             probe_result = False if connected_this_cycle else None
+            _clear_rate_limit_state(username_clean)
+            _LAST_OFFLINE_LOG.pop(username_clean, None)
 
         # Adaptive retry: back off slightly on repeated failures, but keep checking.
         err_lower_cycle = str(cycle_error or "").lower()
@@ -1013,13 +1127,13 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             runtime_status.update_observer_diag(username_clean, status="reconnecting")
         elif rate_limited_cycle:
             # Back off hard on sign-server/account rate limits to avoid prolonging lockout.
-            wait_seconds = 600
-            if consecutive_failures >= 5:
-                wait_seconds = 900
-            runtime_status.update_observer_diag(username_clean, status="rate_limited_backoff", wait_seconds=wait_seconds)
+            wait_seconds = _rate_limit_cooldown_seconds(username_clean, str(cycle_error or ""))
+            runtime_status.update_observer_diag(username_clean, status="rate_limited_backoff", wait_seconds=wait_seconds, rate_limited=True)
             log_activity_event(
                 "system",
-                f"[Debug @{username_clean}] Rate-limited websocket; backing off {wait_seconds}s before retry (failures={consecutive_failures}, probe_online={probe_result is True}).",
+                f"[Debug @{username_clean}] Rate-limited websocket; backing off {wait_seconds}s (~{max(1, wait_seconds // 60)}m) before retry "
+                f"(failures={consecutive_failures}, probe_online={probe_result is True}). "
+                f"Persistent limit? Add an EulerStream API key: https://www.eulerstream.com/pricing",
                 username_clean,
             )
         elif json_empty_cycle:
@@ -1068,6 +1182,10 @@ def request_tiktok_reconnect(username: str = None):
         for target in targets:
             if target:
                 _RECONNECT_REQUESTED.add(target)
+    # Manual reconnect is an explicit admin override: clear persisted rate-limit cooldown.
+    for target in targets:
+        if target:
+            _clear_rate_limit_state(target)
     with _HOST_RECONFIRM_REQUESTED_LOCK:
         for target in targets:
             if target:

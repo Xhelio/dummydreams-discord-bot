@@ -453,6 +453,44 @@ def view_monitor():
             "host_name": (live_item or {}).get("host") or open_hosts.get(uname) or h[2] or h[1],
         })
 
+    # Observer/connection diagnostics (rate limits, offline polling, cooldowns...).
+    observer_diag = {}
+    try:
+        from runtime_status import get_observer_diag
+        observer_diag = get_observer_diag() or {}
+    except Exception:
+        observer_diag = {}
+    signer_configured = bool((os.environ.get("SIGN_API_KEY") or os.environ.get("TIKTOK_SIGN_API_KEY") or "").strip())
+    conn_states = []
+    rate_limited_any = False
+    for h in hosts:
+        d = observer_diag.get((h["username"] or "").lower(), {}) or {}
+        status = (d.get("status") or "unknown").lower()
+        wait_seconds = int(d.get("wait_seconds") or 0)
+        if status.startswith("rate_limited"):
+            rate_limited_any = True
+        if status in ("rate_limited_cooldown", "rate_limited_backoff"):
+            label = f"⏳ Rate limited — retry in {max(1, wait_seconds // 60)}m"
+        elif status == "online_waiting_websocket":
+            label = "🟡 Online (probe) — waiting websocket for LiveIntro"
+        elif status in ("offline",):
+            label = "⚪ Offline (polling)"
+        elif status in ("connected", "connected_with_handler_error"):
+            label = "🟢 Connected (websocket)"
+        elif status == "non_priority_off":
+            label = "💤 Paused (non-priority off)"
+        elif status in ("error", "error_json_response"):
+            label = "🔴 Connection error"
+        else:
+            label = status.replace("_", " ").capitalize() if status else "Unknown"
+        conn_states.append({
+            "username": h["username"],
+            "label": label,
+            "status": status,
+            "last_error": (d.get("last_error") or "")[:180],
+            "connect_mode": d.get("connect_mode") or "normal",
+        })
+
     sessions = []
     for s in session_rows:
         uname = (s[1] or "").lower()
@@ -481,6 +519,43 @@ def view_monitor():
             <h1>📹 Realtime Live Monitor</h1>
         </div>
         NAV_HTML_PLACEHOLDER
+
+        {% if rate_limited_any %}
+        <div class="notice-warning">
+            ⚠️ Satu atau lebih akun sedang kena <strong>rate limit sign-server</strong> (EulerStream), jadi websocket
+            tidak bisa connect dan <code>LiveIntroEvent</code> tidak diterima. Tambahkan API key di
+            <a href="https://www.eulerstream.com/pricing" target="_blank" rel="noopener">eulerstream.com/pricing</a>
+            atau tunggu cooldown selesai. Tombol <em>Refresh/Reset</em> akan mencoba ulang sekarang (memakai kuota).
+        </div>
+        {% endif %}
+
+        <div class="card">
+            <h2>🔌 Connection Health</h2>
+            <div class="section-note">
+                Sign API key (EulerStream):
+                {% if signer_configured %}
+                <span class="badge badge-active">Configured</span>
+                {% else %}
+                <span class="badge badge-inactive">Not configured</span>
+                — set the <code>SIGN_API_KEY</code> environment variable to raise per-account daily limits.
+                {% endif %}
+            </div>
+            <div class="table-scroll">
+            <table>
+                <tr><th>Account</th><th>Mode</th><th>Status</th><th>Last Error</th></tr>
+                {% for c in conn_states %}
+                <tr>
+                    <td>@{{ c.username }}</td>
+                    <td>{{ c.connect_mode }}</td>
+                    <td>{{ c.label }}</td>
+                    <td style="max-width: 420px; white-space: normal; word-break: break-word; color: #94a3b8;">{{ c.last_error or '-' }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="4">No observer data yet.</td></tr>
+                {% endfor %}
+            </table>
+            </div>
+        </div>
 
         <div class="card">
             <h2>🎙️ TikTok Target Accounts</h2>
@@ -577,7 +652,7 @@ def view_monitor():
     </body>
     </html>
     """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
-    return render_template_string(html, hosts=hosts, sessions=sessions)
+    return render_template_string(html, hosts=hosts, sessions=sessions, conn_states=conn_states, rate_limited_any=rate_limited_any, signer_configured=signer_configured)
 
 # Handlers Form Admin
 @admin_bp.route('/add-host', methods=['POST'])

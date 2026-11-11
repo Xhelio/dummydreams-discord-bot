@@ -33,6 +33,11 @@ def health_check():
             "observer": get_observer_diag(),
         },
         "master_enabled": get_bool_setting("master_enabled", True),
+        "signer": {
+            "api_key_configured": bool(
+                (os.environ.get("SIGN_API_KEY") or os.environ.get("TIKTOK_SIGN_API_KEY") or "").strip()
+            ),
+        },
     }
     return jsonify(payload), 200
 
