@@ -453,6 +453,18 @@ def init_db():
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS discord_verification_status (
+                discord_id INTEGER PRIMARY KEY,
+                discord_name TEXT,
+                discord_handle TEXT,
+                guild_name TEXT,
+                has_role INTEGER,
+                role_name TEXT,
+                checked_at TEXT,
+                error TEXT
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS active_live_announcements (
                 tiktok_username TEXT NOT NULL,
                 channel_id TEXT NOT NULL,
@@ -1665,6 +1677,73 @@ def bind_user_mapping(discord_id: int, tiktok_user: str) -> bool:
         return False
     finally:
         conn.close()
+
+def save_verification_status(discord_id: int, discord_name: str = "", discord_handle: str = "",
+                             guild_name: str = "", has_role=None, role_name: str = "",
+                             error: str = "") -> bool:
+    """Menyimpan hasil verifikasi ulang role Discord untuk seorang member.
+
+    ``has_role`` = True (punya role), False (tidak punya), atau None (tidak bisa dicek).
+    """
+    wib = pytz.timezone('Asia/Jakarta')
+    checked_at = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
+    if has_role is None:
+        has_role_val = None
+    else:
+        has_role_val = 1 if has_role else 0
+    conn = get_db_connection()
+    try:
+        conn.execute("""
+            INSERT INTO discord_verification_status
+                (discord_id, discord_name, discord_handle, guild_name, has_role, role_name, checked_at, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(discord_id) DO UPDATE SET
+                discord_name = excluded.discord_name,
+                discord_handle = excluded.discord_handle,
+                guild_name = excluded.guild_name,
+                has_role = excluded.has_role,
+                role_name = excluded.role_name,
+                checked_at = excluded.checked_at,
+                error = excluded.error
+        """, (
+            int(discord_id), discord_name or "", discord_handle or "", guild_name or "",
+            has_role_val, role_name or "", checked_at, error or "",
+        ))
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"[DB Error] Failed to save verification status for {discord_id}: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_all_verification_status() -> dict:
+    """Mengambil status verifikasi role terakhir, dipetakan per discord_id."""
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        rows = cur.execute("""
+            SELECT discord_id, discord_name, discord_handle, guild_name,
+                   has_role, role_name, checked_at, error
+            FROM discord_verification_status
+        """).fetchall()
+        return {int(r[0]): r for r in rows}
+    except Exception as e:
+        print(f"[DB Error] Failed to load verification status: {e}")
+        return {}
+    finally:
+        conn.close()
+
+
+def delete_verification_status(discord_id: int):
+    conn = get_db_connection()
+    try:
+        conn.execute("DELETE FROM discord_verification_status WHERE discord_id = ?", (int(discord_id),))
+        conn.commit()
+    finally:
+        conn.close()
+
 
 def create_pending_verification(discord_id: int, tiktok_user: str, method: str = 'bio') -> str:
     """

@@ -1,5 +1,6 @@
 from flask import Blueprint, render_template_string, request, redirect
 from urllib.parse import quote_plus
+import asyncio
 import os
 try:
     import libsql_experimental as libsql
@@ -20,6 +21,9 @@ from db import (
     sync_valid_hosts,
     get_coin_integrity,
     recalculate_coin_totals,
+    get_all_verification_status,
+    save_verification_status,
+    delete_verification_status,
 )
 from runtime_status import get_live_snapshot, clear_all_live
 from verification import fetch_tiktok_display_name
@@ -1066,6 +1070,108 @@ def view_activity():
     """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
     return render_template_string(html, logs=logs, gift_activities=gift_activities, all_hosts=all_hosts, current_filter=channel_filter)
 
+def _get_bot_instance():
+    """Ambil instance bot Discord dari modul main (proses yang sama dengan Flask)."""
+    try:
+        import main as bot_module
+        return getattr(bot_module, "bot", None)
+    except Exception:
+        return None
+
+
+async def _fetch_member_from_guilds(bot, discord_id: int):
+    for guild in list(getattr(bot, "guilds", []) or []):
+        try:
+            member = await guild.fetch_member(discord_id)
+            return member, guild
+        except Exception:
+            continue
+    return None, None
+
+
+def check_discord_verification(discord_id: int, use_api: bool = True) -> dict:
+    """Cek apakah member Discord benar-benar punya role verifikasi.
+
+    use_api=True  -> boleh fetch live ke Discord kalau member tidak ada di cache.
+    use_api=False -> hanya baca cache bot (cepat, untuk render halaman).
+    """
+    info = {
+        "discord_name": "",
+        "discord_handle": "",
+        "guild_name": "",
+        "has_role": None,
+        "role_name": "",
+        "error": "",
+    }
+    try:
+        discord_id = int(discord_id)
+    except (TypeError, ValueError):
+        info["error"] = "Discord ID tidak valid."
+        return info
+
+    bot = _get_bot_instance()
+    if bot is None or not getattr(bot, "is_ready", lambda: False)():
+        info["error"] = "Bot Discord belum siap/berjalan."
+        return info
+
+    member = None
+    guild = None
+    for g in list(getattr(bot, "guilds", []) or []):
+        m = g.get_member(discord_id)
+        if m:
+            member, guild = m, g
+            break
+
+    if member is None and use_api:
+        loop = getattr(bot, "loop", None)
+        if loop and loop.is_running():
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    _fetch_member_from_guilds(bot, discord_id), loop
+                )
+                member, guild = future.result(timeout=10)
+            except Exception as e:
+                info["error"] = f"Gagal cek ke Discord: {e}"
+        else:
+            info["error"] = "Event loop bot tidak berjalan."
+
+    if member is None:
+        # Tetap tampilkan nama Discord kalau user masih ada di cache bot.
+        try:
+            user = bot.get_user(discord_id)
+        except Exception:
+            user = None
+        if user is not None:
+            info["discord_name"] = getattr(user, "display_name", None) or getattr(user, "name", "") or ""
+            info["discord_handle"] = str(user)
+        if not info["error"]:
+            info["error"] = (
+                "Member tidak ditemukan di server (mungkin sudah keluar)."
+                if use_api else "Belum dicek (member tidak ada di cache bot)."
+            )
+        return info
+
+    info["discord_name"] = getattr(member, "display_name", None) or getattr(member, "name", "") or ""
+    info["discord_handle"] = str(member)
+    info["guild_name"] = getattr(guild, "name", "") or ""
+
+    role = None
+    try:
+        import main as bot_module
+        role = bot_module.get_verified_role(guild)
+    except Exception as e:
+        info["error"] = f"Gagal membaca role verifikasi: {e}"
+        return info
+
+    if role is None:
+        info["error"] = "Role verifikasi belum diatur di Bot Settings."
+        return info
+
+    info["role_name"] = getattr(role, "name", "") or ""
+    info["has_role"] = bool(role in member.roles)
+    return info
+
+
 @admin_bp.route('/verifications', methods=['GET'])
 def view_verifications():
     try:
@@ -1088,6 +1194,19 @@ def view_verifications():
         conn.close()
     except Exception as e:
         return f"<h3>Database Error: {e}</h3>", 500
+
+    # Isi otomatis baris yang belum pernah dicek, hanya dari cache bot (tanpa API).
+    statuses = get_all_verification_status()
+    if any(u[0] not in statuses for u in users):
+        bot = _get_bot_instance()
+        if bot is not None and getattr(bot, "is_ready", lambda: False)():
+            for u in users:
+                if u[0] in statuses:
+                    continue
+                info = check_discord_verification(u[0], use_api=False)
+                if info.get("discord_name") or info.get("error"):
+                    save_verification_status(u[0], **info)
+        statuses = get_all_verification_status()
 
     verified_role_id = get_setting("verified_role_id", "")
     verification_channel_id = get_setting("verification_channel_id", "")
@@ -1126,31 +1245,68 @@ def view_verifications():
             <h2>✅ Verified Accounts (Discord &lt;-&gt; TikTok)</h2>
             <p style="color: #94a3b8; font-size: 0.85rem; margin-bottom: 12px;">
                 Discord accounts successfully linked to a TikTok account. Each account can only be claimed by one user.
+                Kolom <strong>Role Status</strong> mengecek langsung ke Discord apakah member benar-benar masih punya role verifikasi.
             </p>
+            <form action="/admin/reverify-all" method="POST" onsubmit="return confirm('Verifikasi ulang role semua akun terverifikasi?');" style="margin-bottom: 12px;">
+                <button type="submit" class="btn-save" style="background:#0e7490;">🔁 Verifikasi Ulang Semua</button>
+            </form>
+            <div class="table-scroll">
             <table>
                 <tr>
                     <th>Discord ID</th>
+                    <th>Discord Name</th>
                     <th>TikTok Username</th>
                     <th>Display Name</th>
                     <th>Total Coins</th>
+                    <th>Role Status</th>
                     <th>Action</th>
                 </tr>
                 {% for u in users %}
+                {% set st = statuses.get(u[0]) %}
                 <tr>
                     <td><code>{{ u[0] }}</code></td>
+                    <td>
+                        {% if st and st[1] %}
+                        <strong>{{ st[1] }}</strong><br>
+                        <span class="muted" style="font-size: 0.78rem;">{{ st[2] }}{% if st[3] %} · {{ st[3] }}{% endif %}</span>
+                        {% else %}
+                        <span class="muted">-</span>
+                        {% endif %}
+                    </td>
                     <td><strong>@{{ u[1] }}</strong></td>
                     <td>{{ u[3] or '-' }}</td>
                     <td><span class="badge">{{ u[2] }} c</span></td>
                     <td>
-                        <form action="/admin/unclaim-user/{{ u[0] }}" method="POST" onsubmit="return confirm('Remove the account link for Discord ID {{ u[0] }}?');" style="display:inline;">
+                        {% if not st %}
+                        <span class="badge" style="background:#475569;">Belum dicek</span>
+                        {% elif st[4] == 1 %}
+                        <span class="badge" style="background:#15803d;">✅ Punya role{% if st[5] %} ({{ st[5] }}){% endif %}</span>
+                        {% elif st[4] == 0 %}
+                        <span class="badge" style="background:#b91c1c;">❌ Belum punya role</span>
+                        {% else %}
+                        <span class="badge" style="background:#a16207;">⚠️ Tidak bisa dicek</span>
+                        {% endif %}
+                        {% if st and st[7] %}
+                        <br><span class="muted" style="font-size: 0.75rem;">{{ st[7] }}</span>
+                        {% endif %}
+                        {% if st and st[6] %}
+                        <br><span class="muted" style="font-size: 0.72rem;">dicek: {{ st[6] }} WIB</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <form action="/admin/reverify-user/{{ u[0] }}" method="POST" style="display:inline;">
+                            <button type="submit" class="btn-action" style="background:#0e7490;">🔁 Verifikasi Ulang</button>
+                        </form>
+                        <form action="/admin/unclaim-user/{{ u[0] }}" method="POST" onsubmit="return confirm('Remove the account link for Discord ID {{ u[0] }}?');" style="display:inline; margin-left: 6px;">
                             <button type="submit" class="btn-action btn-del">Unclaim</button>
                         </form>
                     </td>
                 </tr>
                 {% else %}
-                <tr><td colspan="5" style="text-align:center; color:#64748b;">No verified accounts yet.</td></tr>
+                <tr><td colspan="7" style="text-align:center; color:#64748b;">No verified accounts yet.</td></tr>
                 {% endfor %}
             </table>
+            </div>
         </div>
 
         <div class="card">
@@ -1183,12 +1339,74 @@ def view_verifications():
     </body>
     </html>
     """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
-    return render_template_string(html, users=users, pending=pending, verified_role_id=verified_role_id, verification_channel_id=verification_channel_id)
+    return render_template_string(html, users=users, pending=pending, verified_role_id=verified_role_id, verification_channel_id=verification_channel_id, statuses=statuses)
 
 @admin_bp.route('/save-verification-settings', methods=['POST'])
 def save_verification_settings():
     # Consolidated into /admin/settings to avoid duplicate/conflicting config.
     return redirect('/admin/settings')
+
+@admin_bp.route('/reverify-user/<int:discord_id>', methods=['POST'])
+def reverify_user(discord_id):
+    info = check_discord_verification(discord_id, use_api=True)
+    save_verification_status(discord_id, **info)
+    try:
+        from db import log_activity_event
+        log_activity_event(
+            "system",
+            f"Admin re-checked verification role for Discord ID {discord_id}: "
+            f"has_role={info.get('has_role')} role={info.get('role_name') or '-'} "
+            f"error={info.get('error') or '-'}.",
+            str(discord_id),
+        )
+    except Exception:
+        pass
+    if info.get("has_role") is True:
+        msg = f"✅ Member {info.get('discord_name') or discord_id} sudah punya role {info.get('role_name') or ''}.".strip()
+        return redirect('/admin/verifications?msg=' + quote_plus(msg) + '&msg_type=success')
+    if info.get("has_role") is False:
+        msg = f"❌ Member {info.get('discord_name') or discord_id} BELUM punya role {info.get('role_name') or 'verifikasi'}. Link TikTok tetap ada, tapi role tidak ditemukan."
+        return redirect('/admin/verifications?msg=' + quote_plus(msg) + '&msg_type=danger')
+    msg = f"⚠️ Tidak bisa mengecek {discord_id}: {info.get('error') or 'unknown error'}"
+    return redirect('/admin/verifications?msg=' + quote_plus(msg) + '&msg_type=warning')
+
+@admin_bp.route('/reverify-all', methods=['POST'])
+def reverify_all():
+    try:
+        conn = get_db_connection()
+        rows = conn.execute("SELECT discord_id FROM user_mappings").fetchall()
+        conn.close()
+    except Exception as e:
+        return redirect('/admin/verifications?msg=' + quote_plus(f'Gagal membaca data verifikasi: {e}') + '&msg_type=danger')
+
+    total = 0
+    ok = 0
+    missing = 0
+    unknown = 0
+    for (discord_id,) in rows:
+        info = check_discord_verification(discord_id, use_api=True)
+        save_verification_status(discord_id, **info)
+        total += 1
+        if info.get("has_role") is True:
+            ok += 1
+        elif info.get("has_role") is False:
+            missing += 1
+        else:
+            unknown += 1
+
+    try:
+        from db import log_activity_event
+        log_activity_event(
+            "system",
+            f"Admin re-checked verification roles for all verified accounts: total={total}, has_role={ok}, missing={missing}, unchecked={unknown}.",
+            "",
+        )
+    except Exception:
+        pass
+
+    msg = f"Verifikasi ulang selesai: {total} akun dicek, {ok} punya role, {missing} belum punya role, {unknown} tidak bisa dicek."
+    msg_type = "success" if missing == 0 and unknown == 0 else ("warning" if ok else "danger")
+    return redirect('/admin/verifications?msg=' + quote_plus(msg) + '&msg_type=' + msg_type)
 
 @admin_bp.route('/unclaim-user/<int:discord_id>', methods=['POST'])
 def unclaim_user_admin(discord_id):
@@ -1198,6 +1416,7 @@ def unclaim_user_admin(discord_id):
         conn.commit()
     finally:
         conn.close()
+    delete_verification_status(discord_id)
     return redirect('/admin/verifications')
 
 @admin_bp.route('/clear-activity-logs', methods=['POST'])
