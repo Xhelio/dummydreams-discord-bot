@@ -914,32 +914,72 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 if streakable and streaking:
                     return
 
-                user = event.user.unique_id
-                display_name = event.user.nickname or user
-                
-                repeat = getattr(event, 'repeat_count', 1) or 1
-                diamond = getattr(event.gift, 'diamond_count', 0)
-                if not diamond and hasattr(event.gift, 'info'):
-                    diamond = getattr(event.gift.info, 'diamond_count', 0)
-                coins = int(diamond or 0) * int(repeat)
-                gift_name = getattr(event.gift, 'name', 'Gift')
+                gift_obj = getattr(event, "gift", None)
+                user_obj = getattr(event, "user", None)
+                user = (getattr(user_obj, "unique_id", None) or getattr(user_obj, "display_id", "") or "").lower().lstrip("@")
+                if not user:
+                    return
+                display_name = getattr(user_obj, "nickname", None) or user
+
+                # ``repeat_count`` is the full combo count on the final
+                # (non-streaking) streak event and the batch size otherwise.
+                try:
+                    repeat = int(getattr(event, "repeat_count", 1) or 1)
+                except Exception:
+                    repeat = 1
+                if repeat < 1 or repeat > 100000:
+                    repeat = 1
+
+                diamond = 0
+                for candidate in (
+                    getattr(gift_obj, "diamond_count", 0),
+                    getattr(getattr(gift_obj, "info", None), "diamond_count", 0),
+                    getattr(getattr(gift_obj, "m_gift", None), "diamond_count", 0),
+                ):
+                    try:
+                        if candidate:
+                            diamond = int(candidate)
+                            break
+                    except Exception:
+                        continue
+                coins = max(0, diamond) * repeat
+                gift_name = (
+                    getattr(gift_obj, "name", None)
+                    or getattr(gift_obj, "gift_name", None)
+                    or "Gift"
+                )
+
+                # Unique id of the TikTok message: prevents double counting when
+                # a gift is replayed after a reconnect or delivered twice.
+                common = getattr(event, "common", None)
+                msg_id = str(getattr(common, "msg_id", "") or getattr(event, "log_id", "") or "")
 
                 if coins > 0:
                     nonlocal current_session_id
                     if not current_session_id:
                         current_session_id = start_live_session(username_clean, initial_host=current_host)
 
-                    total_coins = save_gift_data(user, display_name, coins)
-                    save_daily_gift_data(user, display_name, coins)
-                    log_gift_transaction(
+                    # Insert the detailed log first: if this message id was
+                    # already stored, skip aggregate updates entirely.
+                    inserted = log_gift_transaction(
                         session_id=current_session_id,
                         target_user=username_clean,
                         viewer_user=user,
                         viewer_display=display_name,
                         gift_name=gift_name,
                         gift_count=repeat,
-                        coins=coins
+                        coins=coins,
+                        msg_id=msg_id,
                     )
+                    if not inserted:
+                        print(
+                            f"[{username_clean}] Duplicate gift message ignored "
+                            f"(msg_id={msg_id or 'n/a'}, @{user}, {gift_name}, {coins}c)."
+                        )
+                        return
+
+                    total_coins = save_gift_data(user, display_name, coins)
+                    save_daily_gift_data(user, display_name, coins)
 
                     # Format Waktu WIB
                     wib = pytz.timezone('Asia/Jakarta')
@@ -955,7 +995,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     # Log activity gift lengkap: tanggal, nama akun, user, nama gift, jumlah koin, total koin saat ini
                     gift_msg = (
                         f"[{full_datetime}] [{channel_name} (@{username_clean})] "
-                        f"User: @{user} - {gift_name} - {coins} coins [{coins}c] - "
+                        f"User: @{user} - {gift_name} x{repeat} ({diamond} diamonds) = {coins} coins [{coins}c] - "
                         f"[channel {channel_spent} c] - [today {today_spent} c] - [current total: {total_all} c]"
                     )
                     log_activity_event("gift", gift_msg, username_clean)
@@ -1073,11 +1113,25 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             try:
                 disconnector = getattr(client, "disconnect", None)
                 if disconnector:
-                    result = disconnector(close_client=True)
+                    # NOTE: never pass close_client=True here. TikTokLive's close()
+                    # calls loop.run_until_complete() internally, which raises
+                    # "This event loop is already running" inside our async loop.
+                    result = disconnector()
                     if asyncio.iscoroutine(result):
                         await result
             except Exception as e:
-                print(f"[{username_clean}] Client cleanup error: {e}")
+                print(f"[{username_clean}] Client disconnect cleanup error: {e}")
+            try:
+                # Close the HTTP session manually so connections are not leaked
+                # between observer cycles (leaks contribute to rate limits).
+                web = getattr(client, "web", None)
+                closer = getattr(web, "close", None)
+                if closer:
+                    res = closer()
+                    if asyncio.iscoroutine(res):
+                        await res
+            except Exception as e:
+                print(f"[{username_clean}] Client HTTP cleanup error: {e}")
 
         # Secondary probe: if the event client didn't connect but TikTok reports live,
         # mark status/announcement so the dashboard is not stuck on "No Live Now".

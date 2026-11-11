@@ -598,6 +598,7 @@ def init_db():
             ("log_datetime", "TEXT"),
             ("target_username", "TEXT"),
             ("scheduled_host", "TEXT"),
+            ("msg_id", "TEXT"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE gift_logs ADD COLUMN {col} {dtype}")
@@ -607,6 +608,102 @@ def init_db():
                     conn.rollback()
                 except Exception:
                     pass
+
+        # Dedupe index: TikTok can replay/duplicate gift messages (especially
+        # across reconnects), so a gift log row is unique per message id.
+        try:
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_gift_logs_msg_id "
+                "ON gift_logs(msg_id) WHERE msg_id IS NOT NULL"
+            )
+            conn.commit()
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            print(f"[DB Migration] gift_logs msg_id index skipped: {e}")
+
+        # Normalize viewer names to lowercase so the same viewer never gets two
+        # separate coin rows ("Alice" vs "alice"). Idempotent & safe.
+        try:
+            mixed = conn.execute(
+                "SELECT tiktok_user FROM tiktok_gifts WHERE tiktok_user != LOWER(tiktok_user)"
+            ).fetchall()
+            for (key_value,) in mixed:
+                lower_key = (key_value or "").strip().lower()
+                if not lower_key:
+                    continue
+                row = conn.execute(
+                    "SELECT COALESCE(total_coins, 0) FROM tiktok_gifts WHERE tiktok_user = ?",
+                    (key_value,),
+                ).fetchone()
+                coins_value = int(row[0] or 0) if row else 0
+                existing = conn.execute(
+                    "SELECT 1 FROM tiktok_gifts WHERE tiktok_user = ?", (lower_key,)
+                ).fetchone()
+                if existing:
+                    conn.execute(
+                        "UPDATE tiktok_gifts SET total_coins = COALESCE(total_coins, 0) + ? "
+                        "WHERE tiktok_user = ?",
+                        (coins_value, lower_key),
+                    )
+                    conn.execute("DELETE FROM tiktok_gifts WHERE tiktok_user = ?", (key_value,))
+                else:
+                    conn.execute(
+                        "UPDATE tiktok_gifts SET tiktok_user = ? WHERE tiktok_user = ?",
+                        (lower_key, key_value),
+                    )
+            conn.commit()
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            print(f"[DB Migration] tiktok_gifts case normalization skipped: {e}")
+
+        try:
+            mixed_daily = conn.execute(
+                "SELECT tiktok_user, date FROM daily_tiktok_gifts "
+                "WHERE tiktok_user != LOWER(tiktok_user)"
+            ).fetchall()
+            for key_value, date_value in mixed_daily:
+                lower_key = (key_value or "").strip().lower()
+                if not lower_key:
+                    continue
+                row = conn.execute(
+                    "SELECT COALESCE(coins, 0) FROM daily_tiktok_gifts "
+                    "WHERE tiktok_user = ? AND date = ?",
+                    (key_value, date_value),
+                ).fetchone()
+                coins_value = int(row[0] or 0) if row else 0
+                existing = conn.execute(
+                    "SELECT 1 FROM daily_tiktok_gifts WHERE tiktok_user = ? AND date = ?",
+                    (lower_key, date_value),
+                ).fetchone()
+                if existing:
+                    conn.execute(
+                        "UPDATE daily_tiktok_gifts SET coins = COALESCE(coins, 0) + ? "
+                        "WHERE tiktok_user = ? AND date = ?",
+                        (coins_value, lower_key, date_value),
+                    )
+                    conn.execute(
+                        "DELETE FROM daily_tiktok_gifts WHERE tiktok_user = ? AND date = ?",
+                        (key_value, date_value),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE daily_tiktok_gifts SET tiktok_user = ? "
+                        "WHERE tiktok_user = ? AND date = ?",
+                        (lower_key, key_value, date_value),
+                    )
+            conn.commit()
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            print(f"[DB Migration] daily_tiktok_gifts case normalization skipped: {e}")
 
         # Migrasi kolom host_name pada sesi pengumuman live (database lama)
         try:
@@ -779,7 +876,7 @@ def get_user_total_spent(viewer_user: str) -> int:
     try:
         cur = conn.cursor()
         row = cur.execute("""
-            SELECT COALESCE(total_coins, 0) FROM tiktok_gifts 
+            SELECT COALESCE(SUM(total_coins), 0) FROM tiktok_gifts 
             WHERE LOWER(tiktok_user) = ?
         """, (viewer_user.lower().lstrip("@"),)).fetchone()
         return row[0] if row else 0
@@ -1097,8 +1194,12 @@ def end_live_session(session_id: int):
     finally:
         conn.close()
 
-def log_gift_transaction(session_id: int, target_user: str, viewer_user: str, viewer_display: str, gift_name: str, gift_count: int, coins: int):
-    """Mencatat log gift secara terperinci sesuai waktu WIB & host terjadwal."""
+def log_gift_transaction(session_id: int, target_user: str, viewer_user: str, viewer_display: str, gift_name: str, gift_count: int, coins: int, msg_id: str = None) -> bool:
+    """Mencatat log gift secara terperinci sesuai waktu WIB & host terjadwal.
+
+    Returns True when a new row was stored, False when the same TikTok message
+    id was already recorded (duplicate/replayed event) or the insert failed.
+    """
     wib = pytz.timezone('Asia/Jakarta')
     now_dt = datetime.now(wib)
     
@@ -1112,8 +1213,15 @@ def log_gift_transaction(session_id: int, target_user: str, viewer_user: str, vi
     conn = get_db_connection()
     try:
         cur = conn.cursor()
+        msg_id_clean = str(msg_id) if msg_id else None
+        if msg_id_clean:
+            already = cur.execute(
+                "SELECT 1 FROM gift_logs WHERE msg_id = ? LIMIT 1", (msg_id_clean,)
+            ).fetchone()
+            if already:
+                return False
         cur.execute("""
-            INSERT INTO gift_logs (
+            INSERT OR IGNORE INTO gift_logs (
                 session_id, 
                 viewer_username, 
                 viewer_display_name, 
@@ -1124,12 +1232,13 @@ def log_gift_transaction(session_id: int, target_user: str, viewer_user: str, vi
                 log_time, 
                 log_datetime, 
                 target_username, 
-                scheduled_host
+                scheduled_host,
+                msg_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             session_id, 
-            viewer_user.lower(), 
+            (viewer_user or "").lower(), 
             viewer_display, 
             gift_name, 
             gift_count, 
@@ -1138,12 +1247,17 @@ def log_gift_transaction(session_id: int, target_user: str, viewer_user: str, vi
             log_time, 
             log_datetime, 
             target_clean, 
-            scheduled_host
+            scheduled_host,
+            msg_id_clean
         ))
-        
-        if session_id:
+        inserted = True
+        if inserted and session_id:
             cur.execute("UPDATE live_sessions SET total_coins = total_coins + ? WHERE session_id = ?", (coins, session_id))
         conn.commit()
+        return inserted
+    except Exception as e:
+        print(f"[GiftLog] Failed to store gift log for @{viewer_user} ({gift_name}): {e}")
+        return False
     finally:
         conn.close()
 
@@ -1179,6 +1293,103 @@ def save_daily_gift_data(username: str, display_name: str, coins: int):
         conn.commit()
     finally:
         conn.close()
+
+def recalculate_coin_totals() -> dict:
+    """Rebuild all coin totals from the authoritative gift_logs table.
+
+    Use this after imports/edits/fixes so tiktok_gifts (all-time) and
+    daily_tiktok_gifts (per day) match the detailed gift log exactly.
+    """
+    wib = pytz.timezone('Asia/Jakarta')
+    today_str = datetime.now(wib).strftime('%Y-%m-%d')
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        # All-time totals per viewer (lowercase, single row per viewer).
+        cur.execute("DELETE FROM tiktok_gifts")
+        cur.execute("""
+            INSERT INTO tiktok_gifts (tiktok_user, display_name, total_coins)
+            SELECT LOWER(viewer_username), MAX(viewer_display_name), SUM(coins)
+            FROM gift_logs
+            GROUP BY LOWER(viewer_username)
+        """)
+        # Daily totals per viewer/day.
+        cur.execute("DELETE FROM daily_tiktok_gifts")
+        cur.execute("""
+            INSERT INTO daily_tiktok_gifts (tiktok_user, display_name, coins, date)
+            SELECT LOWER(viewer_username), MAX(viewer_display_name), SUM(coins), log_date
+            FROM gift_logs
+            GROUP BY LOWER(viewer_username), log_date
+        """)
+        conn.commit()
+        row = cur.execute(
+            "SELECT COUNT(*), COALESCE(SUM(total_coins), 0) FROM tiktok_gifts"
+        ).fetchone()
+        today_row = cur.execute(
+            "SELECT COALESCE(SUM(coins), 0) FROM daily_tiktok_gifts WHERE date = ?",
+            (today_str,),
+        ).fetchone()
+        return {
+            "viewers": int(row[0] or 0) if row else 0,
+            "total_coins": int(row[1] or 0) if row else 0,
+            "today_coins": int(today_row[0] or 0) if today_row else 0,
+        }
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        print(f"[Coin] Recalculate failed: {e}")
+        return {"error": str(e)}
+    finally:
+        conn.close()
+
+
+def get_coin_integrity() -> dict:
+    """Compare aggregate coin tables against the detailed gift_logs table."""
+    wib = pytz.timezone('Asia/Jakarta')
+    today_str = datetime.now(wib).strftime('%Y-%m-%d')
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        viewers_row = cur.execute(
+            "SELECT COUNT(*), COALESCE(SUM(total_coins), 0) FROM tiktok_gifts"
+        ).fetchone()
+        logs_row = cur.execute(
+            "SELECT COUNT(*), COALESCE(SUM(coins), 0) FROM gift_logs"
+        ).fetchone()
+        today_row = cur.execute(
+            "SELECT COALESCE(SUM(coins), 0) FROM daily_tiktok_gifts WHERE date = ?",
+            (today_str,),
+        ).fetchone()
+        mismatches = cur.execute("""
+            SELECT g.tiktok_user, COALESCE(g.total_coins, 0) AS stored,
+                   COALESCE(l.coins, 0) AS logged
+            FROM tiktok_gifts g
+            LEFT JOIN (
+                SELECT LOWER(viewer_username) AS u, SUM(coins) AS coins
+                FROM gift_logs GROUP BY LOWER(viewer_username)
+            ) l ON LOWER(g.tiktok_user) = l.u
+            WHERE COALESCE(g.total_coins, 0) != COALESCE(l.coins, 0)
+            ORDER BY ABS(COALESCE(g.total_coins, 0) - COALESCE(l.coins, 0)) DESC
+            LIMIT 8
+        """).fetchall()
+        return {
+            "viewers": int(viewers_row[0] or 0) if viewers_row else 0,
+            "stored_total": int(viewers_row[1] or 0) if viewers_row else 0,
+            "gift_log_rows": int(logs_row[0] or 0) if logs_row else 0,
+            "logged_total": int(logs_row[1] or 0) if logs_row else 0,
+            "today_total": int(today_row[0] or 0) if today_row else 0,
+            "mismatches": [
+                {"viewer": r[0], "stored": int(r[1] or 0), "logged": int(r[2] or 0)}
+                for r in mismatches
+            ],
+        }
+    except Exception as e:
+        return {"error": str(e), "mismatches": []}
+    finally:
+        conn.close()
+
 
 def get_daily_top_supporters():
     wib = pytz.timezone('Asia/Jakarta')

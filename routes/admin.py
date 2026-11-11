@@ -1,4 +1,5 @@
 from flask import Blueprint, render_template_string, request, redirect
+from urllib.parse import quote_plus
 import os
 try:
     import libsql_experimental as libsql
@@ -16,7 +17,9 @@ from db import (
     set_setting,
     get_recent_gift_activities,
     get_channel_display_name,
-    sync_valid_hosts
+    sync_valid_hosts,
+    get_coin_integrity,
+    recalculate_coin_totals,
 )
 from runtime_status import get_live_snapshot, clear_all_live
 from verification import fetch_tiktok_display_name
@@ -31,6 +34,7 @@ TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
 
 @admin_bp.route('/data', methods=['GET'])
 def view_data():
+    integrity = get_coin_integrity()
     html = """
     <!DOCTYPE html>
     <html lang="en">
@@ -53,6 +57,58 @@ def view_data():
             </p>
         </div>
 
+        <div class="card">
+            <h2>🪙 Coin Integrity</h2>
+            {% if integrity.error %}
+            <div class="notice-danger">Gagal membaca data koin: {{ integrity.error }}</div>
+            {% else %}
+            <div class="stat-grid">
+                <div class="stat-box">
+                    <div class="muted">Total koin tersimpan (viewer)</div>
+                    <div class="stat-number">{{ integrity.stored_total }} c</div>
+                </div>
+                <div class="stat-box">
+                    <div class="muted">Total dari gift log (detail)</div>
+                    <div class="stat-number">{{ integrity.logged_total }} c</div>
+                </div>
+                <div class="stat-box">
+                    <div class="muted">Koin hari ini (WIB)</div>
+                    <div class="stat-number">{{ integrity.today_total }} c</div>
+                </div>
+                <div class="stat-box">
+                    <div class="muted">Baris gift log</div>
+                    <div class="stat-number">{{ integrity.gift_log_rows }}</div>
+                </div>
+            </div>
+            {% if integrity.stored_total != integrity.logged_total %}
+            <div class="notice-warning">
+                Ada selisih {{ integrity.stored_total - integrity.logged_total }} c antara total tersimpan dan gift log.
+                Klik <strong>Recalculate</strong> untuk menyamakan semua total dari gift log.
+            </div>
+            {% else %}
+            <div class="notice-success">✅ Total koin konsisten dengan gift log.</div>
+            {% endif %}
+            {% if integrity.mismatches %}
+            <div class="table-scroll">
+            <table>
+                <tr><th>Viewer</th><th>Tersimpan</th><th>Di gift log</th><th>Selisih</th></tr>
+                {% for m in integrity.mismatches %}
+                <tr>
+                    <td><a href="/admin/viewer/{{ m.viewer }}" class="viewer-link">@{{ m.viewer }}</a></td>
+                    <td>{{ m.stored }} c</td>
+                    <td>{{ m.logged }} c</td>
+                    <td>{{ m.stored - m.logged }} c</td>
+                </tr>
+                {% endfor %}
+            </table>
+            </div>
+            {% endif %}
+            <form action="/admin/recalculate-coins" method="POST" onsubmit="return confirm('Hitung ulang SEMUA total koin dari gift log? Total yang diedit manual tanpa log akan hilang.');" style="margin-top: 12px;">
+                <button type="submit" class="btn-save" style="background:#0e7490;">🔄 Recalculate Coin Totals dari Gift Log</button>
+            </form>
+            {% endif %}
+        </div>
+
         <div class="card" style="border-color: #ef4444;">
             <h2 style="color: #ef4444;">⚠️ Danger Zone</h2>
             <form action="/admin/reset-db" method="POST" onsubmit="return confirm('DELETE ALL GIFT AND LIVE SESSION DATA?')">
@@ -63,7 +119,25 @@ def view_data():
     </body>
     </html>
     """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
-    return render_template_string(html)
+    return render_template_string(html, integrity=integrity)
+
+@admin_bp.route('/recalculate-coins', methods=['POST'])
+def recalculate_coins():
+    result = recalculate_coin_totals()
+    if result.get("error"):
+        msg = "Gagal recalculate: " + str(result["error"])
+        return redirect("/admin/data?msg=" + quote_plus(msg) + "&msg_type=danger")
+    try:
+        from db import log_activity_event
+        log_activity_event(
+            "system",
+            f"Admin recalculated coin totals from gift log (viewers={result.get('viewers')}, total={result.get('total_coins')}c, today={result.get('today_coins')}c).",
+            "",
+        )
+    except Exception:
+        pass
+    msg = f"Coin totals dihitung ulang: {result.get('viewers')} viewer, total {result.get('total_coins')} c, hari ini {result.get('today_coins')} c."
+    return redirect("/admin/data?msg=" + quote_plus(msg) + "&msg_type=success")
 
 @admin_bp.route('/host/<host_name>', methods=['GET'])
 def view_host_detail(host_name):
@@ -180,6 +254,8 @@ def view_host_detail(host_name):
 
 @admin_bp.route('/viewers', methods=['GET'])
 def view_viewers():
+    wib = pytz.timezone('Asia/Jakarta')
+    today_str = datetime.now(wib).strftime('%Y-%m-%d')
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -188,12 +264,14 @@ def view_viewers():
                 g.tiktok_user, 
                 g.display_name, 
                 g.total_coins,
-                COALESCE(a.tiktok_username, s.tiktok_username) as active_channel
+                COALESCE(a.tiktok_username, s.tiktok_username) as active_channel,
+                COALESCE(d.coins, 0) as today_coins
             FROM tiktok_gifts g
             LEFT JOIN active_live_announcements a ON LOWER(g.tiktok_user) = LOWER(a.tiktok_username)
             LEFT JOIN live_sessions s ON LOWER(g.tiktok_user) = LOWER(s.tiktok_username) AND s.end_time IS NULL
+            LEFT JOIN daily_tiktok_gifts d ON LOWER(d.tiktok_user) = LOWER(g.tiktok_user) AND d.date = ?
             ORDER BY g.total_coins DESC
-        """).fetchall()
+        """, (today_str,)).fetchall()
         conn.close()
     except Exception as e:
         return f"<h3>Database Error: {e}</h3>", 500
@@ -220,6 +298,7 @@ def view_viewers():
                     <th>Username (@)</th>
                     <th>Viewer Name</th>
                     <th>Total Coins</th>
+                    <th>Hari Ini (WIB)</th>
                     <th>Realtime Live Status</th>
                     <th>Edit Coins</th>
                 </tr>
@@ -232,6 +311,7 @@ def view_viewers():
                         <a href="/admin/viewer/{{ v[0] }}" class="viewer-link" title="Click to view coin details">{{ v[1] or v[0] }} ↗</a>
                     </td>
                     <td><span class="badge" style="background: #ca8a04;">{{ v[2] }} c</span></td>
+                    <td>{{ v[4] }} c</td>
                     <td>
                         {% if v[3] %}
                         <a href="https://www.tiktok.com/@{{ v[3] }}/live" target="_blank" class="badge badge-active">🔴 Live Now ↗</a>
@@ -248,7 +328,7 @@ def view_viewers():
                     </td>
                 </tr>
                 {% else %}
-                <tr><td colspan="5">No viewer data recorded yet.</td></tr>
+                <tr><td colspan="6">No viewer data recorded yet.</td></tr>
                 {% endfor %}
             </table>
         </div>
@@ -269,13 +349,21 @@ def view_viewer_detail(tiktok_user):
         cur = conn.cursor()
 
         viewer_row = cur.execute("""
-            SELECT display_name, total_coins 
+            SELECT MAX(display_name), COALESCE(SUM(total_coins), 0)
             FROM tiktok_gifts 
             WHERE LOWER(tiktok_user) = ?
         """, (user_clean,)).fetchone()
 
         display_name = viewer_row[0] if viewer_row and viewer_row[0] else user_clean
-        grand_total_coins = viewer_row[1] if viewer_row else 0
+        grand_total_coins = int(viewer_row[1] or 0) if viewer_row else 0
+
+        logged_row = cur.execute("""
+            SELECT COUNT(*), COALESCE(SUM(coins), 0)
+            FROM gift_logs
+            WHERE LOWER(viewer_username) = ?
+        """, (user_clean,)).fetchone()
+        logged_gift_count = int(logged_row[0] or 0) if logged_row else 0
+        logged_total_coins = int(logged_row[1] or 0) if logged_row else 0
 
         today_row = cur.execute("""
             SELECT coins 
@@ -336,7 +424,18 @@ def view_viewer_detail(tiktok_user):
                 <div style="color: #94a3b8; font-size: 0.85rem;">COINS TODAY ({{ today_str }})</div>
                 <div class="stat-number" style="color: #22c55e;">{{ today_coins }} c</div>
             </div>
+            <div class="stat-box">
+                <div style="color: #94a3b8; font-size: 0.85rem;">DARI GIFT LOG ({{ logged_gift_count }} gift)</div>
+                <div class="stat-number">{{ logged_total_coins }} c</div>
+            </div>
         </div>
+
+        {% if grand_total_coins != logged_total_coins %}
+        <div class="notice-warning">
+            ⚠️ Total tersimpan ({{ grand_total_coins }} c) berbeda dengan jumlah gift log ({{ logged_total_coins }} c).
+            Jalankan <a href="/admin/data">Recalculate Coin Totals</a> untuk menyamakan.
+        </div>
+        {% endif %}
 
         <div class="card">
             <h2>📅 Daily Coin History</h2>
@@ -397,6 +496,8 @@ def view_viewer_detail(tiktok_user):
         username=user_clean,
         display_name=display_name,
         grand_total_coins=grand_total_coins,
+        logged_total_coins=logged_total_coins,
+        logged_gift_count=logged_gift_count,
         today_coins=today_coins,
         today_str=today_str,
         daily_history=daily_history,
@@ -701,13 +802,42 @@ def delete_host(host_id):
 @admin_bp.route('/edit-coin', methods=['POST'])
 def edit_coin():
     username = request.form.get("tiktok_user", "").strip().lower().lstrip("@")
-    new_coins = int(request.form.get("new_coins", 0))
-    if username:
-        conn = get_db_connection()
-        conn.execute("UPDATE tiktok_gifts SET total_coins = ? WHERE LOWER(tiktok_user) = ?", (new_coins, username))
+    raw_coins = request.form.get("new_coins", "").strip()
+    try:
+        new_coins = max(0, int(raw_coins or 0))
+    except (TypeError, ValueError):
+        return redirect('/admin/viewers?msg=' + quote_plus('Nilai koin tidak valid (harus angka).') + '&msg_type=danger')
+    if not username:
+        return redirect('/admin/viewers?msg=' + quote_plus('Username viewer kosong.') + '&msg_type=danger')
+    old_coins = 0
+    conn = get_db_connection()
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(display_name), ?), COALESCE(SUM(total_coins), 0) "
+            "FROM tiktok_gifts WHERE LOWER(tiktok_user) = ?",
+            (username, username),
+        ).fetchone()
+        display = (row[0] if row and row[0] else username)
+        old_coins = int(row[1] or 0) if row else 0
+        # Keep a single, lowercase row per viewer.
+        conn.execute("DELETE FROM tiktok_gifts WHERE LOWER(tiktok_user) = ?", (username,))
+        conn.execute(
+            "INSERT INTO tiktok_gifts (tiktok_user, display_name, total_coins) VALUES (?, ?, ?)",
+            (username, display, new_coins),
+        )
         conn.commit()
+    finally:
         conn.close()
-    return redirect('/admin/viewers?msg=' + quote_plus('Coins viewer diperbarui.') + '&msg_type=success')
+    try:
+        from db import log_activity_event
+        log_activity_event(
+            "system",
+            f"Admin set coins for @{username}: {old_coins}c -> {new_coins}c (all-time; gift log unchanged).",
+            username,
+        )
+    except Exception:
+        pass
+    return redirect('/admin/viewers?msg=' + quote_plus(f'Coins @{username} diperbarui: {old_coins} c -> {new_coins} c.') + '&msg_type=success')
 
 @admin_bp.route('/sync-hosts', methods=['POST'])
 def sync_hosts_action():
