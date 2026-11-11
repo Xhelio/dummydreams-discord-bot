@@ -153,21 +153,92 @@ def get_all_hosts() -> list:
     conn = get_db_connection()
     try:
         return conn.execute("""
-            SELECT host_id, tiktok_username, COALESCE(display_name, tiktok_username), is_active
+            SELECT host_id, tiktok_username, COALESCE(display_name, tiktok_username), is_active, COALESCE(is_priority, 1)
             FROM hosts ORDER BY host_id ASC
         """).fetchall()
     finally:
         conn.close()
 
-def get_active_hosts() -> list:
+
+def get_observable_hosts() -> list:
+    """Return hosts that should be observed now with their connect mode.
+
+    Each item: {"username": str, "priority": bool, "mode": "normal"|"slow"}
+    - Active + priority hosts => normal.
+    - Active + non-priority hosts => slow or excluded, based on non_priority_mode setting.
+    - Inactive hosts are excluded.
+    """
+    non_priority_mode = str(get_setting("non_priority_mode", "slow") or "slow").strip().lower()
+    if non_priority_mode not in ("slow", "off"):
+        non_priority_mode = "slow"
     conn = get_db_connection()
     try:
-        cur = conn.cursor()
-        rows = cur.execute("SELECT tiktok_username FROM hosts WHERE is_active = 1 ORDER BY host_id ASC").fetchall()
-        hosts = [r[0] for r in rows if r[0]]
-        if not hosts:
-            hosts = [t[1] for t in VALID_TARGET_ACCOUNTS]
-        return hosts
+        rows = conn.execute("""
+            SELECT tiktok_username, COALESCE(is_active, 1), COALESCE(is_priority, 1)
+            FROM hosts ORDER BY host_id ASC
+        """).fetchall()
+    finally:
+        conn.close()
+
+    targets = []
+    for row in rows:
+        username = (row[0] or "").lower().lstrip("@")
+        if not username:
+            continue
+        is_active = int(row[1] or 0) == 1
+        is_priority = int(row[2] or 0) == 1
+        if not is_active:
+            continue
+        if is_priority:
+            targets.append({"username": username, "priority": True, "mode": "normal"})
+        elif non_priority_mode == "slow":
+            targets.append({"username": username, "priority": False, "mode": "slow"})
+        # mode == off => excluded
+
+    if not targets:
+        # Fallback: if no configured/observable hosts, keep previous behavior using defaults as priority.
+        for t in VALID_TARGET_ACCOUNTS:
+            targets.append({"username": t[1], "priority": True, "mode": "normal"})
+    return targets
+
+
+def get_host_connect_mode(username: str) -> str:
+    """Return 'normal', 'slow', or 'off' for a host based on active/priority settings."""
+    u = (username or "").lower().lstrip("@")
+    non_priority_mode = str(get_setting("non_priority_mode", "slow") or "slow").strip().lower()
+    if non_priority_mode not in ("slow", "off"):
+        non_priority_mode = "slow"
+    conn = get_db_connection()
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(is_active, 1), COALESCE(is_priority, 1) FROM hosts WHERE LOWER(tiktok_username)=?",
+            (u,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return "normal"
+    if int(row[0] or 0) != 1:
+        return "off"
+    if int(row[1] or 0) == 1:
+        return "normal"
+    return non_priority_mode
+
+
+def get_active_hosts() -> list:
+    """Backward-compatible: usernames that should currently be observed."""
+    targets = get_observable_hosts()
+    hosts = [t["username"] for t in targets if t.get("username")]
+    if not hosts:
+        hosts = [t[1] for t in VALID_TARGET_ACCOUNTS]
+    return hosts
+
+
+def set_host_priority(host_id: int, is_priority: int):
+    conn = get_db_connection()
+    try:
+        conn.execute("UPDATE hosts SET is_priority = ? WHERE host_id = ?", (1 if is_priority else 0, host_id))
+        conn.commit()
     finally:
         conn.close()
 
@@ -405,7 +476,8 @@ def init_db():
                 host_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 tiktok_username TEXT UNIQUE NOT NULL,
                 display_name TEXT,
-                is_active INTEGER DEFAULT 1
+                is_active INTEGER DEFAULT 1,
+                is_priority INTEGER DEFAULT 1
             )
             """,
             """
@@ -546,6 +618,18 @@ def init_db():
             except Exception:
                 pass
 
+        # Host priority (1 = normal/prioritized connect, 0 = non-prioritized)
+        try:
+            conn.execute("ALTER TABLE hosts ADD COLUMN is_priority INTEGER DEFAULT 1")
+            conn.commit()
+            conn.execute("UPDATE hosts SET is_priority = 1 WHERE is_priority IS NULL")
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+
         # Default settings (never overwrite values saved by the admin)
         wib = pytz.timezone('Asia/Jakarta')
         now_str = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
@@ -571,6 +655,8 @@ def init_db():
             "role_tier_announce": "1",
             "role_tier_permanent_enabled": "0",
             "role_tier_last_reset": now_str,
+            "non_priority_mode": "slow",  # slow | off (for non-prioritized active hosts)
+            "non_priority_slow_seconds": "300",
         }
         for key, value in defaults.items():
             conn.execute(

@@ -22,6 +22,8 @@ from db import (
     get_role_tiers,
     get_tier_settings,
     get_channel_display_name,
+    set_host_priority,
+    log_activity_event,
 )
 from verification import fetch_tiktok_display_name
 from styles import BASE_CSS, NAV_HTML, AUTO_REFRESH_JS
@@ -293,15 +295,29 @@ def view_settings():
         </div>
 
         <div class="card">
-            <h2>🎯 Target Hosts</h2>
-            <p class="muted">These TikTok accounts are watched by the realtime monitor.</p>
+            <h2>🎯 Target Hosts & Prioritas Koneksi</h2>
+            <p class="muted">Pilih akun prioritas untuk koneksi/deteksi rate normal. Akun non-prioritas akan mengikuti mode di bawah (lambat/non-aktif) untuk mengurangi beban/rate limit.</p>
+            <form action="/admin/settings/host-priority-mode" method="POST" class="form-grid" style="grid-template-columns: 1fr 1fr auto; margin-bottom: 14px; align-items:end;">
+                <div>
+                    <label for="non_priority_mode" class="muted" style="display:block; margin-bottom:4px;">Mode akun non-prioritas</label>
+                    <select id="non_priority_mode" name="non_priority_mode">
+                        <option value="slow" {% if non_priority_mode == 'slow' %}selected{% endif %}>Lambat (slow rate)</option>
+                        <option value="off" {% if non_priority_mode == 'off' %}selected{% endif %}>Non-aktif (tidak di-detect/connect)</option>
+                    </select>
+                </div>
+                <div>
+                    <label for="non_priority_slow_seconds" class="muted" style="display:block; margin-bottom:4px;">Interval lambat (detik)</label>
+                    <input id="non_priority_slow_seconds" type="number" name="non_priority_slow_seconds" min="60" step="10" value="{{ non_priority_slow_seconds }}">
+                </div>
+                <button type="submit">Simpan Mode Prioritas</button>
+            </form>
             <form action="/admin/settings/host/add" method="POST" class="form-grid" style="grid-template-columns: 1fr auto;">
                 <input type="text" name="tiktok_username" placeholder="TikTok username (@...) — channel name is fetched automatically" required>
                 <button type="submit">+ Add Host</button>
             </form>
             <div class="table-scroll">
                 <table>
-                    <tr><th>ID</th><th>Username</th><th>Channel Name</th><th>Active</th><th>Action</th></tr>
+                    <tr><th>ID</th><th>Username</th><th>Channel Name</th><th>Active</th><th>Priority</th><th>Action</th></tr>
                     {% for h in hosts %}
                     <tr>
                         <td>{{ h[0] }}</td>
@@ -309,17 +325,26 @@ def view_settings():
                         <td>{{ h[2] }}</td>
                         <td>{% if h[3] %}<span class="badge badge-active">Active</span>{% else %}<span class="badge badge-inactive">Paused</span>{% endif %}</td>
                         <td>
-                            <a href="/admin/toggle-host/{{ h[0] }}" class="btn-action btn-toggle">Toggle</a>
+                            {% if h[4] %}
+                                <span class="badge" style="background:#15803d;">Prioritas (Normal)</span>
+                            {% else %}
+                                <span class="badge" style="background:#92400e;">Non-prioritas</span>
+                            {% endif %}
+                        </td>
+                        <td style="white-space:nowrap;">
+                            <a href="/admin/toggle-host/{{ h[0] }}" class="btn-action btn-toggle">Toggle Active</a>
+                            <a href="/admin/toggle-host-priority/{{ h[0] }}" class="btn-action" style="background:#334155;">Toggle Priority</a>
                             <form action="/admin/settings/host/delete/{{ h[0] }}" method="POST" class="inline-form" onsubmit="return confirm('Delete this host?');">
                                 <button type="submit" class="btn-action btn-del">Delete</button>
                             </form>
                         </td>
                     </tr>
                     {% else %}
-                    <tr><td colspan="5" class="muted">No hosts yet.</td></tr>
+                    <tr><td colspan="6" class="muted">No hosts yet.</td></tr>
                     {% endfor %}
                 </table>
             </div>
+            <p class="muted" style="margin-top:8px;">Akun prioritas: connect/deteksi rate normal. Non-prioritas: <strong>{{ 'lambat (' ~ non_priority_slow_seconds ~ 's)' if non_priority_mode == 'slow' else 'non-aktif' }}</strong>.</p>
         </div>
 
         <div class="card">
@@ -384,6 +409,14 @@ def view_settings():
     </html>
     """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
 
+    non_priority_mode = str(get_setting("non_priority_mode", "slow") or "slow").lower()
+    if non_priority_mode not in ("slow", "off"):
+        non_priority_mode = "slow"
+    try:
+        non_priority_slow_seconds = max(60, int(get_setting("non_priority_slow_seconds", "300") or 300))
+    except Exception:
+        non_priority_slow_seconds = 300
+
     return render_template_string(
         html,
         master=master,
@@ -396,6 +429,8 @@ def view_settings():
         tiers_reset=tiers_reset,
         tiers_permanent=tiers_permanent,
         saved=saved,
+        non_priority_mode=non_priority_mode,
+        non_priority_slow_seconds=non_priority_slow_seconds,
     )
 
 
@@ -523,6 +558,37 @@ def remove_target_host(host_id):
     try:
         conn.execute("DELETE FROM hosts WHERE host_id = ?", (host_id,))
         conn.commit()
+    finally:
+        conn.close()
+    return redirect("/admin/settings")
+
+
+@settings_bp.route("/settings/host-priority-mode", methods=["POST"])
+def save_host_priority_mode():
+    mode = (request.form.get("non_priority_mode", "slow") or "slow").strip().lower()
+    if mode not in ("slow", "off"):
+        mode = "slow"
+    try:
+        slow_seconds = max(60, int(request.form.get("non_priority_slow_seconds", "300") or 300))
+    except Exception:
+        slow_seconds = 300
+    set_setting("non_priority_mode", mode)
+    set_setting("non_priority_slow_seconds", str(slow_seconds))
+    log_activity_event("system", f"Host priority mode updated: non-priority={mode}, slow_seconds={slow_seconds}.", "")
+    return redirect("/admin/settings")
+
+
+@settings_bp.route("/toggle-host-priority/<int:host_id>")
+def toggle_host_priority_route(host_id):
+    conn = get_db_connection()
+    try:
+        row = conn.execute("SELECT tiktok_username, COALESCE(is_priority,1) FROM hosts WHERE host_id = ?", (host_id,)).fetchone()
+        if row:
+            new_val = 0 if int(row[1] or 0) == 1 else 1
+            conn.execute("UPDATE hosts SET is_priority = ? WHERE host_id = ?", (new_val, host_id))
+            conn.commit()
+            state = "priority (normal)" if new_val == 1 else "non-priority"
+            log_activity_event("system", f"Host @{(row[0] or '').lower()} set to {state}.", (row[0] or "").lower())
     finally:
         conn.close()
     return redirect("/admin/settings")

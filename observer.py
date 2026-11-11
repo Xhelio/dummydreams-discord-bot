@@ -42,6 +42,7 @@ from db import (
     end_live_session, 
     log_gift_transaction,
     get_active_hosts,
+    get_observable_hosts,
     get_db_connection,
     log_activity_event,
     get_user_channel_spent,
@@ -54,6 +55,7 @@ from db import (
     update_live_session_host,
     get_channel_display_name,
     get_host_aliases,
+    get_host_connect_mode,
     is_feature_enabled,
     get_setting,
     set_setting
@@ -480,11 +482,21 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             pass
 
     while True:
+        connect_mode = (get_host_connect_mode(username_clean) or "normal").lower()
+        if connect_mode == "off":
+            runtime_status.update_observer_diag(username_clean, status="non_priority_off", connect_mode="off")
+            await asyncio.sleep(60)
+            continue
+        try:
+            slow_seconds = max(60, int(get_setting("non_priority_slow_seconds", "300") or 300))
+        except Exception:
+            slow_seconds = 300
         client = TikTokLiveClient(unique_id=username_clean)
         connected_this_cycle = False
         reconnect_state = {"triggered": False}
         with _ACTIVE_CLIENTS_LOCK:
             _ACTIVE_CLIENTS[username_clean] = client
+        runtime_status.update_observer_diag(username_clean, connect_mode=connect_mode)
 
         async def _watch_reconnect_request(active_client):
             while True:
@@ -1015,22 +1027,24 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             wait_seconds = 120
             if consecutive_failures >= 5:
                 wait_seconds = 300
+            if connect_mode == "slow":
+                wait_seconds = max(wait_seconds, slow_seconds)
             runtime_status.update_observer_diag(username_clean, status="backoff_json_response", wait_seconds=wait_seconds)
             log_activity_event(
                 "system",
-                f"[Debug @{username_clean}] Websocket returned empty/invalid JSON response; backing off {wait_seconds}s before retry (failures={consecutive_failures}, probe_online={probe_result is True}).",
+                f"[Debug @{username_clean}] Websocket returned empty/invalid JSON response; backing off {wait_seconds}s before retry (failures={consecutive_failures}, probe_online={probe_result is True}, mode={connect_mode}).",
                 username_clean,
             )
         elif probe_result is True and not connected_this_cycle:
-            # Account is online (probe) but websocket event client not connected: retry soon to receive LiveIntroEvent.
-            wait_seconds = 10
+            # Account is online (probe) but websocket event client not connected: retry to receive LiveIntroEvent.
+            wait_seconds = 30 if connect_mode == "slow" else 10
             runtime_status.update_observer_diag(username_clean, status="online_waiting_websocket", wait_seconds=wait_seconds)
         else:
-            wait_seconds = 30
+            wait_seconds = slow_seconds if connect_mode == "slow" else 30
             if not connected_this_cycle and consecutive_failures >= 5:
-                wait_seconds = 60
+                wait_seconds = max(wait_seconds, 60)
             if not connected_this_cycle and consecutive_failures >= 10:
-                wait_seconds = 120
+                wait_seconds = max(wait_seconds, 120)
         # If reconnect was requested while waiting, skip delay.
         for _ in range(wait_seconds):
             with _RECONNECT_REQUESTED_LOCK:
@@ -1104,10 +1118,15 @@ async def run_all_observers(announcement_callback, role_callback, comment_callba
         print(f"[Observer System] Failed to load host aliases: {e}")
 
     while True:
-        target_users = [u.lower().lstrip("@") for u in get_active_hosts() if u]
+        try:
+            observable = get_observable_hosts() or []
+        except Exception:
+            observable = [{"username": u, "mode": "normal"} for u in (get_active_hosts() or [])]
+        target_users = [u["username"].lower().lstrip("@") for u in observable if u.get("username")]
         target_set = set(target_users)
+        target_modes = {u["username"].lower().lstrip("@"): (u.get("mode") or "normal") for u in observable if u.get("username")}
 
-        # Stop observers for hosts that were paused or deleted.
+        # Stop observers for hosts that were paused, removed, or set to non-priority off.
         for username in list(tasks.keys()):
             task = tasks[username]
             if username not in target_set:
@@ -1115,9 +1134,9 @@ async def run_all_observers(announcement_callback, role_callback, comment_callba
                     task.cancel()
                 tasks.pop(username, None)
                 runtime_status.clear_live(username)
-                print(f"[Observer System] Stopped observer for @{username} (no longer active).")
+                print(f"[Observer System] Stopped observer for @{username} (inactive or excluded by priority mode).")
                 try:
-                    log_activity_event("system", f"Stopped observer for @{username} (no longer active).", username)
+                    log_activity_event("system", f"Stopped observer for @{username} (inactive or excluded by priority mode).", username)
                 except Exception:
                     pass
 
@@ -1125,15 +1144,22 @@ async def run_all_observers(announcement_callback, role_callback, comment_callba
         for username in target_users:
             task = tasks.get(username)
             if task is None or task.done():
+                mode = target_modes.get(username, "normal")
                 tasks[username] = asyncio.create_task(
                     start_single_observer(
                         username, announcement_callback, role_callback, comment_callback
                     )
                 )
-                print(f"[Observer System] Started observer for @{username}.")
+                print(f"[Observer System] Started observer for @{username} (mode={mode}).")
                 try:
-                    log_activity_event("system", f"Started observer task for @{username}.", username)
+                    log_activity_event("system", f"Started observer task for @{username} (mode={mode}).", username)
                 except Exception:
                     pass
+
+        try:
+            summary = ", ".join(f"@{u}:{target_modes.get(u,'normal')}" for u in target_users) or "(none)"
+            runtime_status.update_observer_diag("_supervisor", status="running", targets=summary)
+        except Exception:
+            pass
 
         await asyncio.sleep(60)
