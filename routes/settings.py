@@ -311,39 +311,41 @@ def view_settings():
                 </div>
                 <button type="submit">Simpan Mode Prioritas</button>
             </form>
-            <form action="/admin/settings/host/add" method="POST" class="form-grid" style="grid-template-columns: 1fr auto;">
+            <form action="/admin/settings/host/add" method="POST" class="form-grid" style="grid-template-columns: 1fr auto; margin-bottom: 12px;">
                 <input type="text" name="tiktok_username" placeholder="TikTok username (@...) — channel name is fetched automatically" required>
                 <button type="submit">+ Add Host</button>
             </form>
-            <div class="table-scroll">
-                <table>
-                    <tr><th>ID</th><th>Username</th><th>Channel Name</th><th>Active</th><th>Priority</th><th>Action</th></tr>
-                    {% for h in hosts %}
-                    <tr>
-                        <td>{{ h[0] }}</td>
-                        <td>@{{ h[1] }}</td>
-                        <td>{{ h[2] }}</td>
-                        <td>{% if h[3] %}<span class="badge badge-active">Active</span>{% else %}<span class="badge badge-inactive">Paused</span>{% endif %}</td>
-                        <td>
-                            {% if h[4] %}
-                                <span class="badge" style="background:#15803d;">Prioritas (Normal)</span>
-                            {% else %}
-                                <span class="badge" style="background:#92400e;">Non-prioritas</span>
-                            {% endif %}
-                        </td>
-                        <td style="white-space:nowrap;">
-                            <a href="/admin/toggle-host/{{ h[0] }}" class="btn-action btn-toggle">Toggle Active</a>
-                            <a href="/admin/toggle-host-priority/{{ h[0] }}" class="btn-action" style="background:#334155;">Toggle Priority</a>
-                            <form action="/admin/settings/host/delete/{{ h[0] }}" method="POST" class="inline-form" onsubmit="return confirm('Delete this host?');">
-                                <button type="submit" class="btn-action btn-del">Delete</button>
-                            </form>
-                        </td>
-                    </tr>
-                    {% else %}
-                    <tr><td colspan="6" class="muted">No hosts yet.</td></tr>
-                    {% endfor %}
-                </table>
-            </div>
+            <form action="/admin/settings/hosts/save" method="POST">
+                <div class="table-scroll">
+                    <table>
+                        <tr><th>ID</th><th>Username</th><th>Channel Name</th><th style="text-align:center;">Active</th><th style="text-align:center;">Prioritas</th><th>Delete</th></tr>
+                        {% for h in hosts %}
+                        <tr>
+                            <td>{{ h[0] }}</td>
+                            <td>@{{ h[1] }}</td>
+                            <td>{{ h[2] }}</td>
+                            <td style="text-align:center;">
+                                <input type="checkbox" name="active_{{ h[0] }}" value="1" {% if h[3] %}checked{% endif %}>
+                            </td>
+                            <td style="text-align:center;">
+                                <input type="checkbox" name="priority_{{ h[0] }}" value="1" {% if h[4] %}checked{% endif %}>
+                            </td>
+                            <td>
+                                <label style="display:inline-flex; align-items:center; gap:6px; color:#fca5a5; font-size:0.85rem;">
+                                    <input type="checkbox" name="delete_{{ h[0] }}" value="1"> Hapus
+                                </label>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="6" class="muted">No hosts yet.</td></tr>
+                        {% endfor %}
+                    </table>
+                </div>
+                <div style="margin-top:12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                    <button type="submit">Simpan Perubahan Host (Active/Prioritas/Hapus)</button>
+                    <span class="muted">Ubah banyak host sekaligus lalu klik simpan sekali (tanpa toggle satu-satu).</span>
+                </div>
+            </form>
             <p class="muted" style="margin-top:8px;">Akun prioritas: connect/deteksi rate normal. Non-prioritas: <strong>{{ 'lambat (' ~ non_priority_slow_seconds ~ 's)' if non_priority_mode == 'slow' else 'non-aktif' }}</strong>.</p>
         </div>
 
@@ -578,8 +580,38 @@ def save_host_priority_mode():
     return redirect("/admin/settings")
 
 
+@settings_bp.route("/settings/hosts/save", methods=["POST"])
+def save_hosts_batch():
+    conn = get_db_connection()
+    changed = 0
+    deleted = 0
+    try:
+        rows = conn.execute("SELECT host_id, tiktok_username, COALESCE(is_active,1), COALESCE(is_priority,1) FROM hosts").fetchall()
+        for host_id, username, is_active, is_priority in rows:
+            hid = str(host_id)
+            if request.form.get(f"delete_{hid}") == "1":
+                conn.execute("DELETE FROM hosts WHERE host_id = ?", (host_id,))
+                deleted += 1
+                changed += 1
+                continue
+            new_active = 1 if request.form.get(f"active_{hid}") == "1" else 0
+            new_priority = 1 if request.form.get(f"priority_{hid}") == "1" else 0
+            if int(is_active or 0) != new_active or int(is_priority or 0) != new_priority:
+                conn.execute(
+                    "UPDATE hosts SET is_active = ?, is_priority = ? WHERE host_id = ?",
+                    (new_active, new_priority, host_id),
+                )
+                changed += 1
+        conn.commit()
+    finally:
+        conn.close()
+    log_activity_event("system", f"Batch host settings saved (changed={changed}, deleted={deleted}).", "")
+    return redirect("/admin/settings?saved=1")
+
+
 @settings_bp.route("/toggle-host-priority/<int:host_id>")
 def toggle_host_priority_route(host_id):
+    # Kept for backward compatibility; settings UI now uses batch save.
     conn = get_db_connection()
     try:
         row = conn.execute("SELECT tiktok_username, COALESCE(is_priority,1) FROM hosts WHERE host_id = ?", (host_id,)).fetchone()
