@@ -970,6 +970,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                         gift_count=repeat,
                         coins=coins,
                         msg_id=msg_id,
+                        host_name=current_host,
                     )
                     if not inserted:
                         print(
@@ -995,6 +996,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     # Log activity gift lengkap: tanggal, nama akun, user, nama gift, jumlah koin, total koin saat ini
                     gift_msg = (
                         f"[{full_datetime}] [{channel_name} (@{username_clean})] "
+                        f"Host: {current_host} | "
                         f"User: @{user} - {gift_name} x{repeat} ({diamond} diamonds) = {coins} coins [{coins}c] - "
                         f"[channel {channel_spent} c] - [today {today_spent} c] - [current total: {total_all} c]"
                     )

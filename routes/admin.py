@@ -7,7 +7,7 @@ try:
 except ImportError:
     import sqlite3 as libsql
 import pytz
-from datetime import datetime
+from datetime import datetime, timedelta
 from db import (
     get_db_connection, 
     get_all_host_names, 
@@ -24,6 +24,16 @@ from db import (
     get_all_verification_status,
     save_verification_status,
     delete_verification_status,
+    get_analytics_summary,
+    get_analytics_sessions,
+    get_analytics_session_breakdown,
+    get_analytics_timeseries,
+    get_analytics_gift_by_host,
+    get_analytics_gift_by_account,
+    get_analytics_viewer_ranking,
+    get_analytics_viewer_host_spend,
+    get_analytics_host_options,
+    get_analytics_account_options,
 )
 from runtime_status import get_live_snapshot, clear_all_live
 from verification import fetch_tiktok_display_name
@@ -392,7 +402,7 @@ def view_viewer_detail(tiktok_user):
                 gift_count, 
                 coins, 
                 COALESCE(target_username, '-') as target_username, 
-                COALESCE(scheduled_host, '-') as scheduled_host
+                COALESCE(NULLIF(host_name, ''), NULLIF(scheduled_host, ''), '-') as scheduled_host
             FROM gift_logs
             WHERE LOWER(viewer_username) = ?
             ORDER BY log_datetime DESC, created_at DESC
@@ -908,6 +918,7 @@ def view_activity():
                     <th style="width: 50px;">NO</th>
                     <th>DATE & TIME (WIB)</th>
                     <th>ACCOUNT NAME (CHANNEL)</th>
+                    <th>HOST</th>
                     <th>USER (DONOR)</th>
                     <th>GIFT NAME</th>
                     <th>COIN AMOUNT</th>
@@ -920,6 +931,9 @@ def view_activity():
                     <td>
                         <strong>{{ g[3] }}</strong>
                         <span style="color: #38bdf8; font-size: 0.8rem; display: block;">@{{ g[2] }}</span>
+                    </td>
+                    <td>
+                        <span class="badge" style="background: #7c3aed;">{{ g[10] or 'Host' }}</span>
                     </td>
                     <td>
                         <strong style="color: #f8fafc;">{{ g[5] }}</strong>
@@ -937,7 +951,7 @@ def view_activity():
                 </tr>
                 {% else %}
                 <tr>
-                    <td colspan="7" style="text-align: center; color: #64748b; padding: 20px;">
+                    <td colspan="8" style="text-align: center; color: #64748b; padding: 20px;">
                         No gift activity recorded for this filter yet.
                     </td>
                 </tr>
@@ -1069,6 +1083,629 @@ def view_activity():
     </html>
     """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
     return render_template_string(html, logs=logs, gift_activities=gift_activities, all_hosts=all_hosts, current_filter=channel_filter)
+
+def _fmt_duration(seconds) -> str:
+    seconds = int(seconds or 0)
+    if seconds <= 0:
+        return "-"
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}j {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+ANALYTICS_PRESETS = [
+    ("today", "Hari ini"),
+    ("yesterday", "Kemarin"),
+    ("7d", "7 hari terakhir"),
+    ("30d", "30 hari terakhir"),
+    ("90d", "90 hari terakhir"),
+    ("this_week", "Minggu ini"),
+    ("this_month", "Bulan ini"),
+    ("last_month", "Bulan lalu"),
+    ("all", "Semua waktu"),
+    ("custom", "Kustom"),
+]
+
+
+def _parse_iso_date(value, fallback):
+    try:
+        return datetime.strptime(str(value).strip()[:10], "%Y-%m-%d").date()
+    except Exception:
+        return fallback
+
+
+@admin_bp.route('/analytics', methods=['GET'])
+def view_analytics():
+    wib = pytz.timezone('Asia/Jakarta')
+    today = datetime.now(wib).date()
+
+    preset_values = {p[0] for p in ANALYTICS_PRESETS}
+    preset = (request.args.get('preset') or '7d').strip()
+    if preset not in preset_values:
+        preset = '7d'
+
+    if preset == 'custom':
+        start_d = _parse_iso_date(request.args.get('start'), today - timedelta(days=6))
+        end_d = _parse_iso_date(request.args.get('end'), today)
+        if start_d > end_d:
+            start_d, end_d = end_d, start_d
+    elif preset == 'today':
+        start_d = end_d = today
+    elif preset == 'yesterday':
+        start_d = end_d = today - timedelta(days=1)
+    elif preset == '7d':
+        start_d, end_d = today - timedelta(days=6), today
+    elif preset == '30d':
+        start_d, end_d = today - timedelta(days=29), today
+    elif preset == '90d':
+        start_d, end_d = today - timedelta(days=89), today
+    elif preset == 'this_week':
+        start_d, end_d = today - timedelta(days=today.weekday()), today
+    elif preset == 'this_month':
+        start_d, end_d = today.replace(day=1), today
+    elif preset == 'last_month':
+        first_this = today.replace(day=1)
+        last_prev = first_this - timedelta(days=1)
+        start_d, end_d = last_prev.replace(day=1), last_prev
+    elif preset == 'all':
+        conn = get_db_connection()
+        try:
+            row = conn.execute(
+                "SELECT MIN(log_date) FROM gift_logs WHERE log_date IS NOT NULL AND log_date != ''"
+            ).fetchone()
+        finally:
+            conn.close()
+        start_d = _parse_iso_date(row[0], today - timedelta(days=29)) if row and row[0] else today - timedelta(days=29)
+        end_d = today
+    else:
+        start_d, end_d = today - timedelta(days=6), today
+
+    start_str = start_d.strftime('%Y-%m-%d')
+    end_str = end_d.strftime('%Y-%m-%d')
+
+    host_filter = (request.args.get('host') or '').strip()
+    account_filter = (request.args.get('account') or '').strip().lstrip('@')
+    viewer_filter = (request.args.get('viewer') or '').strip().lstrip('@')
+
+    days = (end_d - start_d).days + 1
+    group_by = (request.args.get('group') or '').strip()
+    if group_by not in ('day', 'week', 'month'):
+        group_by = 'day' if days <= 45 else ('week' if days <= 200 else 'month')
+
+    chart_type = (request.args.get('chart') or 'bar').strip()
+    if chart_type not in ('bar', 'line', 'area'):
+        chart_type = 'bar'
+    metric = (request.args.get('metric') or 'coins').strip()
+    if metric not in ('coins', 'gifts', 'viewers', 'sessions'):
+        metric = 'coins'
+
+    host_arg = host_filter or None
+    account_arg = account_filter or None
+    viewer_arg = viewer_filter or None
+
+    summary = get_analytics_summary(start_str, end_str, host_arg, account_arg, viewer_arg)
+    session_summary = get_analytics_sessions(start_str, end_str, host_arg, account_arg)
+    session_break = get_analytics_session_breakdown(start_str, end_str, host_arg, account_arg)
+    series = get_analytics_timeseries(start_str, end_str, group_by, host_arg, account_arg, viewer_arg)
+    gift_by_host = get_analytics_gift_by_host(start_str, end_str, account_arg, viewer_arg)
+    gift_by_account = get_analytics_gift_by_account(start_str, end_str, host_arg, viewer_arg)
+    viewer_rows_raw = get_analytics_viewer_ranking(start_str, end_str, host_arg, account_arg, 100)
+    spend_rows_raw = get_analytics_viewer_host_spend(start_str, end_str, viewer_arg, host_arg, account_arg, 200)
+    host_options = get_analytics_host_options()
+    account_options = get_analytics_account_options()
+
+    total_coins = summary.get('coins', 0) or 0
+
+    def _pct(part):
+        return round((part / total_coins * 100), 1) if total_coins else 0.0
+
+    host_rows = []
+    seen_hosts = set()
+    for key, label, coins, gifts, viewers, accounts in gift_by_host:
+        k = (key or '').lower()
+        sessions, duration = session_break['by_host'].get(k, (0, 0))
+        coins = int(coins or 0)
+        host_rows.append({
+            'key': k,
+            'name': label or key or 'Host',
+            'coins': coins,
+            'gifts': int(gifts or 0),
+            'viewers': int(viewers or 0),
+            'accounts': int(accounts or 0),
+            'sessions': int(sessions or 0),
+            'duration': _fmt_duration(duration),
+            'pct': _pct(coins),
+        })
+        seen_hosts.add(k)
+    for k, (sessions, duration) in session_break['by_host'].items():
+        if k in seen_hosts:
+            continue
+        host_rows.append({
+            'key': k, 'name': k or 'Host', 'coins': 0, 'gifts': 0, 'viewers': 0,
+            'accounts': 0, 'sessions': int(sessions or 0), 'duration': _fmt_duration(duration), 'pct': 0.0,
+        })
+    host_rows.sort(key=lambda r: (r['coins'], r['sessions']), reverse=True)
+
+    account_rows = []
+    seen_accounts = set()
+    for key, label, coins, gifts, viewers, hosts_count in gift_by_account:
+        k = (key or '').lower()
+        sessions, duration = session_break['by_account'].get(k, (0, 0))
+        coins = int(coins or 0)
+        account_rows.append({
+            'key': k,
+            'name': label or key or k,
+            'coins': coins,
+            'gifts': int(gifts or 0),
+            'viewers': int(viewers or 0),
+            'hosts': int(hosts_count or 0),
+            'sessions': int(sessions or 0),
+            'duration': _fmt_duration(duration),
+            'pct': _pct(coins),
+        })
+        seen_accounts.add(k)
+    for k, (sessions, duration) in session_break['by_account'].items():
+        if k in seen_accounts:
+            continue
+        account_rows.append({
+            'key': k, 'name': k, 'coins': 0, 'gifts': 0, 'viewers': 0, 'hosts': 0,
+            'sessions': int(sessions or 0), 'duration': _fmt_duration(duration), 'pct': 0.0,
+        })
+    account_rows.sort(key=lambda r: (r['coins'], r['sessions']), reverse=True)
+
+    viewer_rows = [{
+        'key': (r[0] or '').lower(),
+        'name': r[1] or r[0],
+        'coins': int(r[2] or 0),
+        'gifts': int(r[3] or 0),
+        'hosts': int(r[4] or 0),
+        'last_at': r[5] or '-',
+        'pct': _pct(int(r[2] or 0)),
+    } for r in viewer_rows_raw]
+
+    spend_rows = [{
+        'viewer': (r[0] or '').lower(),
+        'display': r[1] or r[0],
+        'host': r[2] or '-',
+        'coins': int(r[3] or 0),
+        'gifts': int(r[4] or 0),
+        'pct': _pct(int(r[3] or 0)),
+    } for r in spend_rows_raw]
+
+    host_max = max([r['coins'] for r in host_rows] + [0])
+    account_max = max([r['coins'] for r in account_rows] + [0])
+
+    chart_payload = {
+        'labels': [b['label'] for b in series],
+        'keys': [b['key'] for b in series],
+        'coins': [b['coins'] for b in series],
+        'gifts': [b['gifts'] for b in series],
+        'viewers': [b['viewers'] for b in series],
+        'sessions': [b['sessions'] for b in series],
+    }
+
+    def _link(**overrides):
+        params = {
+            'preset': preset,
+            'start': start_str,
+            'end': end_str,
+            'host': host_filter,
+            'account': account_filter,
+            'viewer': viewer_filter,
+            'group': group_by,
+        }
+        params.update(overrides)
+        query = '&'.join(f"{k}={quote_plus(str(v))}" for k, v in params.items() if v)
+        return '/admin/analytics' + ('?' + query if query else '')
+
+    html = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Analytics</title>
+        <style>BASE_CSS_PLACEHOLDER</style>
+        <style>
+            .analytics-form label { display: flex; flex-direction: column; gap: 4px; font-size: 0.78rem; color: #94a3b8; font-weight: 600; }
+            .analytics-form select, .analytics-form input { width: 100%; }
+            .analytics-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+            .analytics-chips .nav-btn { padding: 6px 10px; font-size: 0.78rem; }
+            .chart-wrap { background: #0b1220; border: 1px solid var(--border); border-radius: 10px; padding: 10px; overflow: hidden; }
+            .chart-toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+            .chart-toolbar label { color: #94a3b8; font-size: 0.78rem; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+            .rank-bar { height: 6px; background: #0b1220; border-radius: 999px; overflow: hidden; margin-top: 5px; min-width: 60px; }
+            .rank-bar > span { display: block; height: 100%; background: linear-gradient(90deg, #0284c7, #38bdf8); }
+            .analytics-scroll { max-height: 420px; overflow-y: auto; }
+            .muted { color: #94a3b8; }
+            .share-pill { color: #7dd3fc; font-weight: 700; }
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <div>
+                <h1>📈 Analytics</h1>
+                <p class="page-subtitle">{{ start_str }} s/d {{ end_str }} (WIB) · {{ days }} hari · grup: {{ group_by }}</p>
+            </div>
+            <a class="nav-btn" href="/admin/analytics?preset=7d">🔄 Reset Filter</a>
+        </div>
+        NAV_HTML_PLACEHOLDER
+
+        <div class="card">
+            <div class="card-header">
+                <h2>🔎 Filter &amp; Rentang</h2>
+                <span class="muted" style="font-size:0.8rem;">Semua metrik di bawah mengikuti filter ini</span>
+            </div>
+            <div class="analytics-chips">
+                <button type="button" class="nav-btn" onclick="applyPreset('today')">Hari ini</button>
+                <button type="button" class="nav-btn" onclick="applyPreset('7d')">7 hari</button>
+                <button type="button" class="nav-btn" onclick="applyPreset('30d')">30 hari</button>
+                <button type="button" class="nav-btn" onclick="applyPreset('this_month')">Bulan ini</button>
+                <button type="button" class="nav-btn" onclick="applyPreset('last_month')">Bulan lalu</button>
+                <button type="button" class="nav-btn" onclick="applyPreset('all')">Semua</button>
+            </div>
+            <form method="GET" action="/admin/analytics" class="analytics-form" id="analytics-form">
+                <div class="form-grid">
+                    <label>Rentang
+                        <select name="preset" id="preset-select">
+                            {% for value, label in presets %}
+                            <option value="{{ value }}" {% if preset == value %}selected{% endif %}>{{ label }}</option>
+                            {% endfor %}
+                        </select>
+                    </label>
+                    <label>Dari tanggal
+                        <input type="date" name="start" value="{{ start_str }}">
+                    </label>
+                    <label>Sampai tanggal
+                        <input type="date" name="end" value="{{ end_str }}">
+                    </label>
+                    <label>Host
+                        <select name="host">
+                            <option value="">Semua host</option>
+                            {% for h in host_options %}
+                            <option value="{{ h }}" {% if host_filter|lower == h|lower %}selected{% endif %}>{{ h }}</option>
+                            {% endfor %}
+                        </select>
+                    </label>
+                    <label>Akun TikTok
+                        <select name="account">
+                            <option value="">Semua akun</option>
+                            {% for a in account_options %}
+                            <option value="{{ a }}" {% if account_filter|lower == a|lower %}selected{% endif %}>@{{ a }}</option>
+                            {% endfor %}
+                        </select>
+                    </label>
+                    <label>Viewer (opsional)
+                        <input type="text" name="viewer" value="{{ viewer_filter }}" placeholder="username TikTok">
+                    </label>
+                    <label>Group grafik
+                        <select name="group">
+                            <option value="day" {% if group_by == 'day' %}selected{% endif %}>Per hari</option>
+                            <option value="week" {% if group_by == 'week' %}selected{% endif %}>Per minggu</option>
+                            <option value="month" {% if group_by == 'month' %}selected{% endif %}>Per bulan</option>
+                        </select>
+                    </label>
+                    <label>&nbsp;
+                        <button type="submit" class="btn-save" style="background:#0e7490;">Terapkan Filter</button>
+                    </label>
+                </div>
+                <p class="muted" style="font-size:0.76rem; margin-top:8px;">Preset "Kustom" memakai tanggal Dari/Sampai. Filter viewer dipakai untuk analisa spent viewer &amp; grafik pribadinya.</p>
+            </form>
+        </div>
+
+        <div class="stat-grid">
+            <div class="stat-box">
+                <div class="muted" style="font-size:0.82rem;">TOTAL KOIN</div>
+                <div class="stat-number" style="color:#eab308;">{{ summary.coins }} c</div>
+            </div>
+            <div class="stat-box">
+                <div class="muted" style="font-size:0.82rem;">GIFT MASUK</div>
+                <div class="stat-number">{{ summary.gifts }}</div>
+                <div class="muted" style="font-size:0.75rem;">{{ summary.gift_rows }} transaksi log</div>
+            </div>
+            <div class="stat-box">
+                <div class="muted" style="font-size:0.82rem;">VIEWER UNIK</div>
+                <div class="stat-number" style="color:#22c55e;">{{ summary.viewers }}</div>
+            </div>
+            <div class="stat-box">
+                <div class="muted" style="font-size:0.82rem;">HOST AKTIF</div>
+                <div class="stat-number">{{ summary.hosts }}</div>
+            </div>
+            <div class="stat-box">
+                <div class="muted" style="font-size:0.82rem;">AKUN LIVE</div>
+                <div class="stat-number">{{ summary.accounts }}</div>
+            </div>
+            <div class="stat-box">
+                <div class="muted" style="font-size:0.82rem;">SESI LIVE</div>
+                <div class="stat-number">{{ session_summary.sessions }}</div>
+                <div class="muted" style="font-size:0.75rem;">rata-rata {{ session_summary.avg_duration // 60 }} mnt</div>
+            </div>
+            <div class="stat-box">
+                <div class="muted" style="font-size:0.82rem;">DURASI LIVE</div>
+                <div class="stat-number" style="color:#f472b6;">{{ fmt_duration(session_summary.duration) }}</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h2>📊 Tren Metrik</h2>
+                <div class="chart-toolbar">
+                    <label>Metrik
+                        <select id="chart-metric">
+                            <option value="coins">Koin</option>
+                            <option value="gifts">Gift</option>
+                            <option value="viewers">Viewer unik</option>
+                            <option value="sessions">Sesi live</option>
+                        </select>
+                    </label>
+                    <label>Format
+                        <select id="chart-type">
+                            <option value="bar">Bar</option>
+                            <option value="line">Line</option>
+                            <option value="area">Area</option>
+                        </select>
+                    </label>
+                </div>
+            </div>
+            <div class="chart-wrap">
+                <div id="chart-svg"></div>
+            </div>
+            <div class="table-scroll analytics-scroll" style="margin-top:12px;">
+                <table>
+                    <tr><th>Periode</th><th>Koin</th><th>Gift</th><th>Viewer unik</th><th>Sesi live</th></tr>
+                    {% for b in series %}
+                    <tr>
+                        <td><strong>{{ b.label }}</strong></td>
+                        <td>{{ b.coins }} c</td>
+                        <td>{{ b.gifts }}</td>
+                        <td>{{ b.viewers }}</td>
+                        <td>{{ b.sessions }}</td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="5" class="muted">Tidak ada data pada rentang ini.</td></tr>
+                    {% endfor %}
+                </table>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h2>🏆 Ranking Host</h2>
+                <span class="muted" style="font-size:0.8rem;">Klik nama host untuk melihat koin host tersebut di rentang tanggal ini</span>
+            </div>
+            <div class="table-scroll analytics-scroll">
+                <table>
+                    <tr><th>#</th><th>Host</th><th>Koin</th><th>Share</th><th>Gift</th><th>Viewer</th><th>Akun</th><th>Sesi</th><th>Durasi live</th></tr>
+                    {% for h in host_rows %}
+                    <tr>
+                        <td>{{ loop.index }}</td>
+                        <td>
+                            <a href="{{ _link(preset='custom', host=h.name) }}" class="host-link">{{ h.name }}</a>
+                            <div class="rank-bar"><span style="width: {{ (h.coins / host_max * 100) if host_max else 0 }}%;"></span></div>
+                        </td>
+                        <td><span class="badge" style="background:#ca8a04;">{{ h.coins }} c</span></td>
+                        <td class="share-pill">{{ h.pct }}%</td>
+                        <td>{{ h.gifts }}</td>
+                        <td>{{ h.viewers }}</td>
+                        <td>{{ h.accounts }}</td>
+                        <td>{{ h.sessions }}</td>
+                        <td>{{ h.duration }}</td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="9" class="muted">Belum ada data host pada rentang ini.</td></tr>
+                    {% endfor %}
+                </table>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h2>📡 Traffic &amp; Ranking Akun</h2>
+                <span class="muted" style="font-size:0.8rem;">Koin, sesi live, durasi, viewer, dan jumlah host per akun</span>
+            </div>
+            <div class="table-scroll analytics-scroll">
+                <table>
+                    <tr><th>#</th><th>Akun TikTok</th><th>Koin</th><th>Share</th><th>Gift</th><th>Viewer</th><th>Host</th><th>Sesi</th><th>Durasi live</th></tr>
+                    {% for a in account_rows %}
+                    <tr>
+                        <td>{{ loop.index }}</td>
+                        <td>
+                            <a href="{{ _link(preset='custom', account=a.name) }}" class="viewer-link">@{{ a.name }}</a>
+                            <div class="rank-bar"><span style="width: {{ (a.coins / account_max * 100) if account_max else 0 }}%;"></span></div>
+                        </td>
+                        <td><span class="badge" style="background:#ca8a04;">{{ a.coins }} c</span></td>
+                        <td class="share-pill">{{ a.pct }}%</td>
+                        <td>{{ a.gifts }}</td>
+                        <td>{{ a.viewers }}</td>
+                        <td>{{ a.hosts }}</td>
+                        <td>{{ a.sessions }}</td>
+                        <td>{{ a.duration }}</td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="9" class="muted">Belum ada data akun pada rentang ini.</td></tr>
+                    {% endfor %}
+                </table>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h2>💎 Ranking Viewer (Spent Koin)</h2>
+                <span class="muted" style="font-size:0.8rem;">Klik nama viewer untuk analisa spent-nya per host</span>
+            </div>
+            <div class="table-scroll analytics-scroll">
+                <table>
+                    <tr><th>#</th><th>Viewer</th><th>Koin</th><th>Share</th><th>Gift</th><th>Host berbeda</th><th>Terakhir gift</th></tr>
+                    {% for v in viewer_rows %}
+                    <tr>
+                        <td>{{ loop.index }}</td>
+                        <td>
+                            <a href="{{ _link(preset='custom', viewer=v.key) }}" class="viewer-link">{{ v.name }}</a>
+                            <span class="muted" style="font-size:0.75rem; display:block;">@{{ v.key }}</span>
+                        </td>
+                        <td><span class="badge" style="background:#ca8a04;">{{ v.coins }} c</span></td>
+                        <td class="share-pill">{{ v.pct }}%</td>
+                        <td>{{ v.gifts }}</td>
+                        <td>{{ v.hosts }}</td>
+                        <td class="muted" style="font-size:0.78rem;">{{ v.last_at }}</td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="7" class="muted">Belum ada data viewer pada rentang ini.</td></tr>
+                    {% endfor %}
+                </table>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h2>🎯 Spent Viewer ke Host{% if viewer_filter %} — @{{ viewer_filter }}{% endif %}</h2>
+                <span class="muted" style="font-size:0.8rem;">Berapa koin yang dibelanjakan ke masing-masing host dalam rentang ini</span>
+            </div>
+            <div class="table-scroll analytics-scroll">
+                <table>
+                    <tr><th>#</th><th>Viewer</th><th>Host</th><th>Koin</th><th>Share</th><th>Gift</th></tr>
+                    {% for s in spend_rows %}
+                    <tr>
+                        <td>{{ loop.index }}</td>
+                        <td><strong>{{ s.display }}</strong><span class="muted" style="font-size:0.75rem; display:block;">@{{ s.viewer }}</span></td>
+                        <td><span class="badge" style="background:#7c3aed;">{{ s.host }}</span></td>
+                        <td><span class="badge" style="background:#ca8a04;">{{ s.coins }} c</span></td>
+                        <td class="share-pill">{{ s.pct }}%</td>
+                        <td>{{ s.gifts }}</td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="6" class="muted">Belum ada data spent viewer ke host pada rentang ini.</td></tr>
+                    {% endfor %}
+                </table>
+            </div>
+        </div>
+
+        AUTO_REFRESH_JS_PLACEHOLDER
+        <script>
+        (function () {
+            var DATA = {{ chart_payload|tojson }};
+            var state = { metric: {{ metric|tojson }}, type: {{ chart_type|tojson }} };
+            var metricSelect = document.getElementById('chart-metric');
+            var typeSelect = document.getElementById('chart-type');
+            if (metricSelect) { metricSelect.value = state.metric; metricSelect.addEventListener('change', function () { state.metric = this.value; draw(); }); }
+            if (typeSelect) { typeSelect.value = state.type; typeSelect.addEventListener('change', function () { state.type = this.value; draw(); }); }
+
+            function fmt(n) { return (Math.round(n || 0)).toLocaleString('id-ID'); }
+            function niceCeil(v) {
+                if (!v || v <= 0) return 1;
+                var exp = Math.pow(10, Math.floor(Math.log10(v)));
+                var f = v / exp;
+                var nf = f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10;
+                return nf * exp;
+            }
+            function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+
+            function draw() {
+                var wrap = document.getElementById('chart-svg');
+                if (!wrap) return;
+                var labels = DATA.labels || [];
+                var values = DATA[state.metric] || [];
+                if (!labels.length) {
+                    wrap.innerHTML = '<div class="muted" style="padding:40px;text-align:center;">Tidak ada data untuk filter ini.</div>';
+                    return;
+                }
+                var width = Math.max(320, wrap.clientWidth || 800);
+                var height = 300;
+                var pad = { l: 58, r: 18, t: 22, b: 62 };
+                var pw = width - pad.l - pad.r;
+                var ph = height - pad.t - pad.b;
+                var maxV = Math.max.apply(null, values.concat([0]));
+                var top = niceCeil(maxV);
+                var parts = [];
+                parts.push('<svg viewBox="0 0 ' + width + ' ' + height + '" width="100%" height="' + height + '" role="img" aria-label="Grafik metrik">');
+                parts.push('<defs><linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#38bdf8" stop-opacity="0.45"/><stop offset="100%" stop-color="#38bdf8" stop-opacity="0.02"/></linearGradient></defs>');
+                for (var t = 0; t <= 4; t++) {
+                    var y = pad.t + ph - (ph * t / 4);
+                    var val = top * t / 4;
+                    parts.push('<line x1="' + pad.l + '" y1="' + y + '" x2="' + (pad.l + pw) + '" y2="' + y + '" stroke="#1e293b" stroke-width="1"/>');
+                    parts.push('<text x="' + (pad.l - 8) + '" y="' + (y + 4) + '" text-anchor="end" fill="#64748b" font-size="10">' + fmt(val) + '</text>');
+                }
+                var n = values.length;
+                var slot = pw / n;
+                if (state.type === 'bar') {
+                    var bw = Math.max(2, Math.min(44, slot * 0.62));
+                    for (var i = 0; i < n; i++) {
+                        var bh = ph * (values[i] / top);
+                        var bx = pad.l + slot * i + (slot - bw) / 2;
+                        var by = pad.t + ph - bh;
+                        parts.push('<rect x="' + bx + '" y="' + by + '" width="' + bw + '" height="' + Math.max(0, bh) + '" rx="3" fill="#38bdf8"><title>' + esc(labels[i]) + ': ' + fmt(values[i]) + '</title></rect>');
+                    }
+                } else {
+                    var pts = [];
+                    for (var j = 0; j < n; j++) {
+                        pts.push([pad.l + slot * (j + 0.5), pad.t + ph - ph * (values[j] / top)]);
+                    }
+                    if (state.type === 'area') {
+                        var area = 'M' + pts[0][0] + ',' + (pad.t + ph) + ' L' + pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' L') + ' L' + pts[n - 1][0] + ',' + (pad.t + ph) + ' Z';
+                        parts.push('<path d="' + area + '" fill="url(#areaGrad)" stroke="none"/>');
+                    }
+                    parts.push('<polyline fill="none" stroke="#38bdf8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" points="' + pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' ') + '"/>');
+                    for (var k = 0; k < n; k++) {
+                        parts.push('<circle cx="' + pts[k][0] + '" cy="' + pts[k][1] + '" r="3.5" fill="#0b1220" stroke="#38bdf8" stroke-width="2"><title>' + esc(labels[k]) + ': ' + fmt(values[k]) + '</title></circle>');
+                    }
+                }
+                var step = Math.max(1, Math.ceil(n / 12));
+                for (var x = 0; x < n; x += step) {
+                    var cx = pad.l + slot * (x + 0.5);
+                    parts.push('<text x="' + cx + '" y="' + (pad.t + ph + 18) + '" text-anchor="end" fill="#94a3b8" font-size="10" transform="rotate(-28 ' + cx + ' ' + (pad.t + ph + 18) + ')">' + esc(labels[x]) + '</text>');
+                }
+                parts.push('</svg>');
+                wrap.innerHTML = parts.join('');
+            }
+            window.addEventListener('resize', function () { draw(); });
+            draw();
+        })();
+
+        function applyPreset(value) {
+            var form = document.getElementById('analytics-form');
+            var select = document.getElementById('preset-select');
+            if (!form || !select) return;
+            select.value = value;
+            form.submit();
+        }
+        </script>
+    </body>
+    </html>
+    """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
+
+    return render_template_string(
+        html,
+        summary=summary,
+        session_summary=session_summary,
+        series=series,
+        host_rows=host_rows,
+        account_rows=account_rows,
+        viewer_rows=viewer_rows,
+        spend_rows=spend_rows,
+        chart_payload=chart_payload,
+        start_str=start_str,
+        end_str=end_str,
+        days=days,
+        preset=preset,
+        presets=ANALYTICS_PRESETS,
+        group_by=group_by,
+        host_filter=host_filter,
+        account_filter=account_filter,
+        viewer_filter=viewer_filter,
+        host_options=host_options,
+        account_options=account_options,
+        host_max=host_max,
+        account_max=account_max,
+        metric=metric,
+        chart_type=chart_type,
+        fmt_duration=_fmt_duration,
+        _link=_link,
+    )
+
 
 def _get_bot_instance():
     """Ambil instance bot Discord dari modul main (proses yang sama dengan Flask)."""

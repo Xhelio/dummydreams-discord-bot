@@ -143,6 +143,7 @@ NAV_HTML = """
         <a href="/admin/viewers" class="nav-btn" data-path="/admin/viewers">👥 Viewers & Coins</a>
         <a href="/admin/monitor" class="nav-btn" data-path="/admin/monitor">📹 Live Monitor</a>
         <a href="/admin/activity" class="nav-btn" data-path="/admin/activity">📊 Activity Log</a>
+        <a href="/admin/analytics" class="nav-btn" data-path="/admin/analytics">📈 Analytics</a>
         <a href="/admin/verifications" class="nav-btn" data-path="/admin/verifications">🔐 Verification</a>
         <a href="/admin/settings" class="nav-btn" data-path="/admin/settings">⚙️ Settings</a>
     </nav>

@@ -120,7 +120,8 @@ def get_recent_gift_activities(limit: int = 100, channel_filter: str = "") -> li
                 g.gift_name,
                 g.gift_count,
                 g.coins,
-                COALESCE(u.total_coins, 0) as current_total_coins
+                COALESCE(u.total_coins, 0) as current_total_coins,
+                COALESCE(NULLIF(g.host_name, ''), NULLIF(g.scheduled_host, ''), g.target_username) as host_name
             FROM gift_logs g
             LEFT JOIN hosts h ON LOWER(g.target_username) = LOWER(h.tiktok_username)
             LEFT JOIN tiktok_gifts u ON LOWER(g.viewer_username) = LOWER(u.tiktok_user)
@@ -134,6 +135,407 @@ def get_recent_gift_activities(limit: int = 100, channel_filter: str = "") -> li
         return cur.execute(sql, tuple(params)).fetchall()
     finally:
         conn.close()
+
+# ----------------------------- Analytics -----------------------------
+
+_ANALYTICS_HOST_KEY = (
+    "LOWER(COALESCE(NULLIF(g.host_name, ''), NULLIF(g.scheduled_host, ''), g.target_username))"
+)
+_ANALYTICS_HOST_LABEL = (
+    "COALESCE(MAX(NULLIF(g.host_name, '')), MAX(NULLIF(g.scheduled_host, '')), "
+    "MAX(g.target_username))"
+)
+
+
+def _analytics_gift_where(start_date, end_date, host=None, account=None, viewer=None):
+    clauses = ["g.log_date BETWEEN ? AND ?"]
+    params = [str(start_date), str(end_date)]
+    if host:
+        clauses.append(_ANALYTICS_HOST_KEY + " = ?")
+        params.append(str(host).strip().lower().lstrip("@"))
+    if account:
+        clauses.append("LOWER(g.target_username) = ?")
+        params.append(str(account).strip().lower().lstrip("@"))
+    if viewer:
+        clauses.append("LOWER(g.viewer_username) = ?")
+        params.append(str(viewer).strip().lower().lstrip("@"))
+    return " AND ".join(clauses), params
+
+
+def _analytics_session_where(start_date, end_date, host=None, account=None):
+    clauses = ["substr(start_time, 1, 10) BETWEEN ? AND ?"]
+    params = [str(start_date), str(end_date)]
+    if account:
+        clauses.append("LOWER(tiktok_username) = ?")
+        params.append(str(account).strip().lower().lstrip("@"))
+    if host:
+        clauses.append("LOWER(COALESCE(NULLIF(scheduled_host, ''), tiktok_username)) = ?")
+        params.append(str(host).strip().lower().lstrip("@"))
+    return " AND ".join(clauses), params
+
+
+def get_analytics_summary(start_date, end_date, host=None, account=None, viewer=None) -> dict:
+    """Ringkasan koin/gift/viewer/host/akun pada rentang tanggal."""
+    where, params = _analytics_gift_where(start_date, end_date, host, account, viewer)
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        row = cur.execute(f"""
+            SELECT COALESCE(SUM(g.coins), 0),
+                   COUNT(*),
+                   COALESCE(SUM(g.gift_count), 0),
+                   COUNT(DISTINCT LOWER(g.viewer_username)),
+                   COUNT(DISTINCT {_ANALYTICS_HOST_KEY}),
+                   COUNT(DISTINCT LOWER(g.target_username))
+            FROM gift_logs g
+            WHERE {where}
+        """, params).fetchone()
+        return {
+            "coins": int(row[0] or 0) if row else 0,
+            "gift_rows": int(row[1] or 0) if row else 0,
+            "gifts": int(row[2] or 0) if row else 0,
+            "viewers": int(row[3] or 0) if row else 0,
+            "hosts": int(row[4] or 0) if row else 0,
+            "accounts": int(row[5] or 0) if row else 0,
+        }
+    except Exception as e:
+        print(f"[Analytics] summary failed: {e}")
+        return {"coins": 0, "gift_rows": 0, "gifts": 0, "viewers": 0, "hosts": 0, "accounts": 0}
+    finally:
+        conn.close()
+
+
+def get_analytics_sessions(start_date, end_date, host=None, account=None) -> dict:
+    """Ringkasan sesi live (traffic) pada rentang tanggal."""
+    where, params = _analytics_session_where(start_date, end_date, host, account)
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        row = cur.execute(f"""
+            SELECT COUNT(*), COALESCE(SUM(duration_seconds), 0),
+                   COUNT(DISTINCT LOWER(tiktok_username))
+            FROM live_sessions
+            WHERE {where}
+        """, params).fetchone()
+        count = int(row[0] or 0) if row else 0
+        duration = int(row[1] or 0) if row else 0
+        return {
+            "sessions": count,
+            "duration": duration,
+            "avg_duration": int(duration / count) if count else 0,
+            "accounts": int(row[2] or 0) if row else 0,
+        }
+    except Exception as e:
+        print(f"[Analytics] sessions failed: {e}")
+        return {"sessions": 0, "duration": 0, "avg_duration": 0, "accounts": 0}
+    finally:
+        conn.close()
+
+
+def get_analytics_session_breakdown(start_date, end_date, host=None, account=None) -> dict:
+    """Sesi live per host dan per akun: {lower_key: (sessions, duration)}."""
+    where, params = _analytics_session_where(start_date, end_date, host, account)
+    by_host = {}
+    by_account = {}
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        rows = cur.execute(f"""
+            SELECT LOWER(tiktok_username),
+                   LOWER(COALESCE(NULLIF(scheduled_host, ''), tiktok_username)),
+                   COUNT(*),
+                   COALESCE(SUM(duration_seconds), 0)
+            FROM live_sessions
+            WHERE {where}
+            GROUP BY 1, 2
+        """, params).fetchall()
+        for account_key, host_key, sessions, duration in rows:
+            a = (account_key or "").lower()
+            h = (host_key or "").lower()
+            sa, da = by_account.get(a, (0, 0))
+            by_account[a] = (sa + int(sessions or 0), da + int(duration or 0))
+            sh, dh = by_host.get(h, (0, 0))
+            by_host[h] = (sh + int(sessions or 0), dh + int(duration or 0))
+        return {"by_host": by_host, "by_account": by_account}
+    except Exception as e:
+        print(f"[Analytics] session breakdown failed: {e}")
+        return {"by_host": {}, "by_account": {}}
+    finally:
+        conn.close()
+
+
+def _analytics_parse_date(value):
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def _analytics_bucket_start(value, group_by):
+    if group_by == "week":
+        return value - timedelta(days=value.weekday())
+    if group_by == "month":
+        return value.replace(day=1)
+    return value
+
+
+def _analytics_bucket_key(value, group_by):
+    return _analytics_bucket_start(value, group_by).isoformat()
+
+
+def _analytics_bucket_label(value, group_by):
+    if group_by == "week":
+        return f"W{value.isocalendar()[1]:02d} {value.year}"
+    if group_by == "month":
+        return value.strftime("%b %Y")
+    return value.strftime("%d %b")
+
+
+def _analytics_next_bucket(value, group_by):
+    if group_by == "week":
+        return value + timedelta(days=7)
+    if group_by == "month":
+        if value.month == 12:
+            return value.replace(year=value.year + 1, month=1)
+        return value.replace(month=value.month + 1)
+    return value + timedelta(days=1)
+
+
+def get_analytics_timeseries(start_date, end_date, group_by="day", host=None,
+                             account=None, viewer=None) -> list:
+    """Deret waktu koin/gift/viewer/sesi per hari, minggu, atau bulan.
+
+    Bucket kosong tetap disertakan (nilai 0) supaya grafik tidak bolong.
+    """
+    group_by = group_by if group_by in ("day", "week", "month") else "day"
+    start_d = _analytics_parse_date(start_date)
+    end_d = _analytics_parse_date(end_date)
+    if not start_d or not end_d or start_d > end_d:
+        return []
+
+    where, params = _analytics_gift_where(start_date, end_date, host, account, viewer)
+    swhere, sparams = _analytics_session_where(start_date, end_date, host, account)
+
+    buckets = {}
+    order = []
+    cursor_day = _analytics_bucket_start(start_d, group_by)
+    while cursor_day <= end_d:
+        key = _analytics_bucket_key(cursor_day, group_by)
+        if key not in buckets:
+            buckets[key] = {
+                "key": key,
+                "label": _analytics_bucket_label(cursor_day, group_by),
+                "coins": 0,
+                "gifts": 0,
+                "sessions": 0,
+                "_viewers": set(),
+            }
+            order.append(key)
+        cursor_day = _analytics_next_bucket(cursor_day, group_by)
+
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        for log_date, coins, gifts in cur.execute(f"""
+            SELECT g.log_date, COALESCE(SUM(g.coins), 0), COALESCE(SUM(g.gift_count), 0)
+            FROM gift_logs g
+            WHERE {where}
+            GROUP BY g.log_date
+        """, params).fetchall():
+            parsed = _analytics_parse_date(log_date)
+            if not parsed:
+                continue
+            bucket = buckets.get(_analytics_bucket_key(parsed, group_by))
+            if not bucket:
+                continue
+            bucket["coins"] += int(coins or 0)
+            bucket["gifts"] += int(gifts or 0)
+
+        for log_date, viewer_key in cur.execute(f"""
+            SELECT g.log_date, LOWER(g.viewer_username)
+            FROM gift_logs g
+            WHERE {where}
+            GROUP BY g.log_date, LOWER(g.viewer_username)
+        """, params).fetchall():
+            parsed = _analytics_parse_date(log_date)
+            if not parsed:
+                continue
+            bucket = buckets.get(_analytics_bucket_key(parsed, group_by))
+            if bucket and viewer_key:
+                bucket["_viewers"].add(viewer_key)
+
+        for log_date, session_count in cur.execute(f"""
+            SELECT substr(start_time, 1, 10), COUNT(*)
+            FROM live_sessions
+            WHERE {swhere}
+            GROUP BY substr(start_time, 1, 10)
+        """, sparams).fetchall():
+            parsed = _analytics_parse_date(log_date)
+            if not parsed:
+                continue
+            bucket = buckets.get(_analytics_bucket_key(parsed, group_by))
+            if bucket:
+                bucket["sessions"] += int(session_count or 0)
+
+        return [
+            {
+                "key": buckets[k]["key"],
+                "label": buckets[k]["label"],
+                "coins": buckets[k]["coins"],
+                "gifts": buckets[k]["gifts"],
+                "viewers": len(buckets[k]["_viewers"]),
+                "sessions": buckets[k]["sessions"],
+            }
+            for k in order
+        ]
+    except Exception as e:
+        print(f"[Analytics] timeseries failed: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_analytics_gift_by_host(start_date, end_date, account=None, viewer=None) -> list:
+    where, params = _analytics_gift_where(start_date, end_date, None, account, viewer)
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        return cur.execute(f"""
+            SELECT {_ANALYTICS_HOST_KEY} AS host_key,
+                   {_ANALYTICS_HOST_LABEL} AS host,
+                   COALESCE(SUM(g.coins), 0),
+                   COALESCE(SUM(g.gift_count), 0),
+                   COUNT(DISTINCT LOWER(g.viewer_username)),
+                   COUNT(DISTINCT LOWER(g.target_username))
+            FROM gift_logs g
+            WHERE {where}
+            GROUP BY host_key
+            ORDER BY 3 DESC
+        """, params).fetchall()
+    except Exception as e:
+        print(f"[Analytics] host ranking failed: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_analytics_gift_by_account(start_date, end_date, host=None, viewer=None) -> list:
+    where, params = _analytics_gift_where(start_date, end_date, host, None, viewer)
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        return cur.execute(f"""
+            SELECT LOWER(g.target_username) AS account_key,
+                   MAX(g.target_username) AS account,
+                   COALESCE(SUM(g.coins), 0),
+                   COALESCE(SUM(g.gift_count), 0),
+                   COUNT(DISTINCT LOWER(g.viewer_username)),
+                   COUNT(DISTINCT {_ANALYTICS_HOST_KEY})
+            FROM gift_logs g
+            WHERE {where}
+            GROUP BY account_key
+            ORDER BY 3 DESC
+        """, params).fetchall()
+    except Exception as e:
+        print(f"[Analytics] account ranking failed: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_analytics_viewer_ranking(start_date, end_date, host=None, account=None, limit=100) -> list:
+    where, params = _analytics_gift_where(start_date, end_date, host, account, None)
+    params = list(params) + [int(limit)]
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        return cur.execute(f"""
+            SELECT LOWER(g.viewer_username),
+                   COALESCE(MAX(NULLIF(g.viewer_display_name, '')), MAX(g.viewer_username)),
+                   COALESCE(SUM(g.coins), 0),
+                   COALESCE(SUM(g.gift_count), 0),
+                   COUNT(DISTINCT {_ANALYTICS_HOST_KEY}),
+                   MAX(g.log_datetime)
+            FROM gift_logs g
+            WHERE {where}
+            GROUP BY LOWER(g.viewer_username)
+            ORDER BY 3 DESC
+            LIMIT ?
+        """, params).fetchall()
+    except Exception as e:
+        print(f"[Analytics] viewer ranking failed: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_analytics_viewer_host_spend(start_date, end_date, viewer=None, host=None,
+                                    account=None, limit=200) -> list:
+    where, params = _analytics_gift_where(start_date, end_date, host, account, viewer)
+    params = list(params) + [int(limit)]
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        return cur.execute(f"""
+            SELECT LOWER(g.viewer_username),
+                   COALESCE(MAX(NULLIF(g.viewer_display_name, '')), MAX(g.viewer_username)),
+                   {_ANALYTICS_HOST_LABEL} AS host,
+                   COALESCE(SUM(g.coins), 0),
+                   COALESCE(SUM(g.gift_count), 0)
+            FROM gift_logs g
+            WHERE {where}
+            GROUP BY LOWER(g.viewer_username), {_ANALYTICS_HOST_KEY}
+            ORDER BY 4 DESC
+            LIMIT ?
+        """, params).fetchall()
+    except Exception as e:
+        print(f"[Analytics] viewer-host spend failed: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_analytics_host_options() -> list:
+    conn = get_db_connection()
+    try:
+        rows = conn.execute("""
+            SELECT host FROM (
+                SELECT COALESCE(NULLIF(host_name, ''), NULLIF(scheduled_host, ''), target_username) AS host
+                FROM gift_logs
+                UNION
+                SELECT COALESCE(NULLIF(scheduled_host, ''), tiktok_username) AS host
+                FROM live_sessions
+            )
+            WHERE host IS NOT NULL AND host != ''
+            ORDER BY LOWER(host)
+        """).fetchall()
+        return [r[0] for r in rows if r[0]]
+    except Exception as e:
+        print(f"[Analytics] host options failed: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_analytics_account_options() -> list:
+    conn = get_db_connection()
+    try:
+        rows = conn.execute("""
+            SELECT account FROM (
+                SELECT LOWER(target_username) AS account FROM gift_logs
+                UNION
+                SELECT LOWER(tiktok_username) AS account FROM live_sessions
+            )
+            WHERE account IS NOT NULL AND account != ''
+            ORDER BY account
+        """).fetchall()
+        return [r[0] for r in rows if r[0]]
+    except Exception as e:
+        print(f"[Analytics] account options failed: {e}")
+        return []
+    finally:
+        conn.close()
+
 
 def get_all_host_names() -> list:
     """Return display names for every target host stored in the database."""
@@ -517,6 +919,8 @@ def init_db():
                 log_datetime TEXT NOT NULL,
                 target_username TEXT NOT NULL,
                 scheduled_host TEXT NOT NULL,
+                host_name TEXT,
+                msg_id TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """,
@@ -611,6 +1015,7 @@ def init_db():
             ("target_username", "TEXT"),
             ("scheduled_host", "TEXT"),
             ("msg_id", "TEXT"),
+            ("host_name", "TEXT"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE gift_logs ADD COLUMN {col} {dtype}")
@@ -635,6 +1040,22 @@ def init_db():
             except Exception:
                 pass
             print(f"[DB Migration] gift_logs msg_id index skipped: {e}")
+
+        # Backfill host at gift time for old rows (host_name was added later).
+        try:
+            conn.execute("""
+                UPDATE gift_logs
+                SET host_name = scheduled_host
+                WHERE (host_name IS NULL OR host_name = '')
+                  AND scheduled_host IS NOT NULL AND scheduled_host != ''
+            """)
+            conn.commit()
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            print(f"[DB Migration] gift_logs host backfill skipped: {e}")
 
         # Normalize viewer names to lowercase so the same viewer never gets two
         # separate coin rows ("Alice" vs "alice"). Idempotent & safe.
@@ -1206,7 +1627,7 @@ def end_live_session(session_id: int):
     finally:
         conn.close()
 
-def log_gift_transaction(session_id: int, target_user: str, viewer_user: str, viewer_display: str, gift_name: str, gift_count: int, coins: int, msg_id: str = None) -> bool:
+def log_gift_transaction(session_id: int, target_user: str, viewer_user: str, viewer_display: str, gift_name: str, gift_count: int, coins: int, msg_id: str = None, host_name: str = None) -> bool:
     """Mencatat log gift secara terperinci sesuai waktu WIB & host terjadwal.
 
     Returns True when a new row was stored, False when the same TikTok message
@@ -1221,6 +1642,9 @@ def log_gift_transaction(session_id: int, target_user: str, viewer_user: str, vi
     
     target_clean = target_user.lower()
     scheduled_host = get_scheduled_host_name(target_clean, now_dt)
+    # Host yang sedang tampil saat gift masuk (hasil LiveIntroEvent). Fallback ke
+    # host terjadwal bila observer belum sempat mendeteksi host.
+    host_clean = (host_name or "").strip() or (scheduled_host or "").strip() or "Host"
 
     conn = get_db_connection()
     try:
@@ -1245,9 +1669,10 @@ def log_gift_transaction(session_id: int, target_user: str, viewer_user: str, vi
                 log_datetime, 
                 target_username, 
                 scheduled_host,
-                msg_id
+                msg_id,
+                host_name
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             session_id, 
             (viewer_user or "").lower(), 
@@ -1260,7 +1685,8 @@ def log_gift_transaction(session_id: int, target_user: str, viewer_user: str, vi
             log_datetime, 
             target_clean, 
             scheduled_host,
-            msg_id_clean
+            msg_id_clean,
+            host_clean
         ))
         inserted = True
         if inserted and session_id:
