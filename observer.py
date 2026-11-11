@@ -394,17 +394,21 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 username_clean,
             )
 
-    async def try_live_intro_fallback(client, reason: str, log_missing: bool = True):
-        """Strict fallback using previously captured LiveIntroEvent output only.
+    async def try_live_intro_fallback(client, reason: str, log_missing: bool = True, allow_when_not_connected: bool = False):
+        """Apply previously captured LiveIntroEvent output (cached) if available.
 
-        Per policy: host detection comes from LiveIntroEvent (WebcastLiveIntroMessage)
-        output text; we keep listening for that event until output is received.
-        Cached text here is a prior LiveIntroEvent output (not room title/comments).
+        Host detection comes from LiveIntroEvent (WebcastLiveIntroMessage) output
+        text; we keep listening for that event on online/connected accounts until
+        output is received. Cached text is a prior LiveIntroEvent output only.
         """
-        if not is_connected:
-            # Only act on accounts detected as active (connected/online websocket).
+        online = is_connected or probed_live or (username_clean in get_current_live_hosts())
+        if not online:
             if log_missing:
-                print(f"[{username_clean}] [HostDetect:live_intro_fallback] skipped ({reason}): account not online/connected.")
+                print(f"[{username_clean}] [HostDetect:live_intro_fallback] skipped ({reason}): account not online.")
+            return False
+        if not is_connected and not allow_when_not_connected:
+            if log_missing:
+                print(f"[{username_clean}] [HostDetect:live_intro_fallback] skipped ({reason}): websocket not connected.")
             return False
 
         cached = _get_cached_live_intro_text(username_clean)
@@ -428,15 +432,26 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             return True
 
         if log_missing:
-            log_activity_event(
-                "host_check",
-                f"No cached LiveIntroEvent output for @{username_clean} ({reason}); still waiting for WebcastLiveIntroMessage output.",
-                username_clean,
-            )
-            print(
-                f"[{username_clean}] [HostDetect:live_intro_fallback] no cached LiveIntroEvent output "
-                f"for {reason}; waiting for WebcastLiveIntroMessage."
-            )
+            if is_connected:
+                log_activity_event(
+                    "host_check",
+                    f"No cached LiveIntroEvent output for @{username_clean} ({reason}); still waiting for WebcastLiveIntroMessage output on connected account.",
+                    username_clean,
+                )
+                print(
+                    f"[{username_clean}] [HostDetect:live_intro_fallback] no cached LiveIntroEvent output "
+                    f"for {reason}; waiting for WebcastLiveIntroMessage."
+                )
+            else:
+                log_activity_event(
+                    "host_check",
+                    f"No cached LiveIntroEvent output for @{username_clean} ({reason}); account online but websocket not connected yet, will keep trying to connect for LiveIntroEvent.",
+                    username_clean,
+                )
+                print(
+                    f"[{username_clean}] [HostDetect:live_intro_fallback] no cached LiveIntroEvent output "
+                    f"for {reason}; websocket not connected."
+                )
         return False
 
     consecutive_failures = 0
@@ -507,10 +522,10 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     return
                 log_activity_event(
                     "host_check",
-                    f"Waiting for LiveIntroEvent (WebcastLiveIntroMessage) on @{username_clean} (connected); retrying strict intro check...",
+                    f"[Debug @{username_clean}] Waiting for LiveIntroEvent (WebcastLiveIntroMessage) output | online_connected={is_connected} | current_host={current_host} | retrying cached LiveIntroEvent output check",
                     username_clean,
                 )
-                print(f"[{username_clean}] Still connected; waiting for LiveIntroEvent and retrying strict intro check...")
+                print(f"[{username_clean}] Waiting for LiveIntroEvent output (connected={is_connected}, host={current_host})...")
                 try:
                     await try_live_intro_fallback(active_client, "retry_connected", log_missing=False)
                 except Exception as e:
@@ -602,7 +617,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 connect_msg = f"{'Reconnected to' if reconnected_in_grace else 'Connected to'} @{username_clean}'s live (Host: {current_host})"
                 log_activity_event("connect", connect_msg, username_clean)
                 if LiveIntroEvent:
-                    attach_msg = f"LiveIntroEvent (WebcastLiveIntroMessage) listener attached for @{username_clean}."
+                    attach_msg = f"[Debug @{username_clean}] LiveIntroEvent (WebcastLiveIntroMessage) listener attached after connect (online/connected). current_host={current_host}"
                     print(f"[{username_clean}] {attach_msg}")
                     log_activity_event("system", attach_msg, username_clean)
                     try:
@@ -611,10 +626,10 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                         pass
                 log_activity_event(
                     "system",
-                    f"Connected to @{username_clean} (online); listening for LiveIntroEvent (WebcastLiveIntroMessage) output until host is detected.",
+                    f"[Debug @{username_clean}] Connected online (websocket). Listening for LiveIntroEvent (WebcastLiveIntroMessage) output until host detected | current_host={current_host} | source=event",
                     username_clean,
                 )
-                print(f"[{username_clean}] Connected (online); listening for LiveIntroEvent (WebcastLiveIntroMessage) output until host is detected...")
+                print(f"[{username_clean}] Connected (online/websocket); listening for LiveIntroEvent output until host detected (current_host={current_host})...")
 
                 # Kirim/update pengumuman agar status tetap sinkron setelah (re)connect.
                 await _trigger_announcement(announcement_callback, username_clean, True, host_name=current_host)
@@ -684,15 +699,13 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                         attr_names = []
                     candidate_names = [name for name, _ in candidates]
                     msg_preview_raw = _safe_preview(text, 200)
-                    print(
-                        f"[{username_clean}] [HostDetect:live_intro] WebcastLiveIntroMessage received (online/connected); "
-                        f"field={field_name or 'none'} candidates={candidate_names} attrs={attr_names} text={msg_preview_raw!r}"
+                    debug_line = (
+                        f"[Debug @{username_clean}] LiveIntroEvent (WebcastLiveIntroMessage) received | online_connected={is_connected} | "
+                        f"current_host={current_host} | field={field_name or 'none'} | candidates={candidate_names} | "
+                        f"attrs={attr_names} | text={msg_preview_raw or '(empty)'}"
                     )
-                    log_activity_event(
-                        "host_check",
-                        f"LiveIntroEvent (WebcastLiveIntroMessage) received on @{username_clean} (online/connected) | field={field_name or 'unknown'} | text={msg_preview_raw or '(empty)'}",
-                        username_clean,
-                    )
+                    print(f"[{username_clean}] [HostDetect:live_intro] {debug_line}")
+                    log_activity_event("host_check", debug_line, username_clean)
                     if not text:
                         log_activity_event(
                             "host_check",
@@ -850,8 +863,18 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             )
             if "offline" in err.lower() or "not found" in err.lower():
                 print(f"[{username_clean}] Not live/offline check: {e}")
+                log_activity_event(
+                    "system",
+                    f"[Debug @{username_clean}] Websocket client not live/offline (failures={consecutive_failures}): {err}",
+                    username_clean,
+                )
             else:
                 print(f"[{username_clean}] Observer error while checking live (failures={consecutive_failures}): {e}")
+                log_activity_event(
+                    "error",
+                    f"[Debug @{username_clean}] Websocket observer error (failures={consecutive_failures}, connected_this_cycle={connected_this_cycle}, host={current_host}): {err}",
+                    username_clean,
+                )
         finally:
             if reconnect_watch_task and not reconnect_watch_task.done():
                 reconnect_watch_task.cancel()
@@ -891,33 +914,47 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         # Secondary probe: if the event client didn't connect but TikTok reports live,
         # mark status/announcement so the dashboard is not stuck on "No Live Now".
         grace_pending = bool(disconnect_timer_task and not disconnect_timer_task.done())
+        probe_result = None
         if not connected_this_cycle:
-            probe = await probe_room_live(username_clean)
+            probe_result = await probe_room_live(username_clean)
             runtime_status.update_observer_diag(
                 username_clean,
-                probe_live=probe,
+                probe_live=probe_result,
                 last_probe_at=datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%Y-%m-%d %H:%M:%S'),
             )
-            if probe is True:
+            if probe_result is True:
                 if grace_pending and disconnect_timer_task and not disconnect_timer_task.done():
                     disconnect_timer_task.cancel()
                     disconnect_timer_task = None
                     print(f"[{username_clean}] Probe confirms live during grace period; keeping live status.")
                 if not probed_live and username_clean not in get_current_live_hosts():
                     probed_live = True
-                    if current_host == "Host":
-                        await try_live_intro_fallback(client, "probe", log_missing=False)
                     runtime_status.set_live(username_clean, current_host, source="probe")
                     if not current_session_id:
                         current_session_id = start_live_session(username_clean, initial_host=current_host)
                     await _trigger_announcement(announcement_callback, username_clean, True, host_name=current_host)
-                    log_activity_event("connect", f"Connected to @{username_clean}'s live by probe fallback (Host: {current_host})", username_clean)
-                    print(f"[{username_clean}] Live detected by probe fallback (event client not connected).")
+                    ws_err = str(cycle_error) if cycle_error else "none"
+                    log_activity_event(
+                        "connect",
+                        f"[Debug @{username_clean}] Connected by probe fallback | host={current_host} | websocket_connected=False | last_ws_error={ws_err}",
+                        username_clean,
+                    )
+                    print(f"[{username_clean}] Live detected by probe fallback (websocket event client not connected). last_ws_error={ws_err}")
+                    log_activity_event(
+                        "system",
+                        f"[Debug @{username_clean}] Online via probe but websocket not connected; retrying websocket to receive LiveIntroEvent (WebcastLiveIntroMessage) | last_ws_error={ws_err} | host={current_host}",
+                        username_clean,
+                    )
+                    if current_host == "Host":
+                        await try_live_intro_fallback(client, "probe", log_missing=True, allow_when_not_connected=True)
                 else:
                     runtime_status.set_live(username_clean, current_host, source=runtime_status.get_live_snapshot().get(username_clean, {}).get("source", "probe"))
                     runtime_status.touch_live(username_clean)
+                    if current_host == "Host":
+                        await try_live_intro_fallback(client, "probe_retry", log_missing=False, allow_when_not_connected=True)
+                # Reset backoff so we keep trying to establish websocket for LiveIntroEvent.
                 consecutive_failures = 0
-            elif probe is False and not grace_pending:
+            elif probe_result is False and not grace_pending:
                 if probed_live:
                     runtime_status.clear_live(username_clean)
                     if current_session_id:
@@ -931,10 +968,11 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     probed_live = False
                 if cycle_error is None:
                     runtime_status.update_observer_diag(username_clean, status="offline", consecutive_failures=0, last_error=None)
-            elif probe is None and cycle_error is None and not grace_pending:
+            elif probe_result is None and cycle_error is None and not grace_pending:
                 runtime_status.update_observer_diag(username_clean, status="checking")
         else:
             consecutive_failures = 0
+            probe_result = False if connected_this_cycle else None
 
         # Adaptive retry: back off slightly on repeated failures, but keep checking.
         if reconnect_state.get("triggered"):
