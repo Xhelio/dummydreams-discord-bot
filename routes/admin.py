@@ -776,38 +776,71 @@ def view_activity():
         </div>
 
         <script>
-        async function copyAllActivityLog() {
+        function collectActivityLogText() {
             const rows = Array.from(document.querySelectorAll('#terminal-feed .terminal-row'));
             let text = rows.map(row => {
                 const ts = row.getAttribute('data-log-ts') || '';
-                const type = (row.getAttribute('data-log-type') || '').toUpper();
-                const msg = row.getAttribute('data-log-msg') || (row.innerText || '').trim();
+                const type = (row.getAttribute('data-log-type') || '').toUpperCase();
+                const msg = row.getAttribute('data-log-msg') || '';
                 return `[${ts}] [${type}] ${msg}`.trim();
             }).filter(Boolean).join('\n');
-            if (!text) {
-                text = 'No activity log lines available.';
-            }
+            if (!text) text = 'No activity log lines available.';
+            return text;
+        }
+
+        function showCopyLogModal(text) {
+            const existing = document.getElementById('copy-log-modal');
+            if (existing) existing.remove();
+            const overlay = document.createElement('div');
+            overlay.id = 'copy-log-modal';
+            overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px;';
+            overlay.innerHTML = `
+                <div style="background:#0f172a;border:1px solid #334155;border-radius:12px;max-width:1000px;width:100%;padding:16px;color:#e2e8f0;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;">
+                        <strong>Copy All Log</strong>
+                        <button type="button" id="close-copy-log-modal" class="btn" style="background:#334155;border:1px solid #475569;padding:6px 10px;">Close</button>
+                    </div>
+                    <p style="margin:0 0 8px;color:#94a3b8;font-size:0.85rem;">Teks log sudah diseleksi. Jika tidak otomatis tercopy, tekan Ctrl+C / Cmd+C lalu paste.</p>
+                    <textarea id="copy-log-textarea" readonly style="width:100%;height:60vh;background:#020617;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:12px;font-family:monospace;font-size:12px;white-space:pre;"></textarea>
+                </div>`;
+            document.body.appendChild(overlay);
+            const ta = overlay.querySelector('#copy-log-textarea');
+            ta.value = text;
+            ta.focus();
+            ta.select();
+            overlay.querySelector('#close-copy-log-modal').onclick = () => overlay.remove();
+            overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+        }
+
+        async function copyAllActivityLog() {
+            const text = collectActivityLogText();
             const btn = document.getElementById('copy-all-log-btn');
             const original = btn ? btn.textContent : '';
+            let copied = false;
             try {
-                if (navigator.clipboard && navigator.clipboard.writeText) {
+                if (navigator.clipboard && window.isSecureContext) {
                     await navigator.clipboard.writeText(text);
-                } else {
+                    copied = true;
+                }
+            } catch (e) { copied = false; }
+            if (!copied) {
+                try {
                     const ta = document.createElement('textarea');
                     ta.value = text;
+                    ta.setAttribute('readonly', '');
                     ta.style.position = 'fixed';
-                    ta.style.opacity = '0';
+                    ta.style.top = '-9999px';
                     document.body.appendChild(ta);
-                    ta.focus();
                     ta.select();
-                    document.execCommand('copy');
+                    copied = document.execCommand('copy');
                     document.body.removeChild(ta);
-                }
-                if (btn) { btn.textContent = '✅ Copied'; setTimeout(() => btn.textContent = original, 1500); }
-            } catch (e) {
-                if (btn) { btn.textContent = '❌ Copy failed'; setTimeout(() => btn.textContent = original, 1500); }
-                console.error('Copy failed', e);
+                } catch (e) { copied = false; }
             }
+            if (btn) {
+                btn.textContent = copied ? '✅ Copied' : '📋 Manual Copy';
+                setTimeout(() => btn.textContent = original, 1500);
+            }
+            showCopyLogModal(text);
         }
         </script>
 

@@ -854,37 +854,42 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         except Exception as e:
             cycle_error = e
             err = str(e)
+            err_detail = f"{type(e).__name__}: {err}"
             consecutive_failures += 1
-            err_lower = err.lower()
+            err_lower = err_detail.lower()
             is_rate_limited = ("rate_limit" in err_lower) or ("too many connections" in err_lower) or ("eulerstream" in err_lower)
+            is_json_empty_error = ("jsondecodeerror" in err_lower) or ("expecting value" in err_lower)
             runtime_status.update_observer_diag(
                 username_clean,
                 status="rate_limited" if is_rate_limited else "error",
                 consecutive_failures=consecutive_failures,
-                last_error=err[:300],
+                last_error=err_detail[:300],
                 rate_limited=is_rate_limited,
             )
             if is_rate_limited:
-                print(f"[{username_clean}] Websocket rate-limited (failures={consecutive_failures}): {e}")
+                print(f"[{username_clean}] Websocket rate-limited (failures={consecutive_failures}): {err_detail}")
                 log_activity_event(
                     "error",
-                    f"[Debug @{username_clean}] Websocket RATE LIMITED (failures={consecutive_failures}, connected_this_cycle={connected_this_cycle}, host={current_host}) - backing off to avoid further rate limits: {err}",
+                    f"[Debug @{username_clean}] Websocket RATE LIMITED (failures={consecutive_failures}, connected_this_cycle={connected_this_cycle}, host={current_host}) - backing off: {err_detail}",
                     username_clean,
                 )
-            elif "offline" in err_lower or "not found" in err_lower:
-                print(f"[{username_clean}] Not live/offline check: {e}")
+            elif "offline" in err_lower or "not found" in err_lower or "useroffline" in err_lower:
+                print(f"[{username_clean}] Not live/offline check: {err_detail}")
                 log_activity_event(
                     "system",
-                    f"[Debug @{username_clean}] Websocket client not live/offline (failures={consecutive_failures}): {err}",
+                    f"[Debug @{username_clean}] Websocket client not live/offline (failures={consecutive_failures}): {err_detail}",
                     username_clean,
                 )
             else:
-                print(f"[{username_clean}] Observer error while checking live (failures={consecutive_failures}): {e}")
+                print(f"[{username_clean}] Observer error while checking live (failures={consecutive_failures}): {err_detail}")
                 log_activity_event(
                     "error",
-                    f"[Debug @{username_clean}] Websocket observer error (failures={consecutive_failures}, connected_this_cycle={connected_this_cycle}, host={current_host}): {err}",
+                    f"[Debug @{username_clean}] Websocket observer error (failures={consecutive_failures}, connected_this_cycle={connected_this_cycle}, host={current_host}, probe={probe_result if 'probe_result' in locals() else 'n/a'}): {err_detail}",
                     username_clean,
                 )
+            # Treat sign-server empty/invalid JSON responses as backoff-worthy (often blocking/rate-limit side effects).
+            if is_json_empty_error:
+                runtime_status.update_observer_diag(username_clean, status="error_json_response")
         finally:
             if reconnect_watch_task and not reconnect_watch_task.done():
                 reconnect_watch_task.cancel()
@@ -990,6 +995,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         # Adaptive retry: back off slightly on repeated failures, but keep checking.
         err_lower_cycle = str(cycle_error or "").lower()
         rate_limited_cycle = ("rate_limit" in err_lower_cycle) or ("too many connections" in err_lower_cycle) or ("eulerstream" in err_lower_cycle)
+        json_empty_cycle = ("jsondecodeerror" in err_lower_cycle) or ("expecting value" in err_lower_cycle)
         if reconnect_state.get("triggered"):
             wait_seconds = 2
             runtime_status.update_observer_diag(username_clean, status="reconnecting")
@@ -1002,6 +1008,17 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             log_activity_event(
                 "system",
                 f"[Debug @{username_clean}] Rate-limited websocket; backing off {wait_seconds}s before retry (failures={consecutive_failures}, probe_online={probe_result is True}).",
+                username_clean,
+            )
+        elif json_empty_cycle:
+            # Empty/invalid JSON responses often indicate blocking/sign-server issues; back off.
+            wait_seconds = 120
+            if consecutive_failures >= 5:
+                wait_seconds = 300
+            runtime_status.update_observer_diag(username_clean, status="backoff_json_response", wait_seconds=wait_seconds)
+            log_activity_event(
+                "system",
+                f"[Debug @{username_clean}] Websocket returned empty/invalid JSON response; backing off {wait_seconds}s before retry (failures={consecutive_failures}, probe_online={probe_result is True}).",
                 username_clean,
             )
         elif probe_result is True and not connected_this_cycle:
