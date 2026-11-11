@@ -80,6 +80,7 @@ _HOST_RECONFIRM_REQUESTED_LOCK = threading.Lock()
 # intro-named fields in room info), so the fallback stays tied to the intro
 # source and never uses arbitrary chat / room titles.
 _LAST_INTRO_TEXT = {}
+_LAST_INTRO_ANALYZED = {}
 _INTRO_CACHE_TTL_SECONDS = 6 * 3600
 
 
@@ -415,6 +416,9 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             return
 
         msg_preview = _safe_preview(text, 200)
+        if msg_preview and _LAST_INTRO_ANALYZED.get(sender) == msg_preview:
+            print(f"[{username_clean}] [HostDetect:{source}] intro text unchanged; skipping re-analysis (current: {current_host}).")
+            return
         if not msg_preview:
             print(f"[{username_clean}] [HostDetect:{source}] received via {origin} but the intro text is empty.")
             log_activity_event(
@@ -424,6 +428,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             )
             return
 
+        _LAST_INTRO_ANALYZED[sender] = msg_preview
         try:
             runtime_status.update_observer_diag(
                 username_clean,
@@ -442,7 +447,16 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             else:
                 conclusion = f"host unchanged: {detected} (alias match: {matched_alias!r})"
         else:
-            conclusion = f"no alias match in database host_aliases (current: {current_host})"
+            try:
+                alias_keys = sorted(get_host_aliases().keys())
+            except Exception:
+                alias_keys = []
+            sample = ", ".join(alias_keys[:12]) + ("..." if len(alias_keys) > 12 else "")
+            conclusion = (
+                f"no alias match in database host_aliases (current: {current_host}). "
+                f"Configured aliases ({len(alias_keys)}): {sample or 'none'}. "
+                f"If this intro text names the host, add that alias in Settings."
+            )
 
         print(f"[{username_clean}] [HostDetect:{source}] origin={origin} sender=@{sender} message={msg_preview!r} => {conclusion}")
 
@@ -633,17 +647,27 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
 
         async def _watch_live_intro_until_detected(active_client):
             # Only for accounts detected as active (connected). Repeat until a host is detected.
+            # TikTok only sends the intro once per connection, so this is mostly a
+            # visibility/diagnostic loop: back off progressively and log sparsely.
+            waits = [30, 60, 120, 240, 300]
+            checks = 0
             while True:
-                await asyncio.sleep(20)
+                await asyncio.sleep(waits[min(checks, len(waits) - 1)])
+                checks += 1
                 if active_client is not client or not is_connected:
                     return
                 if current_host and current_host != "Host":
                     return
-                log_activity_event(
-                    "host_check",
-                    f"[Debug @{username_clean}] Waiting for LiveIntroEvent (WebcastLiveIntroMessage) output | online_connected={is_connected} | current_host={current_host} | retrying cached LiveIntroEvent output check",
-                    username_clean,
-                )
+                cached = _get_cached_live_intro_text(username_clean)
+                if checks == 1 or checks % 4 == 0:
+                    next_wait = waits[min(checks, len(waits) - 1)]
+                    log_activity_event(
+                        "host_check",
+                        f"[Debug @{username_clean}] Still waiting for LiveIntroEvent (WebcastLiveIntroMessage) output "
+                        f"| checks={checks} | online_connected={is_connected} | current_host={current_host} "
+                        f"| cached_intro={'yes' if cached else 'no'} | next_check_in={next_wait}s",
+                        username_clean,
+                    )
                 print(f"[{username_clean}] Waiting for LiveIntroEvent output (connected={is_connected}, host={current_host})...")
                 try:
                     await try_live_intro_fallback(active_client, "retry_connected", log_missing=False)
@@ -689,6 +713,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                         pass
                     # Use neutral placeholder until a real host is detected from LiveIntroEvent.
                     current_host = "Host"
+                    _LAST_INTRO_ANALYZED.pop(username_clean, None)
                 else:
                     # Refresh host/session context on (re)connect so host detection can continue/update.
                     stored_host = get_current_host_for_account(username_clean)
@@ -882,7 +907,11 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 if not is_feature_enabled("live_tracking"):
                     return
                 runtime_status.touch_live(username_clean)
-                if event.gift.streakable and event.gift.streaking:
+                # TikTokLive v7 moved ``streaking`` onto the event itself; older
+                # versions exposed it on event.gift. Support both without raising.
+                streaking = bool(getattr(event, "streaking", False) or getattr(getattr(event, "gift", None), "streaking", False))
+                streakable = bool(getattr(getattr(event, "gift", None), "streakable", False))
+                if streakable and streaking:
                     return
 
                 user = event.user.unique_id
@@ -1186,6 +1215,7 @@ def request_tiktok_reconnect(username: str = None):
     for target in targets:
         if target:
             _clear_rate_limit_state(target)
+            _LAST_INTRO_ANALYZED.pop(target, None)
     with _HOST_RECONFIRM_REQUESTED_LOCK:
         for target in targets:
             if target:

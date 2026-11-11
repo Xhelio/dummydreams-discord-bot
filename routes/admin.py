@@ -489,6 +489,9 @@ def view_monitor():
             "status": status,
             "last_error": (d.get("last_error") or "")[:180],
             "connect_mode": d.get("connect_mode") or "normal",
+            "intro_preview": (d.get("last_intro_preview") or "")[:200],
+            "intro_at": d.get("last_intro_at") or "",
+            "intro_source": d.get("last_intro_source") or "",
         })
 
     sessions = []
@@ -542,16 +545,24 @@ def view_monitor():
             </div>
             <div class="table-scroll">
             <table>
-                <tr><th>Account</th><th>Mode</th><th>Status</th><th>Last Error</th></tr>
+                <tr><th>Account</th><th>Mode</th><th>Status</th><th>Last Live Intro (host detection source)</th><th>Last Error</th></tr>
                 {% for c in conn_states %}
                 <tr>
                     <td>@{{ c.username }}</td>
                     <td>{{ c.connect_mode }}</td>
                     <td>{{ c.label }}</td>
-                    <td style="max-width: 420px; white-space: normal; word-break: break-word; color: #94a3b8;">{{ c.last_error or '-' }}</td>
+                    <td style="max-width: 360px; white-space: normal; word-break: break-word;">
+                        {% if c.intro_preview %}
+                        <span style="color:#e2e8f0;">{{ c.intro_preview }}</span>
+                        <div class="field-help">{{ c.intro_at }} · {{ c.intro_source }}</div>
+                        {% else %}
+                        <span class="field-help">No LiveIntroEvent output yet</span>
+                        {% endif %}
+                    </td>
+                    <td style="max-width: 320px; white-space: normal; word-break: break-word; color: #94a3b8;">{{ c.last_error or '-' }}</td>
                 </tr>
                 {% else %}
-                <tr><td colspan="4">No observer data yet.</td></tr>
+                <tr><td colspan="5">No observer data yet.</td></tr>
                 {% endfor %}
             </table>
             </div>
