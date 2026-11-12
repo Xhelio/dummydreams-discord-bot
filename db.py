@@ -1057,6 +1057,34 @@ def init_db():
                 pass
             print(f"[DB Migration] gift_logs host backfill skipped: {e}")
 
+        # Backfill log_date/log_time for legacy rows so analytics and range
+        # filters can see every gift that is already in the log.
+        try:
+            conn.execute("""
+                UPDATE gift_logs
+                SET log_datetime = COALESCE(NULLIF(log_datetime, ''), created_at)
+                WHERE log_datetime IS NULL OR log_datetime = ''
+            """)
+            conn.execute("""
+                UPDATE gift_logs
+                SET log_date = substr(COALESCE(NULLIF(log_datetime, ''), created_at), 1, 10)
+                WHERE (log_date IS NULL OR log_date = '')
+                  AND COALESCE(NULLIF(log_datetime, ''), created_at) IS NOT NULL
+            """)
+            conn.execute("""
+                UPDATE gift_logs
+                SET log_time = substr(COALESCE(NULLIF(log_datetime, ''), created_at), 12, 8)
+                WHERE (log_time IS NULL OR log_time = '')
+                  AND COALESCE(NULLIF(log_datetime, ''), created_at) IS NOT NULL
+            """)
+            conn.commit()
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            print(f"[DB Migration] gift_logs date backfill skipped: {e}")
+
         # Normalize viewer names to lowercase so the same viewer never gets two
         # separate coin rows ("Alice" vs "alice"). Idempotent & safe.
         try:
@@ -1566,35 +1594,36 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
     try:
         cur = conn.cursor()
 
-        active_row = cur.execute("""
+        active_rows = cur.execute("""
             SELECT session_id FROM live_sessions 
             WHERE tiktok_username = ? AND end_time IS NULL
-            ORDER BY session_id DESC LIMIT 1
-        """, (user_clean,)).fetchone()
+            ORDER BY session_id DESC
+        """, (user_clean,)).fetchall()
 
-        if active_row:
+        if active_rows:
+            active_id = active_rows[0][0]
+            # Only one live session may be open per account. Close stale
+            # duplicates left behind by crashes/older versions.
+            for (stale_id,) in active_rows[1:]:
+                cur.execute("""
+                    UPDATE live_sessions
+                    SET end_time = ?, duration_seconds = CASE
+                        WHEN start_time IS NULL THEN 0
+                        ELSE CASE
+                            WHEN CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) < 0 THEN 0
+                            ELSE CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER)
+                        END
+                    END
+                    WHERE session_id = ?
+                """, (now_str, now_str, now_str, stale_id))
             if explicit_host:
-                cur.execute("UPDATE live_sessions SET scheduled_host = ? WHERE session_id = ?", (current_host, active_row[0]))
-                conn.commit()
-            return active_row[0]
-
-        recent_row = cur.execute("""
-            SELECT session_id FROM live_sessions 
-            WHERE tiktok_username = ? AND end_time IS NOT NULL 
-            AND datetime(end_time) >= datetime('now', '-1 hour')
-            ORDER BY session_id DESC LIMIT 1
-        """, (user_clean,)).fetchone()
-
-        if recent_row:
-            recent_id = recent_row[0]
-            cur.execute("""
-                UPDATE live_sessions 
-                SET end_time = NULL, duration_seconds = 0, scheduled_host = ? 
-                WHERE session_id = ?
-            """, (current_host, recent_id))
+                cur.execute("UPDATE live_sessions SET scheduled_host = ? WHERE session_id = ?", (current_host, active_id))
             conn.commit()
-            return recent_id
+            return active_id
 
+        # A live that has already ended must NOT be reopened: a new connect
+        # after the disconnect/offline grace period always starts a new session
+        # (with the host detected for that new live).
         cur.execute("""
             INSERT INTO live_sessions (tiktok_username, start_time, scheduled_host) 
             VALUES (?, ?, ?)
@@ -1604,34 +1633,57 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
     finally:
         conn.close()
 
-def end_live_session(session_id: int):
+def end_live_session(session_id: int, end_time: str = None):
+    """Close a live session. ``end_time`` lets callers record the actual
+    disconnect moment instead of the moment the grace timer fired."""
     wib = pytz.timezone('Asia/Jakarta')
     now = datetime.now(wib)
-    now_str = now.strftime('%Y-%m-%d %H:%M:%S')
+    end_dt = now
+    if end_time:
+        try:
+            end_naive = datetime.strptime(str(end_time)[:19], '%Y-%m-%d %H:%M:%S')
+            end_dt = wib.localize(end_naive)
+        except Exception:
+            end_dt = now
+    end_str = end_dt.strftime('%Y-%m-%d %H:%M:%S')
     conn = get_db_connection()
     try:
         cur = conn.cursor()
-        row = cur.execute("SELECT start_time FROM live_sessions WHERE session_id = ?", (session_id,)).fetchone()
+        row = cur.execute(
+            "SELECT start_time, end_time FROM live_sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if not row:
+            return
+        if row[1]:
+            # Already closed (idempotent); never overwrite a recorded end.
+            return
         duration_sec = 0
-        if row and row[0]:
-            start_dt_naive = datetime.strptime(row[0], '%Y-%m-%d %H:%M:%S')
-            start_dt = wib.localize(start_dt_naive)
-            duration_sec = int((now - start_dt).total_seconds())
+        if row[0]:
+            try:
+                start_dt_naive = datetime.strptime(str(row[0])[:19], '%Y-%m-%d %H:%M:%S')
+                start_dt = wib.localize(start_dt_naive)
+                duration_sec = max(0, int((end_dt - start_dt).total_seconds()))
+            except Exception:
+                duration_sec = 0
 
         cur.execute("""
             UPDATE live_sessions 
             SET end_time = ?, duration_seconds = ?
             WHERE session_id = ?
-        """, (now_str, duration_sec, session_id))
+        """, (end_str, duration_sec, session_id))
         conn.commit()
     finally:
         conn.close()
 
-def log_gift_transaction(session_id: int, target_user: str, viewer_user: str, viewer_display: str, gift_name: str, gift_count: int, coins: int, msg_id: str = None, host_name: str = None) -> bool:
+def log_gift_transaction(session_id: int, target_user: str, viewer_user: str, viewer_display: str, gift_name: str, gift_count: int, coins: int, msg_id: str = None, host_name: str = None):
     """Mencatat log gift secara terperinci sesuai waktu WIB & host terjadwal.
 
-    Returns True when a new row was stored, False when the same TikTok message
-    id was already recorded (duplicate/replayed event) or the insert failed.
+    Returns:
+      True  -> row stored (full columns, or legacy fallback when the DB schema
+               is missing the newer columns).
+      False -> duplicate/replayed message id, nothing stored.
+      None  -> the gift log could not be written at all (already reported).
     """
     wib = pytz.timezone('Asia/Jakarta')
     now_dt = datetime.now(wib)
@@ -1646,56 +1698,108 @@ def log_gift_transaction(session_id: int, target_user: str, viewer_user: str, vi
     # host terjadwal bila observer belum sempat mendeteksi host.
     host_clean = (host_name or "").strip() or (scheduled_host or "").strip() or "Host"
 
-    conn = get_db_connection()
-    try:
-        cur = conn.cursor()
-        msg_id_clean = str(msg_id) if msg_id else None
-        if msg_id_clean:
-            already = cur.execute(
-                "SELECT 1 FROM gift_logs WHERE msg_id = ? LIMIT 1", (msg_id_clean,)
-            ).fetchone()
-            if already:
-                return False
-        cur.execute("""
-            INSERT OR IGNORE INTO gift_logs (
-                session_id, 
-                viewer_username, 
-                viewer_display_name, 
-                gift_name, 
-                gift_count, 
-                coins, 
-                log_date, 
-                log_time, 
-                log_datetime, 
-                target_username, 
-                scheduled_host,
-                msg_id,
-                host_name
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
+    full_sql = """
+        INSERT OR IGNORE INTO gift_logs (
             session_id, 
-            (viewer_user or "").lower(), 
-            viewer_display, 
+            viewer_username, 
+            viewer_display_name, 
             gift_name, 
             gift_count, 
             coins, 
             log_date, 
             log_time, 
             log_datetime, 
-            target_clean, 
+            target_username, 
             scheduled_host,
-            msg_id_clean,
-            host_clean
-        ))
-        inserted = True
-        if inserted and session_id:
+            msg_id,
+            host_name
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    legacy_sql = """
+        INSERT INTO gift_logs (
+            session_id, viewer_username, viewer_display_name, gift_name,
+            gift_count, coins, log_date, log_time, log_datetime,
+            target_username, scheduled_host
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    viewer_clean = (viewer_user or "").lower()
+    full_values = (
+        session_id, viewer_clean, viewer_display, gift_name, gift_count, coins,
+        log_date, log_time, log_datetime, target_clean, scheduled_host,
+        (str(msg_id) if msg_id else None), host_clean,
+    )
+    legacy_values = (
+        session_id, viewer_clean, viewer_display, gift_name, gift_count, coins,
+        log_date, log_time, log_datetime, target_clean, scheduled_host,
+    )
+
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        msg_id_clean = str(msg_id) if msg_id else None
+        if msg_id_clean:
+            try:
+                already = cur.execute(
+                    "SELECT 1 FROM gift_logs WHERE msg_id = ? LIMIT 1", (msg_id_clean,)
+                ).fetchone()
+                if already:
+                    return False
+            except Exception as dedupe_error:
+                # Kolom msg_id belum ada di DB produksi: lewati dedupe dan
+                # biarkan insert fallback yang menyelamatkan gift ini.
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                print(f"[GiftLog] msg_id column unavailable ({dedupe_error}); inserting without dedupe.")
+        primary_error_text = None
+        try:
+            cur.execute(full_sql, full_values)
+        except Exception as primary_error:
+            # Self-healing for production DBs where a newer column/index was not
+            # created yet: never lose the gift, fall back to legacy columns.
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            primary_error_text = str(primary_error)
+            print(
+                f"[GiftLog] Full insert failed for @{viewer_clean} ({gift_name}): "
+                f"{primary_error}; retrying with legacy columns."
+            )
+            cur.execute(legacy_sql, legacy_values)
+        if session_id:
             cur.execute("UPDATE live_sessions SET total_coins = total_coins + ? WHERE session_id = ?", (coins, session_id))
         conn.commit()
-        return inserted
+        if primary_error_text:
+            # Catat setelah commit supaya tidak menahan lock database.
+            try:
+                log_activity_event(
+                    "system",
+                    f"[GiftLog] Primary insert failed ({primary_error_text}); gift stored with legacy columns "
+                    f"for @{viewer_clean} ({gift_name}, {coins}c). Jalankan redeploy/migrasi DB.",
+                    target_clean,
+                )
+            except Exception:
+                pass
+        return True
     except Exception as e:
-        print(f"[GiftLog] Failed to store gift log for @{viewer_user} ({gift_name}): {e}")
-        return False
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        print(f"[GiftLog] FAILED to store gift log for @{viewer_user} ({gift_name}, {coins}c): {e}")
+        try:
+            log_activity_event(
+                "system",
+                f"[GiftLog] GAGAL menulis gift log untuk @{viewer_user} ({gift_name}, {coins}c): {e}",
+                target_clean,
+            )
+        except Exception:
+            pass
+        return None
     finally:
         conn.close()
 
@@ -1743,6 +1847,22 @@ def recalculate_coin_totals() -> dict:
     conn = get_db_connection()
     try:
         cur = conn.cursor()
+        # Jangan kosongkan total tersimpan kalau gift log benar-benar kosong:
+        # itu tanda penulisan log gagal, bukan data yang memang nol.
+        log_count_row = cur.execute("SELECT COUNT(*) FROM gift_logs").fetchone()
+        stored_row = cur.execute(
+            "SELECT COUNT(*), COALESCE(SUM(total_coins), 0) FROM tiktok_gifts"
+        ).fetchone()
+        if (log_count_row and int(log_count_row[0] or 0) == 0
+                and stored_row and int(stored_row[0] or 0) > 0
+                and int(stored_row[1] or 0) > 0):
+            return {
+                "error": (
+                    "Gift log masih kosong, recalculate dibatalkan supaya total koin "
+                    "tidak terhapus. Pastikan gift baru tercatat dulu (cek Coin Integrity "
+                    "dan Activity Log)."
+                )
+            }
         # All-time totals per viewer (lowercase, single row per viewer).
         cur.execute("DELETE FROM tiktok_gifts")
         cur.execute("""
@@ -1800,6 +1920,12 @@ def get_coin_integrity() -> dict:
             "SELECT COALESCE(SUM(coins), 0) FROM daily_tiktok_gifts WHERE date = ?",
             (today_str,),
         ).fetchone()
+        today_log_row = cur.execute(
+            "SELECT COUNT(*), COALESCE(SUM(coins), 0), MAX(log_datetime) "
+            "FROM gift_logs WHERE log_date = ?",
+            (today_str,),
+        ).fetchone()
+        last_log_row = cur.execute("SELECT MAX(log_datetime) FROM gift_logs").fetchone()
         mismatches = cur.execute("""
             SELECT g.tiktok_user, COALESCE(g.total_coins, 0) AS stored,
                    COALESCE(l.coins, 0) AS logged
@@ -1818,6 +1944,9 @@ def get_coin_integrity() -> dict:
             "gift_log_rows": int(logs_row[0] or 0) if logs_row else 0,
             "logged_total": int(logs_row[1] or 0) if logs_row else 0,
             "today_total": int(today_row[0] or 0) if today_row else 0,
+            "today_log_rows": int(today_log_row[0] or 0) if today_log_row else 0,
+            "today_log_coins": int(today_log_row[1] or 0) if today_log_row else 0,
+            "last_log_at": last_log_row[0] if last_log_row and last_log_row[0] else "",
             "mismatches": [
                 {"viewer": r[0], "stored": int(r[1] or 0), "logged": int(r[2] or 0)}
                 for r in mismatches

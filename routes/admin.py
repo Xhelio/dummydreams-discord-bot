@@ -90,10 +90,33 @@ def view_data():
                     <div class="stat-number">{{ integrity.today_total }} c</div>
                 </div>
                 <div class="stat-box">
+                    <div class="muted">Gift log hari ini (WIB)</div>
+                    <div class="stat-number">{{ integrity.today_log_coins }} c</div>
+                    <div class="muted" style="font-size: 0.8rem;">{{ integrity.today_log_rows }} baris</div>
+                </div>
+                <div class="stat-box">
                     <div class="muted">Baris gift log</div>
                     <div class="stat-number">{{ integrity.gift_log_rows }}</div>
                 </div>
+                <div class="stat-box">
+                    <div class="muted">Gift log terakhir</div>
+                    <div class="stat-number" style="font-size: 1rem;">{{ integrity.last_log_at or '-' }}</div>
+                </div>
             </div>
+            {% if integrity.stored_total > 0 and integrity.logged_total == 0 %}
+            <div class="notice-danger">
+                Total koin tersimpan ada ({{ integrity.stored_total }} c) tapi gift log masih kosong.
+                Ini biasanya berarti penulisan detail gift gagal. Cek Activity Log untuk pesan
+                <strong>[GiftLog]</strong>, lalu redeploy agar kolom/migrasi baru terpasang.
+                Gift baru akan otomatis dicatat setelah itu.
+            </div>
+            {% elif integrity.today_log_rows == 0 and integrity.today_total > 0 %}
+            <div class="notice-warning">
+                Koin hari ini masuk ({{ integrity.today_total }} c) tapi belum ada baris gift log hari ini.
+                Kalau gift baru saja masuk, tunggu refresh berikutnya; kalau tetap kosong, cek Activity Log
+                untuk pesan <strong>[GiftLog]</strong>.
+            </div>
+            {% endif %}
             {% if integrity.stored_total != integrity.logged_total %}
             <div class="notice-warning">
                 Ada selisih {{ integrity.stored_total - integrity.logged_total }} c antara total tersimpan dan gift log.
@@ -1152,15 +1175,27 @@ def view_analytics():
         last_prev = first_this - timedelta(days=1)
         start_d, end_d = last_prev.replace(day=1), last_prev
     elif preset == 'all':
+        candidates = []
         conn = get_db_connection()
         try:
-            row = conn.execute(
-                "SELECT MIN(log_date) FROM gift_logs WHERE log_date IS NOT NULL AND log_date != ''"
-            ).fetchone()
+            for sql in (
+                "SELECT MIN(log_date) FROM gift_logs WHERE log_date IS NOT NULL AND log_date != ''",
+                "SELECT MIN(substr(start_time, 1, 10)) FROM live_sessions WHERE start_time IS NOT NULL AND start_time != ''",
+                "SELECT MIN(date) FROM daily_tiktok_gifts WHERE date IS NOT NULL AND date != ''",
+            ):
+                try:
+                    row = conn.execute(sql).fetchone()
+                    if row and row[0]:
+                        candidates.append(row[0])
+                except Exception:
+                    continue
         finally:
             conn.close()
-        start_d = _parse_iso_date(row[0], today - timedelta(days=29)) if row and row[0] else today - timedelta(days=29)
+        parsed_dates = [d for d in (_parse_iso_date(c, None) for c in candidates) if d]
+        start_d = min(parsed_dates) if parsed_dates else today - timedelta(days=29)
         end_d = today
+        if start_d > end_d:
+            start_d = end_d
     else:
         start_d, end_d = today - timedelta(days=6), today
 
@@ -1806,7 +1841,156 @@ def check_discord_verification(discord_id: int, use_api: bool = True) -> dict:
 
     info["role_name"] = getattr(role, "name", "") or ""
     info["has_role"] = bool(role in member.roles)
+
+    # Cache Discord bisa basi setelah role diubah manual. Kalau hasil cache
+    # mengatakan belum punya role, cek sekali lagi langsung ke Discord agar
+    # status verifikasi tidak salah lapor.
+    if info["has_role"] is False and use_api:
+        loop = getattr(bot, "loop", None)
+        if loop and loop.is_running():
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    _fetch_member_from_guilds(bot, discord_id), loop
+                )
+                fresh_member, fresh_guild = future.result(timeout=10)
+                if fresh_member is not None and fresh_guild is not None:
+                    member, guild = fresh_member, fresh_guild
+                    info["discord_name"] = getattr(member, "display_name", None) or getattr(member, "name", "") or ""
+                    info["discord_handle"] = str(member)
+                    info["guild_name"] = getattr(guild, "name", "") or ""
+                    fresh_role = None
+                    try:
+                        fresh_role = bot_module.get_verified_role(guild)
+                    except Exception:
+                        fresh_role = None
+                    if fresh_role is not None:
+                        role = fresh_role
+                        info["role_name"] = getattr(role, "name", "") or ""
+                    info["has_role"] = bool(role in member.roles)
+            except Exception as e:
+                # Jangan gagalkan seluruh pengecekan hanya karena fetch ulang
+                # timeout; hasil cache tetap dipakai.
+                print(f"[Verification] Fresh member fetch failed for {discord_id}: {e}")
     return info
+
+
+async def _grant_role_async(bot, discord_id: int) -> dict:
+    """Beri role verifikasi ke member (dipanggil di event loop bot)."""
+    result = {
+        "status": "error",
+        "discord_name": "",
+        "discord_handle": "",
+        "guild_name": "",
+        "role_name": "",
+        "error": "",
+    }
+
+    member = None
+    guild = None
+    for g in list(getattr(bot, "guilds", []) or []):
+        m = g.get_member(discord_id)
+        if m:
+            member, guild = m, g
+            break
+    if member is None:
+        member, guild = await _fetch_member_from_guilds(bot, discord_id)
+
+    if member is None or guild is None:
+        result["error"] = "Member tidak ditemukan di server (mungkin sudah keluar)."
+        return result
+
+    result["discord_name"] = getattr(member, "display_name", None) or getattr(member, "name", "") or ""
+    result["discord_handle"] = str(member)
+    result["guild_name"] = getattr(guild, "name", "") or ""
+
+    try:
+        import main as bot_module
+        role = bot_module.get_verified_role(guild)
+    except Exception as e:
+        result["error"] = f"Gagal membaca role verifikasi: {e}"
+        return result
+
+    if role is None:
+        result["error"] = "Role verifikasi belum diatur di Bot Settings."
+        return result
+
+    result["role_name"] = getattr(role, "name", "") or ""
+
+    if role in member.roles:
+        result["status"] = "already"
+        return result
+
+    me = guild.me
+    if me is None:
+        try:
+            me = await guild.fetch_member(bot.user.id)
+        except Exception as e:
+            result["error"] = f"Tidak bisa memeriksa role bot di server: {e}"
+            return result
+
+    if role >= me.top_role:
+        result["error"] = (
+            f"Role bot ({me.top_role.name}) tidak lebih tinggi dari role verifikasi ({role.name}). "
+            "Naikkan posisi role bot di Server Settings > Roles."
+        )
+        return result
+    if not me.guild_permissions.manage_roles:
+        result["error"] = (
+            "Bot tidak punya izin Manage Roles. Berikan izin itu ke bot di Server Settings > Roles."
+        )
+        return result
+
+    try:
+        await member.add_roles(role, reason="Verification panel: grant verified role")
+    except Exception as e:
+        result["error"] = f"Discord menolak pemberian role: {e}"
+        return result
+
+    result["status"] = "granted"
+    return result
+
+
+def grant_verified_role(discord_id: int) -> dict:
+    """Wrapper sinkron untuk route Flask: jalankan pemberian role di event loop bot."""
+    try:
+        discord_id = int(discord_id)
+    except (TypeError, ValueError):
+        return {"status": "error", "error": "Discord ID tidak valid."}
+
+    bot = _get_bot_instance()
+    if bot is None or not getattr(bot, "is_ready", lambda: False)():
+        return {"status": "error", "error": "Bot Discord belum siap/berjalan."}
+
+    loop = getattr(bot, "loop", None)
+    if loop is None or not loop.is_running():
+        return {"status": "error", "error": "Event loop bot tidak berjalan."}
+
+    try:
+        future = asyncio.run_coroutine_threadsafe(_grant_role_async(bot, discord_id), loop)
+        return future.result(timeout=20)
+    except TimeoutError:
+        return {"status": "error", "error": "Discord tidak merespons dalam 20 detik. Coba lagi."}
+    except Exception as e:
+        return {"status": "error", "error": f"Gagal memberi role: {e}"}
+
+
+def _save_grant_result(discord_id: int, result: dict):
+    """Simpan status verifikasi berdasarkan hasil pemberian role."""
+    status = result.get("status")
+    info = {
+        "discord_name": result.get("discord_name", ""),
+        "discord_handle": result.get("discord_handle", ""),
+        "guild_name": result.get("guild_name", ""),
+        "has_role": True if status in ("granted", "already") else None,
+        "role_name": result.get("role_name", ""),
+        "error": result.get("error", "") if status == "error" else "",
+    }
+    try:
+        save_verification_status(discord_id, **info)
+    except Exception as e:
+        print(f"[Verification] Failed to save grant status for {discord_id}: {e}")
+    return info
+
 
 
 @admin_bp.route('/verifications', methods=['GET'])
@@ -1884,8 +2068,11 @@ def view_verifications():
                 Discord accounts successfully linked to a TikTok account. Each account can only be claimed by one user.
                 Kolom <strong>Role Status</strong> mengecek langsung ke Discord apakah member benar-benar masih punya role verifikasi.
             </p>
-            <form action="/admin/reverify-all" method="POST" onsubmit="return confirm('Verifikasi ulang role semua akun terverifikasi?');" style="margin-bottom: 12px;">
+            <form action="/admin/reverify-all" method="POST" onsubmit="return confirm('Verifikasi ulang role semua akun terverifikasi?');" style="margin-bottom: 12px; display:inline-block; margin-right:8px;">
                 <button type="submit" class="btn-save" style="background:#0e7490;">🔁 Verifikasi Ulang Semua</button>
+            </form>
+            <form action="/admin/grant-role-all" method="POST" onsubmit="return confirm('Beri role verifikasi ke semua akun terverifikasi yang belum punya role?');" style="margin-bottom: 12px; display:inline-block;">
+                <button type="submit" class="btn-save" style="background:#15803d;">🛡️ Beri Role ke Semua</button>
             </form>
             <div class="table-scroll">
             <table>
@@ -1933,6 +2120,9 @@ def view_verifications():
                     <td>
                         <form action="/admin/reverify-user/{{ u[0] }}" method="POST" style="display:inline;">
                             <button type="submit" class="btn-action" style="background:#0e7490;">🔁 Verifikasi Ulang</button>
+                        </form>
+                        <form action="/admin/grant-role/{{ u[0] }}" method="POST" style="display:inline;" onsubmit="return confirm('Beri role verifikasi ke Discord ID {{ u[0] }}?');">
+                            <button type="submit" class="btn-action" style="background:#15803d; margin-left: 6px;">🛡️ Beri Role</button>
                         </form>
                         <form action="/admin/unclaim-user/{{ u[0] }}" method="POST" onsubmit="return confirm('Remove the account link for Discord ID {{ u[0] }}?');" style="display:inline; margin-left: 6px;">
                             <button type="submit" class="btn-action btn-del">Unclaim</button>
@@ -2006,6 +2196,92 @@ def reverify_user(discord_id):
         return redirect('/admin/verifications?msg=' + quote_plus(msg) + '&msg_type=danger')
     msg = f"⚠️ Tidak bisa mengecek {discord_id}: {info.get('error') or 'unknown error'}"
     return redirect('/admin/verifications?msg=' + quote_plus(msg) + '&msg_type=warning')
+
+@admin_bp.route('/grant-role/<int:discord_id>', methods=['POST'])
+def grant_role(discord_id):
+    result = grant_verified_role(discord_id)
+    _save_grant_result(discord_id, result)
+    name = result.get("discord_name") or str(discord_id)
+    role_name = result.get("role_name") or "verifikasi"
+    status = result.get("status")
+    try:
+        from db import log_activity_event
+        log_activity_event(
+            "system",
+            f"Admin grant verified role for Discord ID {discord_id}: status={status} "
+            f"role={role_name} error={result.get('error') or '-'}.",
+            str(discord_id),
+        )
+    except Exception:
+        pass
+    if status == "granted":
+        msg = f"✅ Role {role_name} berhasil diberikan ke {name}."
+        msg_type = "success"
+    elif status == "already":
+        msg = f"ℹ️ {name} sudah punya role {role_name}."
+        msg_type = "success"
+    else:
+        msg = f"⚠️ Gagal memberi role ke {name}: {result.get('error') or 'unknown error'}"
+        msg_type = "danger"
+    return redirect('/admin/verifications?msg=' + quote_plus(msg) + '&msg_type=' + msg_type)
+
+
+@admin_bp.route('/grant-role-all', methods=['POST'])
+def grant_role_all():
+    try:
+        conn = get_db_connection()
+        rows = conn.execute("SELECT discord_id FROM user_mappings").fetchall()
+        conn.close()
+    except Exception as e:
+        return redirect('/admin/verifications?msg=' + quote_plus(f'Gagal membaca data verifikasi: {e}') + '&msg_type=danger')
+
+    granted = 0
+    already = 0
+    failed = 0
+    errors = []
+    try:
+        known_statuses = get_all_verification_status()
+    except Exception:
+        known_statuses = {}
+    for (discord_id,) in rows:
+        known = known_statuses.get(int(discord_id)) if discord_id is not None else None
+        if known and len(known) > 4 and known[4] == 1:
+            # Status terakhir bilang sudah punya role; konfirmasi cepat dari
+            # cache bot supaya akun yang role-nya dicabut tetap diperbaiki.
+            cached = check_discord_verification(discord_id, use_api=False)
+            if cached.get("has_role") is True:
+                already += 1
+                continue
+        result = grant_verified_role(discord_id)
+        _save_grant_result(discord_id, result)
+        status = result.get("status")
+        if status == "granted":
+            granted += 1
+        elif status == "already":
+            already += 1
+        else:
+            failed += 1
+            if len(errors) < 3:
+                name = result.get("discord_name") or str(discord_id)
+                errors.append(f"{name}: {result.get('error') or 'unknown error'}")
+
+    try:
+        from db import log_activity_event
+        log_activity_event(
+            "system",
+            f"Admin granted verified role to all accounts: total={len(rows)}, granted={granted}, "
+            f"already={already}, failed={failed}.",
+            "",
+        )
+    except Exception:
+        pass
+
+    msg = f"Beri role selesai: {granted} baru diberikan, {already} sudah punya role, {failed} gagal."
+    if errors:
+        msg += " Contoh gagal: " + " | ".join(errors)
+    msg_type = "success" if failed == 0 else ("warning" if (granted or already) else "danger")
+    return redirect('/admin/verifications?msg=' + quote_plus(msg) + '&msg_type=' + msg_type)
+
 
 @admin_bp.route('/reverify-all', methods=['POST'])
 def reverify_all():

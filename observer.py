@@ -404,6 +404,9 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
     current_session_id = None
     is_connected = False
     disconnect_timer_task = None
+    # Menyimpan sesi & waktu disconnect terakhir selama grace period, supaya
+    # observer yang dihentikan saat grace tetap menutup sesi di waktu disconnect.
+    disconnect_meta = {"session_id": None, "at": None}
     current_host = get_current_host_for_account(username_clean) or "Host"
 
     async def check_and_update_host_from_text(text: str, sender_username: str = None, source: str = "message", origin: str = "event"):
@@ -551,15 +554,20 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
     consecutive_failures = 0
     probed_live = False
 
-    async def delayed_disconnect_handler(session_to_close):
-        """Menunggu grace period 30 detik sebelum benar-benar menyatakan live berakhir di Discord."""
+    async def delayed_disconnect_handler(session_to_close, disconnected_at: str):
+        """Menunggu grace period 30 detik sebelum benar-benar menyatakan live berakhir di Discord.
+
+        ``disconnected_at`` adalah waktu disconnect terakhir: sesi live ditutup
+        pada waktu itu (bukan waktu timer grace selesai), sehingga durasi live
+        tidak kelebihan 30 detik dan disconnect terakhir menjadi end live.
+        """
         try:
             await asyncio.sleep(30)
             nonlocal is_connected, current_session_id, probed_live
             runtime_status.clear_live(username_clean)
             probed_live = False
             if session_to_close:
-                end_live_session(session_to_close)
+                end_live_session(session_to_close, end_time=disconnected_at)
             # Saat offline, bot Discord akan MENGHAPUS pesan pengumuman lewat sesi tersimpan.
             # JANGAN hapus sesi DB lebih dulu, karena message_id dibutuhkan untuk menghapus pesan Discord.
             if announcement_callback:
@@ -691,6 +699,8 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 if reconnected_in_grace:
                     disconnect_timer_task.cancel()
                     disconnect_timer_task = None
+                    disconnect_meta["session_id"] = None
+                    disconnect_meta["at"] = None
                     print(f"[{username_clean}] Reconnected within grace period. Live status maintained.")
 
                 is_connected = True
@@ -798,7 +808,10 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
 
                 # Jalankan grace period agar tidak spam hapus/buat pengumuman jika hanya reconnect singkat
                 if current_session_id and (not disconnect_timer_task or disconnect_timer_task.done()):
-                    disconnect_timer_task = asyncio.create_task(delayed_disconnect_handler(current_session_id))
+                    disconnected_at = datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%Y-%m-%d %H:%M:%S')
+                    disconnect_meta["session_id"] = current_session_id
+                    disconnect_meta["at"] = disconnected_at
+                    disconnect_timer_task = asyncio.create_task(delayed_disconnect_handler(current_session_id, disconnected_at))
                     current_session_id = None
 
         @client.on(CommentEvent)
@@ -950,9 +963,11 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 )
 
                 # Unique id of the TikTok message: prevents double counting when
-                # a gift is replayed after a reconnect or delivered twice.
+                # a gift is replayed after a reconnect or delivered twice. Only
+                # the real message id is used; ``log_id`` is not always unique
+                # and using it could silently drop legitimate gifts.
                 common = getattr(event, "common", None)
-                msg_id = str(getattr(common, "msg_id", "") or getattr(event, "log_id", "") or "")
+                msg_id = str(getattr(common, "msg_id", "") or "").strip() or None
 
                 if coins > 0:
                     nonlocal current_session_id
@@ -961,7 +976,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
 
                     # Insert the detailed log first: if this message id was
                     # already stored, skip aggregate updates entirely.
-                    inserted = log_gift_transaction(
+                    log_status = log_gift_transaction(
                         session_id=current_session_id,
                         target_user=username_clean,
                         viewer_user=user,
@@ -972,12 +987,17 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                         msg_id=msg_id,
                         host_name=current_host,
                     )
-                    if not inserted:
+                    if log_status is False:
                         print(
                             f"[{username_clean}] Duplicate gift message ignored "
                             f"(msg_id={msg_id or 'n/a'}, @{user}, {gift_name}, {coins}c)."
                         )
                         return
+                    if log_status is None:
+                        print(
+                            f"[{username_clean}] WARNING: gift log write failed for @{user} "
+                            f"({gift_name}, {coins}c); coin totals will still be updated."
+                        )
 
                     total_coins = save_gift_data(user, display_name, coins)
                     save_daily_gift_data(user, display_name, coins)
@@ -1033,6 +1053,15 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 client_task.cancel()
             if disconnect_timer_task and not disconnect_timer_task.done():
                 disconnect_timer_task.cancel()
+                # Tutup sesi yang sedang menunggu grace di waktu disconnect
+                # terakhir, bukan membiarkannya terbuka.
+                grace_session_id = disconnect_meta.get("session_id")
+                grace_at = disconnect_meta.get("at")
+                if grace_session_id:
+                    try:
+                        end_live_session(grace_session_id, end_time=grace_at)
+                    except Exception:
+                        pass
             if is_connected and current_session_id:
                 try:
                     end_live_session(current_session_id)
@@ -1099,7 +1128,10 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 log_activity_event("disconnect", disconnect_msg, username_clean)
 
                 if current_session_id and (not disconnect_timer_task or disconnect_timer_task.done()):
-                    disconnect_timer_task = asyncio.create_task(delayed_disconnect_handler(current_session_id))
+                    disconnected_at = datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%Y-%m-%d %H:%M:%S')
+                    disconnect_meta["session_id"] = current_session_id
+                    disconnect_meta["at"] = disconnected_at
+                    disconnect_timer_task = asyncio.create_task(delayed_disconnect_handler(current_session_id, disconnected_at))
                     current_session_id = None
 
             # Release this cycle's client. TikTokLive v7 starts non-blocking, so
@@ -1150,6 +1182,8 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 if grace_pending and disconnect_timer_task and not disconnect_timer_task.done():
                     disconnect_timer_task.cancel()
                     disconnect_timer_task = None
+                    disconnect_meta["session_id"] = None
+                    disconnect_meta["at"] = None
                     print(f"[{username_clean}] Probe confirms live during grace period; keeping live status.")
                 if not probed_live and username_clean not in get_current_live_hosts():
                     probed_live = True

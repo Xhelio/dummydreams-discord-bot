@@ -122,18 +122,57 @@ def get_verified_role(guild: discord.Guild) -> discord.Role:
 async def grant_verified_access(member: discord.Member, tiktok_user: str, total_coins: int) -> tuple:
     """Memberikan role verifikasi dan role coin tier yang sesuai kepada member Discord."""
     roles_added_names = []
-    verified_role = get_verified_role(member.guild)
-    if verified_role and verified_role not in member.roles:
-        try:
-            await member.add_roles(verified_role)
-            roles_added_names.append(verified_role.name)
-        except Exception as e:
-            print(f"[Role Error] Failed to add verified role: {e}")
+    problems = []
+    verified_role = get_verified_role(member.guild) if member and member.guild else None
 
-    # Berikan juga tier roles sesuai total koin yang ada
-    await auto_assign_role(tiktok_user, total_coins)
-    
-    role_info = f" Role **{', '.join(roles_added_names)}** has been granted." if roles_added_names else " Role has been activated."
+    if verified_role is None:
+        problems.append("role verifikasi belum diatur di Bot Settings")
+    elif verified_role in member.roles:
+        pass
+    else:
+        try:
+            me = member.guild.me
+            if me is None and bot.user is not None:
+                me = await member.guild.fetch_member(bot.user.id)
+            if me is not None and verified_role >= me.top_role:
+                problems.append(
+                    f"posisi role bot ({me.top_role.name}) di bawah role verifikasi ({verified_role.name})"
+                )
+            elif me is not None and not me.guild_permissions.manage_roles:
+                problems.append("bot tidak punya izin Manage Roles")
+            else:
+                await member.add_roles(
+                    verified_role,
+                    reason=f"Verification: TikTok @{tiktok_user}",
+                )
+                roles_added_names.append(verified_role.name)
+        except Exception as e:
+            problems.append(f"Discord menolak pemberian role: {e}")
+
+    if problems:
+        problem_text = "; ".join(problems)
+        print(f"[Role Error] Failed to add verified role for @{tiktok_user}: {problem_text}")
+        try:
+            log_activity_event(
+                "system",
+                f"[Verify] Gagal memberi role verifikasi ke {member} untuk @{tiktok_user}: {problem_text}.",
+                tiktok_user,
+            )
+        except Exception:
+            pass
+        role_info = f" ⚠️ Role belum bisa diberikan otomatis ({problem_text}). Hubungi admin."
+    else:
+        role_info = (
+            f" Role **{', '.join(roles_added_names)}** has been granted."
+            if roles_added_names else " Role has been activated."
+        )
+
+    # Berikan juga tier roles sesuai total koin yang ada.
+    try:
+        await auto_assign_role(tiktok_user, total_coins)
+    except Exception as e:
+        print(f"[Role Error] Failed to assign coin tier for @{tiktok_user}: {e}")
+
     return True, role_info
 
 def handle_api_announcement(username: str, is_live: bool, host_name: str = None):
