@@ -54,6 +54,7 @@ from db import (
     get_current_host_for_account,
     set_current_host_for_account,
     update_live_session_host,
+    add_live_session_paused_seconds,
     get_channel_display_name,
     get_host_aliases,
     get_host_connect_mode,
@@ -62,6 +63,9 @@ from db import (
     set_setting
 )
 import runtime_status
+
+# Grace period setelah disconnect sebelum live benar-benar dinyatakan berakhir.
+LIVE_DISCONNECT_GRACE_SECONDS = 600
 
 # Set global untuk melacak host yang saat ini sedang LIVE
 CURRENT_LIVE_HOSTS = set()
@@ -555,14 +559,14 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
     probed_live = False
 
     async def delayed_disconnect_handler(session_to_close, disconnected_at: str):
-        """Menunggu grace period 30 detik sebelum benar-benar menyatakan live berakhir di Discord.
+        """Menunggu grace period 10 menit sebelum benar-benar menyatakan live berakhir di Discord.
 
         ``disconnected_at`` adalah waktu disconnect terakhir: sesi live ditutup
         pada waktu itu (bukan waktu timer grace selesai), sehingga durasi live
-        tidak kelebihan 30 detik dan disconnect terakhir menjadi end live.
+        tidak kelebihan waktu tunggu dan disconnect terakhir menjadi end live.
         """
         try:
-            await asyncio.sleep(30)
+            await asyncio.sleep(LIVE_DISCONNECT_GRACE_SECONDS)
             nonlocal is_connected, current_session_id, probed_live
             runtime_status.clear_live(username_clean)
             probed_live = False
@@ -580,6 +584,39 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         except asyncio.CancelledError:
             # Reconnected within grace period
             pass
+
+    def resolve_grace_reconnect() -> bool:
+        """Batalkan grace timer dan catat jeda offline sebagai paused time.
+
+        Jeda saat live pending/terputus tidak boleh dihitung sebagai durasi
+        live. Saat live tersambung lagi dalam grace period, selisih waktu
+        disconnect -> reconnect ditambahkan ke paused_seconds sesi.
+        """
+        nonlocal disconnect_timer_task
+        if not (disconnect_timer_task and not disconnect_timer_task.done()):
+            return False
+        disconnect_timer_task.cancel()
+        disconnect_timer_task = None
+        session_id = disconnect_meta.get("session_id")
+        disconnected_at = disconnect_meta.get("at")
+        disconnect_meta["session_id"] = None
+        disconnect_meta["at"] = None
+        if session_id and disconnected_at:
+            try:
+                wib = pytz.timezone('Asia/Jakarta')
+                disc_dt = wib.localize(
+                    datetime.strptime(str(disconnected_at)[:19], '%Y-%m-%d %H:%M:%S')
+                )
+                gap = max(0, int((datetime.now(wib) - disc_dt).total_seconds()))
+                if gap > 0:
+                    add_live_session_paused_seconds(session_id, gap)
+                    print(
+                        f"[{username_clean}] Grace gap {gap}s excluded from live duration "
+                        f"(session {session_id})."
+                    )
+            except Exception as e:
+                print(f"[{username_clean}] Failed to record grace paused time: {e}")
+        return True
 
     while True:
         connect_mode = (get_host_connect_mode(username_clean) or "normal").lower()
@@ -694,13 +731,8 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         async def on_connect(event: ConnectEvent):
             nonlocal current_session_id, is_connected, disconnect_timer_task, current_host, connected_this_cycle, consecutive_failures, probed_live
             try:
-                reconnected_in_grace = bool(disconnect_timer_task and not disconnect_timer_task.done())
-                # Jika sebelumnya ada pending disconnect timer, batalkan karena sudah terhubung kembali
+                reconnected_in_grace = resolve_grace_reconnect()
                 if reconnected_in_grace:
-                    disconnect_timer_task.cancel()
-                    disconnect_timer_task = None
-                    disconnect_meta["session_id"] = None
-                    disconnect_meta["at"] = None
                     print(f"[{username_clean}] Reconnected within grace period. Live status maintained.")
 
                 is_connected = True
@@ -1179,12 +1211,9 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 last_probe_at=datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%Y-%m-%d %H:%M:%S'),
             )
             if probe_result is True:
-                if grace_pending and disconnect_timer_task and not disconnect_timer_task.done():
-                    disconnect_timer_task.cancel()
-                    disconnect_timer_task = None
-                    disconnect_meta["session_id"] = None
-                    disconnect_meta["at"] = None
-                    print(f"[{username_clean}] Probe confirms live during grace period; keeping live status.")
+                if grace_pending:
+                    if resolve_grace_reconnect():
+                        print(f"[{username_clean}] Probe confirms live during grace period; keeping live status.")
                 if not probed_live and username_clean not in get_current_live_hosts():
                     probed_live = True
                     runtime_status.set_live(username_clean, current_host, source="probe")

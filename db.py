@@ -806,10 +806,13 @@ def close_all_open_live_sessions():
             UPDATE live_sessions
             SET end_time = ?, duration_seconds = CASE
                 WHEN start_time IS NULL THEN 0
-                ELSE CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER)
+                ELSE CASE
+                    WHEN CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0) < 0 THEN 0
+                    ELSE CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0)
+                END
             END
             WHERE end_time IS NULL
-        """, (now_str, now_str))
+        """, (now_str, now_str, now_str))
         conn.commit()
     finally:
         conn.close()
@@ -901,6 +904,7 @@ def init_db():
                 start_time TIMESTAMP NOT NULL,
                 end_time TIMESTAMP,
                 duration_seconds INTEGER DEFAULT 0,
+                paused_seconds INTEGER DEFAULT 0,
                 total_coins INTEGER DEFAULT 0,
                 scheduled_host TEXT
             )
@@ -1019,6 +1023,20 @@ def init_db():
         ]:
             try:
                 conn.execute(f"ALTER TABLE gift_logs ADD COLUMN {col} {dtype}")
+                conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+
+        # Migrasi live_sessions: akumulasi detik jeda grace period supaya
+        # durasi live tidak menghitung waktu kosong/pending.
+        for col, dtype in [
+            ("paused_seconds", "INTEGER DEFAULT 0"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE live_sessions ADD COLUMN {col} {dtype}")
                 conn.commit()
             except Exception:
                 try:
@@ -1578,6 +1596,37 @@ def update_live_session_host(session_id: int, host_name: str):
     finally:
         conn.close()
 
+
+def add_live_session_paused_seconds(session_id: int, seconds: int) -> int:
+    """Tambahkan detik jeda (grace period) ke sesi live yang masih terbuka.
+
+    Detik ini dikurangkan dari durasi akhir supaya waktu kosong/pending saat
+    live terputus tidak dihitung sebagai durasi live.
+    """
+    try:
+        seconds = max(0, int(seconds or 0))
+    except (TypeError, ValueError):
+        seconds = 0
+    if not session_id or seconds <= 0:
+        return 0
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE live_sessions "
+            "SET paused_seconds = COALESCE(paused_seconds, 0) + ? "
+            "WHERE session_id = ? AND end_time IS NULL",
+            (seconds, session_id),
+        )
+        conn.commit()
+        row = cur.execute(
+            "SELECT COALESCE(paused_seconds, 0) FROM live_sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
+    finally:
+        conn.close()
+
 def get_scheduled_host_name(tiktok_username: str, dt_obj: datetime = None) -> str:
     """Mengambil nama host akun TikTok (berdasarkan welcome message yang terdeteksi)."""
     return get_current_host_for_account(tiktok_username)
@@ -1610,8 +1659,8 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                     SET end_time = ?, duration_seconds = CASE
                         WHEN start_time IS NULL THEN 0
                         ELSE CASE
-                            WHEN CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) < 0 THEN 0
-                            ELSE CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER)
+                            WHEN CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0) < 0 THEN 0
+                            ELSE CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0)
                         END
                     END
                     WHERE session_id = ?
@@ -1649,21 +1698,28 @@ def end_live_session(session_id: int, end_time: str = None):
     conn = get_db_connection()
     try:
         cur = conn.cursor()
-        row = cur.execute(
-            "SELECT start_time, end_time FROM live_sessions WHERE session_id = ?",
-            (session_id,),
-        ).fetchone()
+        try:
+            row = cur.execute(
+                "SELECT start_time, end_time, COALESCE(paused_seconds, 0) FROM live_sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        except Exception:
+            row = cur.execute(
+                "SELECT start_time, end_time, 0 FROM live_sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
         if not row:
             return
         if row[1]:
             # Already closed (idempotent); never overwrite a recorded end.
             return
+        paused_sec = max(0, int(row[2] or 0))
         duration_sec = 0
         if row[0]:
             try:
                 start_dt_naive = datetime.strptime(str(row[0])[:19], '%Y-%m-%d %H:%M:%S')
                 start_dt = wib.localize(start_dt_naive)
-                duration_sec = max(0, int((end_dt - start_dt).total_seconds()))
+                duration_sec = max(0, int((end_dt - start_dt).total_seconds()) - paused_sec)
             except Exception:
                 duration_sec = 0
 

@@ -13,8 +13,19 @@ _BOT = {
     "user": None,
     "ready_at": None,
 }
+_BOT_OBJECT = None
 _LIVE = {}
 _OBSERVER = {}
+
+
+def register_bot(bot):
+    """Simpan instance bot supaya status online bisa dicek ke kondisi asli."""
+    global _BOT_OBJECT
+    _BOT_OBJECT = bot
+
+
+def get_bot_instance():
+    return _BOT_OBJECT
 
 
 def set_bot_ready(user_name: str):
@@ -32,7 +43,18 @@ def set_bot_offline():
 
 def get_bot_status() -> dict:
     with _LOCK:
-        return dict(_BOT)
+        status = dict(_BOT)
+        bot = _BOT_OBJECT
+    if bot is not None:
+        # runtime_status tidak selalu menerima event disconnect (mis. gateway
+        # putus tanpa event), jadi cocokkan dengan kondisi bot yang sebenarnya.
+        try:
+            status["online"] = bool(bot.is_ready() and not bot.is_closed())
+            if bot.user is not None:
+                status["user"] = str(bot.user)
+        except Exception:
+            pass
+    return status
 
 
 def set_live(username: str, host_name: str = None, source: str = "event"):

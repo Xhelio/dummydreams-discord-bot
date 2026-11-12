@@ -1744,11 +1744,25 @@ def view_analytics():
 
 def _get_bot_instance():
     """Ambil instance bot Discord dari modul main (proses yang sama dengan Flask)."""
+    import sys
+
+    # Saat `python main.py`, modul bot terdaftar sebagai "__main__" (dengan alias
+    # "main" yang didaftarkan main.py). Cek sys.modules dulu supaya tidak
+    # meng-import ulang main.py dan membuat instance bot kedua yang tidak connect.
+    for module_name in ("main", "__main__"):
+        module = sys.modules.get(module_name)
+        candidate = getattr(module, "bot", None) if module is not None else None
+        if candidate is not None and hasattr(candidate, "is_ready"):
+            return candidate
+    # Fallback terakhir: instance yang didaftarkan main.py ke runtime_status.
     try:
-        import main as bot_module
-        return getattr(bot_module, "bot", None)
+        from runtime_status import get_bot_instance
+        candidate = get_bot_instance()
+        if candidate is not None and hasattr(candidate, "is_ready"):
+            return candidate
     except Exception:
-        return None
+        pass
+    return None
 
 
 async def _fetch_member_from_guilds(bot, discord_id: int):

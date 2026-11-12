@@ -2,6 +2,7 @@ import asyncio
 import os
 import json
 import re
+import sys
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -57,6 +58,14 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+runtime_status.register_bot(bot)
+
+# Saat main.py dijalankan sebagai script (Render: `python main.py`), modulnya
+# bernama "__main__". Daftarkan alias "main" supaya Flask (routes/admin.py)
+# mengakses instance bot yang SAMA, bukan meng-import ulang main.py dan
+# membuat bot kedua yang tidak pernah connect.
+if __name__ == "__main__":
+    sys.modules.setdefault("main", sys.modules[__name__])
 
 
 def is_admin_member(member) -> bool:
