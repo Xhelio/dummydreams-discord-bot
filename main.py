@@ -758,10 +758,11 @@ def build_bio_verification_embed(tiktok_user: str, code: str) -> discord.Embed:
             f"TikTok account: **@{tiktok_user}**\n\n"
             f"🔑 **Set your TikTok bio to this verification text:**\n"
             f"```text\n{code}\n```\n"
+            f"Use the **📋 Copy Code** button below to copy the code easily.\n\n"
             f"**Steps:**\n"
             f"1. Open the TikTok app.\n"
             f"2. Go to **Profile** -> **Edit profile** -> **Bio**.\n"
-            f"3. Put the verification text above in your bio and save it.\n"
+            f"3. Paste the verification text above into your bio and save it.\n"
             f"4. Click **[ 🔍 Verify Bio ]** below.\n\n"
             f"⏱️ *The code expires in 15 minutes. You can remove it from your bio after verification.*"
         ),
@@ -1125,23 +1126,65 @@ class BioVerificationView(discord.ui.View):
         else:
             wib = pytz.timezone("Asia/Jakarta")
             checked_at = datetime.now(wib).strftime("%H:%M:%S WIB")
-            shown_bio = current_bio if current_bio not in (None, "") else "(empty bio)"
+            raw_bio = current_bio if current_bio is not None else ""
+            shown_bio = raw_bio if str(raw_bio).strip() != "" else "(bio kosong / tidak terbaca / profil mungkin privat)"
+            shown_bio = str(shown_bio)
+            if len(shown_bio) > 1200:
+                shown_bio = shown_bio[:1200] + "\n…(dipotong)"
+            # Escape triple backticks to keep code block intact
+            shown_bio_safe = shown_bio.replace("```", "'''")
             embed = discord.Embed(
                 title="⚠️ Verification Text Not Found in Bio",
                 description=(
                     f"The text **`{code}`** was not found in the TikTok bio of **@{tiktok_user}**.\n\n"
-                    f"📄 **Bio currently read (last checked {checked_at}):**\n"
-                    f"> *\"{shown_bio}\"*\n\n"
+                    f"📄 **Bio yang terbaca bot (terakhir dicek {checked_at}):**\n"
+                    f"```text\n{shown_bio_safe}\n```\n"
                     f"💡 **Tips:**\n"
-                    f"1. Make sure you pressed **Save** in your TikTok profile.\n"
-                    f"2. Wait 5–15 seconds after saving so TikTok updates the data.\n"
-                    f"3. Make sure the full text `{code}` is in your bio.\n"
-                    f"4. If your bio is private or unavailable, try another method.\n\n"
-                    f"🔁 *You can click **Verify Bio** again as many times as you need.*"
+                    f"1. Pastikan kamu menekan **Save** di profil TikTok.\n"
+                    f"2. Tunggu 5–15 detik setelah save agar data TikTok ter-update, lalu coba lagi.\n"
+                    f"3. Pastikan teks **`{code}`** ada persis di bio (pakai tombol **📋 Copy Code** agar tidak salah ketik).\n"
+                    f"4. Jika bio privat/tidak terbaca, coba metode verifikasi lain.\n\n"
+                    f"🔁 *Kamu bisa klik **Verify Bio** lagi kapan saja.*"
                 ),
                 color=discord.Color.orange()
             )
             await interaction.edit_original_response(embed=embed, view=self)
+
+    @discord.ui.button(
+        label="Copy Code",
+        style=discord.ButtonStyle.secondary,
+        emoji="📋",
+        custom_id="bio_copy_code_persistent"
+    )
+    async def copy_code(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.InteractionResponded:
+            pass
+        except Exception:
+            return
+
+        pending = get_pending_verification(interaction.user.id)
+        code = (pending or {}).get("code") or self.code
+        tiktok_user = (pending or {}).get("tiktok_user") or self.tiktok_user
+        if not code:
+            if tiktok_user:
+                code = create_pending_verification(interaction.user.id, tiktok_user, method="bio")
+                self.code = code
+            else:
+                await interaction.followup.send(
+                    "⌛ Session expired. Please open the verification panel and start again.",
+                    ephemeral=True
+                )
+                return
+        self.tiktok_user = tiktok_user or self.tiktok_user
+        self.code = code
+        await interaction.followup.send(
+            f"**Verification code for @{tiktok_user or 'your TikTok'}:**\n"
+            f"```\n{code}\n```\n"
+            f"Tap and hold the code to copy, then paste it into your TikTok bio.",
+            ephemeral=True
+        )
 
     @discord.ui.button(
         label="Change Method",
