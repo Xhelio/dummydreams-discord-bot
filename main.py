@@ -241,7 +241,7 @@ async def auto_assign_role(tiktok_user: str, total_coins: int):
 
     for guild in bot.guilds:
         try:
-            member = await guild.fetch_member(discord_id)
+            member = await guild.fetch_member(int(discord_id))
         except (discord.NotFound, discord.HTTPException):
             continue
 
@@ -1047,7 +1047,7 @@ class BioVerificationView(discord.ui.View):
         self.total_coins = total_coins
         self.low_activity = low_activity
 
-    def _resolve_pending(self, discord_id: int):
+    def _resolve_pending(self, discord_id):
         pending = get_pending_verification(discord_id)
         tiktok_user = (pending or {}).get("tiktok_user") or self.tiktok_user
         if not tiktok_user:
@@ -1373,7 +1373,7 @@ async def handle_live_comment_verification(tiktok_user: str, comment_text: str, 
 
     # Grant the verified role in every guild the member belongs to
     for guild in bot.guilds:
-        member = guild.get_member(discord_id)
+        member = guild.get_member(int(discord_id))
         if member:
             try:
                 await grant_verified_access(member, u_clean, total_coins)
@@ -1383,7 +1383,7 @@ async def handle_live_comment_verification(tiktok_user: str, comment_text: str, 
 
     # Send a DM notification when the user's DMs are open
     try:
-        user_obj = await bot.fetch_user(discord_id)
+        user_obj = await bot.fetch_user(int(discord_id))
         if user_obj:
             trigger = (
                 f"Your welcome message in **@{target_host}**'s live chat was detected!"
@@ -1492,12 +1492,12 @@ async def unclaim(ctx, member: discord.Member):
     """Admin command: remove a member's linked TikTok account."""
     conn = get_db_connection()
     try:
-        res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (member.id,)).fetchone()
+        res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (str(member.id),)).fetchone()
         if not res:
             await ctx.send(f"❌ {member.mention} has no linked TikTok account.")
             return
         tt_user = res[0]
-        conn.execute("DELETE FROM user_mappings WHERE discord_id = ?", (member.id,))
+        conn.execute("DELETE FROM user_mappings WHERE discord_id = ?", (str(member.id),))
         conn.commit()
         await ctx.send(f"✅ Removed the link to TikTok account `@{tt_user}` from {member.mention}.")
     finally:
@@ -1508,7 +1508,7 @@ async def mycoins(ctx):
     """Show the coin balance of your linked TikTok account."""
     conn = get_db_connection()
     try:
-        res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (ctx.author.id,))
+        res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (str(ctx.author.id),))
         mapping = res.fetchone()
         if not mapping:
             await ctx.send(
@@ -1532,7 +1532,7 @@ async def myhistory(ctx):
     """Show your 5 most recent gift transactions."""
     conn = get_db_connection()
     try:
-        res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (ctx.author.id,))
+        res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (str(ctx.author.id),))
         mapping = res.fetchone()
         if not mapping:
             await ctx.send(
@@ -1690,7 +1690,7 @@ async def slash_mycoins(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     conn = get_db_connection()
     try:
-        res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (interaction.user.id,))
+        res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (str(interaction.user.id),))
         mapping = res.fetchone()
         if not mapping:
             await interaction.followup.send("❌ Your account is not verified yet. Use the button in the verification channel.", ephemeral=True)
@@ -1718,7 +1718,7 @@ async def slash_myhistory(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     conn = get_db_connection()
     try:
-        res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (interaction.user.id,))
+        res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (str(interaction.user.id),))
         mapping = res.fetchone()
         if not mapping:
             await interaction.followup.send("❌ Your account is not verified yet. Use the button in the verification channel.", ephemeral=True)
@@ -1846,12 +1846,12 @@ async def slash_unclaim(interaction: discord.Interaction, member: discord.Member
         return
     conn = get_db_connection()
     try:
-        res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (member.id,)).fetchone()
+        res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (str(member.id),)).fetchone()
         if not res:
             await interaction.followup.send(f"❌ {member.mention} has no linked TikTok account.", ephemeral=True)
             return
         tt_user = res[0]
-        conn.execute("DELETE FROM user_mappings WHERE discord_id = ?", (member.id,))
+        conn.execute("DELETE FROM user_mappings WHERE discord_id = ?", (str(member.id),))
         conn.commit()
         await interaction.followup.send(f"✅ Removed the link to TikTok account `@{tt_user}` from {member.mention}.", ephemeral=True)
     finally:

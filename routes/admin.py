@@ -1857,7 +1857,7 @@ async def _fetch_member_from_guilds(bot, discord_id: int):
     return None, None
 
 
-def check_discord_verification(discord_id: int, use_api: bool = True) -> dict:
+def check_discord_verification(discord_id, use_api: bool = True) -> dict:
     """Cek apakah member Discord benar-benar punya role verifikasi.
 
     use_api=True  -> boleh fetch live ke Discord kalau member tidak ada di cache.
@@ -1872,7 +1872,10 @@ def check_discord_verification(discord_id: int, use_api: bool = True) -> dict:
         "error": "",
     }
     try:
-        discord_id = int(discord_id)
+        did_str = str(discord_id).strip()
+        if not did_str.isdigit():
+            raise ValueError
+        discord_id_int = int(did_str)  # Python int is exact (no float)
     except (TypeError, ValueError):
         info["error"] = "Discord ID tidak valid."
         return info
@@ -1885,7 +1888,7 @@ def check_discord_verification(discord_id: int, use_api: bool = True) -> dict:
     member = None
     guild = None
     for g in list(getattr(bot, "guilds", []) or []):
-        m = g.get_member(discord_id)
+        m = g.get_member(discord_id_int)
         if m:
             member, guild = m, g
             break
@@ -1895,7 +1898,7 @@ def check_discord_verification(discord_id: int, use_api: bool = True) -> dict:
         if loop and loop.is_running():
             try:
                 future = asyncio.run_coroutine_threadsafe(
-                    _fetch_member_from_guilds(bot, discord_id), loop
+                    _fetch_member_from_guilds(bot, discord_id_int), loop
                 )
                 member, guild = future.result(timeout=10)
             except Exception as e:
@@ -1906,7 +1909,7 @@ def check_discord_verification(discord_id: int, use_api: bool = True) -> dict:
     if member is None:
         # Tetap tampilkan nama Discord kalau user masih ada di cache bot.
         try:
-            user = bot.get_user(discord_id)
+            user = bot.get_user(discord_id_int)
         except Exception:
             user = None
         if user is not None:
@@ -1946,7 +1949,7 @@ def check_discord_verification(discord_id: int, use_api: bool = True) -> dict:
         if loop and loop.is_running():
             try:
                 future = asyncio.run_coroutine_threadsafe(
-                    _fetch_member_from_guilds(bot, discord_id), loop
+                    _fetch_member_from_guilds(bot, discord_id_int), loop
                 )
                 fresh_member, fresh_guild = future.result(timeout=10)
                 if fresh_member is not None and fresh_guild is not None:
@@ -1984,7 +1987,7 @@ async def _grant_role_async(bot, discord_id: int) -> dict:
     member = None
     guild = None
     for g in list(getattr(bot, "guilds", []) or []):
-        m = g.get_member(discord_id)
+        m = g.get_member(discord_id_int)
         if m:
             member, guild = m, g
             break
@@ -2046,10 +2049,13 @@ async def _grant_role_async(bot, discord_id: int) -> dict:
     return result
 
 
-def grant_verified_role(discord_id: int) -> dict:
+def grant_verified_role(discord_id) -> dict:
     """Wrapper sinkron untuk route Flask: jalankan pemberian role di event loop bot."""
     try:
-        discord_id = int(discord_id)
+        did_str = str(discord_id).strip()
+        if not did_str.isdigit():
+            raise ValueError("not digits")
+        did_int = int(did_str)  # safe in Python; never via float
     except (TypeError, ValueError):
         return {"status": "error", "error": "Discord ID tidak valid."}
 
@@ -2062,16 +2068,19 @@ def grant_verified_role(discord_id: int) -> dict:
         return {"status": "error", "error": "Event loop bot tidak berjalan."}
 
     try:
-        future = asyncio.run_coroutine_threadsafe(_grant_role_async(bot, discord_id), loop)
-        return future.result(timeout=20)
+        future = asyncio.run_coroutine_threadsafe(_grant_role_async(bot, did_int), loop)
+        result = future.result(timeout=20)
+        result["discord_id"] = did_str
+        return result
     except TimeoutError:
-        return {"status": "error", "error": "Discord tidak merespons dalam 20 detik. Coba lagi."}
+        return {"status": "error", "error": "Discord tidak merespons dalam 20 detik. Coba lagi.", "discord_id": did_str}
     except Exception as e:
-        return {"status": "error", "error": f"Gagal memberi role: {e}"}
+        return {"status": "error", "error": f"Gagal memberi role: {e}", "discord_id": did_str}
 
 
-def _save_grant_result(discord_id: int, result: dict):
+def _save_grant_result(discord_id, result: dict):
     """Simpan status verifikasi berdasarkan hasil pemberian role."""
+    discord_id = str(discord_id).strip()
     status = result.get("status")
     info = {
         "discord_name": result.get("discord_name", ""),
@@ -2113,6 +2122,10 @@ def view_verifications():
         return f"<h3>Database Error: {e}</h3>", 500
 
     # Isi otomatis baris yang belum pernah dicek, hanya dari cache bot (tanpa API).
+    # Normalize Discord IDs to strings for consistent display/lookup.
+    users = [(str(u[0]).strip(),) + tuple(u[1:]) for u in users]
+    pending = [(str(p[0]).strip(),) + tuple(p[1:]) for p in pending]
+
     statuses = get_all_verification_status()
     if any(u[0] not in statuses for u in users):
         bot = _get_bot_instance()
@@ -2271,8 +2284,9 @@ def save_verification_settings():
     # Consolidated into /admin/settings to avoid duplicate/conflicting config.
     return redirect('/admin/settings')
 
-@admin_bp.route('/reverify-user/<int:discord_id>', methods=['POST'])
+@admin_bp.route('/reverify-user/<discord_id>', methods=['POST'])
 def reverify_user(discord_id):
+    discord_id = str(discord_id).strip()
     info = check_discord_verification(discord_id, use_api=True)
     save_verification_status(discord_id, **info)
     try:
@@ -2282,7 +2296,7 @@ def reverify_user(discord_id):
             f"Admin re-checked verification role for Discord ID {discord_id}: "
             f"has_role={info.get('has_role')} role={info.get('role_name') or '-'} "
             f"error={info.get('error') or '-'}.",
-            str(discord_id),
+            discord_id,
         )
     except Exception:
         pass
@@ -2295,11 +2309,12 @@ def reverify_user(discord_id):
     msg = f"⚠️ Tidak bisa mengecek {discord_id}: {info.get('error') or 'unknown error'}"
     return redirect('/admin/verifications?msg=' + quote_plus(msg) + '&msg_type=warning')
 
-@admin_bp.route('/grant-role/<int:discord_id>', methods=['POST'])
+@admin_bp.route('/grant-role/<discord_id>', methods=['POST'])
 def grant_role(discord_id):
+    discord_id = str(discord_id).strip()
     result = grant_verified_role(discord_id)
     _save_grant_result(discord_id, result)
-    name = result.get("discord_name") or str(discord_id)
+    name = result.get("discord_name") or discord_id
     role_name = result.get("role_name") or "verifikasi"
     status = result.get("status")
     try:
@@ -2308,7 +2323,7 @@ def grant_role(discord_id):
             "system",
             f"Admin grant verified role for Discord ID {discord_id}: status={status} "
             f"role={role_name} error={result.get('error') or '-'}.",
-            str(discord_id),
+            discord_id,
         )
     except Exception:
         pass
@@ -2342,16 +2357,17 @@ def grant_role_all():
     except Exception:
         known_statuses = {}
     for (discord_id,) in rows:
-        known = known_statuses.get(int(discord_id)) if discord_id is not None else None
+        did = str(discord_id).strip()
+        known = known_statuses.get(did)
         if known and len(known) > 4 and known[4] == 1:
             # Status terakhir bilang sudah punya role; konfirmasi cepat dari
             # cache bot supaya akun yang role-nya dicabut tetap diperbaiki.
-            cached = check_discord_verification(discord_id, use_api=False)
+            cached = check_discord_verification(did, use_api=False)
             if cached.get("has_role") is True:
                 already += 1
                 continue
-        result = grant_verified_role(discord_id)
-        _save_grant_result(discord_id, result)
+        result = grant_verified_role(did)
+        _save_grant_result(did, result)
         status = result.get("status")
         if status == "granted":
             granted += 1
@@ -2360,7 +2376,7 @@ def grant_role_all():
         else:
             failed += 1
             if len(errors) < 3:
-                name = result.get("discord_name") or str(discord_id)
+                name = result.get("discord_name") or did
                 errors.append(f"{name}: {result.get('error') or 'unknown error'}")
 
     try:
@@ -2395,8 +2411,9 @@ def reverify_all():
     missing = 0
     unknown = 0
     for (discord_id,) in rows:
-        info = check_discord_verification(discord_id, use_api=True)
-        save_verification_status(discord_id, **info)
+        did = str(discord_id).strip()
+        info = check_discord_verification(did, use_api=True)
+        save_verification_status(did, **info)
         total += 1
         if info.get("has_role") is True:
             ok += 1
@@ -2419,8 +2436,9 @@ def reverify_all():
     msg_type = "success" if missing == 0 and unknown == 0 else ("warning" if ok else "danger")
     return redirect('/admin/verifications?msg=' + quote_plus(msg) + '&msg_type=' + msg_type)
 
-@admin_bp.route('/unclaim-user/<int:discord_id>', methods=['POST'])
+@admin_bp.route('/unclaim-user/<discord_id>', methods=['POST'])
 def unclaim_user_admin(discord_id):
+    discord_id = str(discord_id).strip()
     conn = get_db_connection()
     try:
         conn.execute("DELETE FROM user_mappings WHERE discord_id = ?", (discord_id,))

@@ -949,13 +949,13 @@ def init_db():
             """,
             """
             CREATE TABLE IF NOT EXISTS user_mappings (
-                discord_id INTEGER PRIMARY KEY,
+                discord_id TEXT PRIMARY KEY,
                 tiktok_user TEXT UNIQUE
             )
             """,
             """
             CREATE TABLE IF NOT EXISTS discord_verification_status (
-                discord_id INTEGER PRIMARY KEY,
+                discord_id TEXT PRIMARY KEY,
                 discord_name TEXT,
                 discord_handle TEXT,
                 guild_name TEXT,
@@ -1039,7 +1039,7 @@ def init_db():
             """,
             """
             CREATE TABLE IF NOT EXISTS pending_verifications (
-                discord_id INTEGER PRIMARY KEY,
+                discord_id TEXT PRIMARY KEY,
                 tiktok_user TEXT NOT NULL,
                 code TEXT NOT NULL,
                 method TEXT DEFAULT 'bio',
@@ -1072,6 +1072,47 @@ def init_db():
         ]:
             conn.execute(statement)
         conn.commit()
+
+        # Migrate Discord snowflake IDs from INTEGER to TEXT to avoid
+        # precision loss (IDs > 2^53) in float/JSON/driver conversions.
+        for table, create_sql, copy_sql in [
+            ("user_mappings",
+             "CREATE TABLE user_mappings (discord_id TEXT PRIMARY KEY, tiktok_user TEXT UNIQUE)",
+             "INSERT OR REPLACE INTO user_mappings (discord_id, tiktok_user) "
+             "SELECT CAST(discord_id AS TEXT), tiktok_user FROM user_mappings_old_did"),
+            ("discord_verification_status",
+             "CREATE TABLE discord_verification_status (discord_id TEXT PRIMARY KEY, discord_name TEXT, discord_handle TEXT, guild_name TEXT, has_role INTEGER, role_name TEXT, checked_at TEXT, error TEXT)",
+             "INSERT OR REPLACE INTO discord_verification_status "
+             "(discord_id, discord_name, discord_handle, guild_name, has_role, role_name, checked_at, error) "
+             "SELECT CAST(discord_id AS TEXT), discord_name, discord_handle, guild_name, has_role, role_name, checked_at, error "
+             "FROM discord_verification_status_old_did"),
+            ("pending_verifications",
+             "CREATE TABLE pending_verifications (discord_id TEXT PRIMARY KEY, tiktok_user TEXT NOT NULL, code TEXT NOT NULL, method TEXT DEFAULT 'bio', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, expires_at TIMESTAMP NOT NULL)",
+             "INSERT OR REPLACE INTO pending_verifications "
+             "(discord_id, tiktok_user, code, method, created_at, expires_at) "
+             "SELECT CAST(discord_id AS TEXT), tiktok_user, code, method, created_at, expires_at "
+             "FROM pending_verifications_old_did"),
+        ]:
+            try:
+                info = conn.execute(f"PRAGMA table_info({table})").fetchall()
+                id_type = ""
+                for r in info:
+                    if r[1] == "discord_id":
+                        id_type = str(r[2] or "").upper()
+                        break
+                if id_type and "INT" in id_type:
+                    conn.execute(f"ALTER TABLE {table} RENAME TO {table}_old_did")
+                    conn.execute(create_sql)
+                    conn.execute(copy_sql)
+                    conn.execute(f"DROP TABLE {table}_old_did")
+                    conn.commit()
+                    print(f"[DB Migration] {table}.discord_id migrated INTEGER -> TEXT (snowflake-safe).")
+            except Exception as e:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                print(f"[DB Migration] {table} discord_id migration skipped: {e}")
 
         # Migrate the old one-message-per-account announcement table to
         # one-message-per-account-per-channel.
@@ -2456,12 +2497,23 @@ def get_daily_top_supporters():
     finally:
         conn.close()
 
+def _normalize_discord_id(value) -> str:
+    """Normalize Discord snowflake IDs to a digit string (no float/precision loss)."""
+    if value is None:
+        return ""
+    s = str(value).strip()
+    # Handle accidental float-like representations (e.g. "123.0")
+    if re.fullmatch(r"\d+\.0+", s):
+        s = s.split(".", 1)[0]
+    return s
+
+
 def get_discord_id_from_tiktok(tiktok_user: str):
     conn = get_db_connection()
     try:
         res = conn.execute("SELECT discord_id FROM user_mappings WHERE tiktok_user = ?", (tiktok_user.lower(),))
         row = res.fetchone()
-        return row[0] if row else None
+        return _normalize_discord_id(row[0]) if row and row[0] is not None else None
     finally:
         conn.close()
 
@@ -2673,34 +2725,40 @@ def is_tiktok_user_in_db(tiktok_user: str) -> tuple:
 def is_user_already_claimed(tiktok_user: str) -> tuple:
     """
     Memeriksa apakah akun TikTok sudah terikat (claimed) ke akun Discord lain.
-    Mengembalikan (is_claimed: bool, discord_id: int).
+    Mengembalikan (is_claimed: bool, discord_id: str).
     """
     u_clean = tiktok_user.lower().lstrip("@")
     conn = get_db_connection()
     try:
         cur = conn.cursor()
         row = cur.execute("SELECT discord_id FROM user_mappings WHERE LOWER(tiktok_user) = ?", (u_clean,)).fetchone()
-        if row:
-            return True, int(row[0])
-        return False, 0
+        if row and row[0] is not None:
+            return True, _normalize_discord_id(row[0])
+        return False, ""
     finally:
         conn.close()
 
-def get_user_mapping(discord_id: int) -> str:
+def get_user_mapping(discord_id) -> str:
     """Mengambil username TikTok yang terikat ke akun Discord."""
+    did = _normalize_discord_id(discord_id)
+    if not did:
+        return None
     conn = get_db_connection()
     try:
         cur = conn.cursor()
-        row = cur.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (discord_id,)).fetchone()
+        row = cur.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (did,)).fetchone()
         return row[0] if row else None
     finally:
         conn.close()
 
-def bind_user_mapping(discord_id: int, tiktok_user: str) -> bool:
+def bind_user_mapping(discord_id, tiktok_user: str) -> bool:
     """
     Mengikat (binding) akun TikTok dengan Discord user ID.
     Menghapus verifikasi pending jika ada.
     """
+    did = _normalize_discord_id(discord_id)
+    if not did:
+        return False
     u_clean = tiktok_user.lower().lstrip("@")
     conn = get_db_connection()
     try:
@@ -2708,8 +2766,8 @@ def bind_user_mapping(discord_id: int, tiktok_user: str) -> bool:
             INSERT INTO user_mappings (discord_id, tiktok_user)
             VALUES (?, ?)
             ON CONFLICT(discord_id) DO UPDATE SET tiktok_user = excluded.tiktok_user
-        """, (discord_id, u_clean))
-        conn.execute("DELETE FROM pending_verifications WHERE discord_id = ?", (discord_id,))
+        """, (did, u_clean))
+        conn.execute("DELETE FROM pending_verifications WHERE discord_id = ?", (did,))
         conn.commit()
         return True
     except Exception as e:
@@ -2718,13 +2776,16 @@ def bind_user_mapping(discord_id: int, tiktok_user: str) -> bool:
     finally:
         conn.close()
 
-def save_verification_status(discord_id: int, discord_name: str = "", discord_handle: str = "",
+def save_verification_status(discord_id, discord_name: str = "", discord_handle: str = "",
                              guild_name: str = "", has_role=None, role_name: str = "",
                              error: str = "") -> bool:
     """Menyimpan hasil verifikasi ulang role Discord untuk seorang member.
 
     ``has_role`` = True (punya role), False (tidak punya), atau None (tidak bisa dicek).
     """
+    did = _normalize_discord_id(discord_id)
+    if not did:
+        return False
     wib = pytz.timezone('Asia/Jakarta')
     checked_at = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
     if has_role is None:
@@ -2746,7 +2807,7 @@ def save_verification_status(discord_id: int, discord_name: str = "", discord_ha
                 checked_at = excluded.checked_at,
                 error = excluded.error
         """, (
-            int(discord_id), discord_name or "", discord_handle or "", guild_name or "",
+            did, discord_name or "", discord_handle or "", guild_name or "",
             has_role_val, role_name or "", checked_at, error or "",
         ))
         conn.commit()
@@ -2759,7 +2820,7 @@ def save_verification_status(discord_id: int, discord_name: str = "", discord_ha
 
 
 def get_all_verification_status() -> dict:
-    """Mengambil status verifikasi role terakhir, dipetakan per discord_id."""
+    """Mengambil status verifikasi role terakhir, dipetakan per discord_id (string)."""
     conn = get_db_connection()
     try:
         cur = conn.cursor()
@@ -2768,7 +2829,12 @@ def get_all_verification_status() -> dict:
                    has_role, role_name, checked_at, error
             FROM discord_verification_status
         """).fetchall()
-        return {int(r[0]): r for r in rows}
+        out = {}
+        for r in rows:
+            key = _normalize_discord_id(r[0])
+            if key:
+                out[key] = r
+        return out
     except Exception as e:
         print(f"[DB Error] Failed to load verification status: {e}")
         return {}
@@ -2776,19 +2842,25 @@ def get_all_verification_status() -> dict:
         conn.close()
 
 
-def delete_verification_status(discord_id: int):
+def delete_verification_status(discord_id):
+    did = _normalize_discord_id(discord_id)
+    if not did:
+        return
     conn = get_db_connection()
     try:
-        conn.execute("DELETE FROM discord_verification_status WHERE discord_id = ?", (int(discord_id),))
+        conn.execute("DELETE FROM discord_verification_status WHERE discord_id = ?", (did,))
         conn.commit()
     finally:
         conn.close()
 
 
-def create_pending_verification(discord_id: int, tiktok_user: str, method: str = 'bio') -> str:
+def create_pending_verification(discord_id, tiktok_user: str, method: str = 'bio') -> str:
     """
     Membuat kode verifikasi acak unik (contoh: DM-8392) dan menyimpannya di DB (berlaku 15 menit).
     """
+    did = _normalize_discord_id(discord_id)
+    if not did:
+        raise ValueError("discord_id tidak valid")
     u_clean = tiktok_user.lower().lstrip("@")
     rand_num = random.randint(1000, 9999)
     code = f"DM-{rand_num}"
@@ -2810,14 +2882,17 @@ def create_pending_verification(discord_id: int, tiktok_user: str, method: str =
                 method = excluded.method,
                 created_at = excluded.created_at,
                 expires_at = excluded.expires_at
-        """, (discord_id, u_clean, code, method, now_str, expires_str))
+        """, (did, u_clean, code, method, now_str, expires_str))
         conn.commit()
         return code
     finally:
         conn.close()
 
-def get_pending_verification(discord_id: int) -> dict:
+def get_pending_verification(discord_id) -> dict:
     """Mengambil status verifikasi pending untuk Discord ID tertentu."""
+    did = _normalize_discord_id(discord_id)
+    if not did:
+        return None
     wib = pytz.timezone('Asia/Jakarta')
     now_str = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
     conn = get_db_connection()
@@ -2830,10 +2905,10 @@ def get_pending_verification(discord_id: int) -> dict:
             SELECT discord_id, tiktok_user, code, method, created_at, expires_at 
             FROM pending_verifications 
             WHERE discord_id = ?
-        """, (discord_id,)).fetchone()
+        """, (did,)).fetchone()
         if row:
             return {
-                "discord_id": row[0],
+                "discord_id": _normalize_discord_id(row[0]),
                 "tiktok_user": row[1],
                 "code": row[2],
                 "method": row[3],
@@ -2867,7 +2942,7 @@ def find_pending_live_verification(tiktok_user: str, comment_text: str) -> dict:
             code = r[2]
             if code.lower() in comment_text.lower():
                 return {
-                    "discord_id": r[0],
+                    "discord_id": _normalize_discord_id(r[0]),
                     "tiktok_user": r[1],
                     "code": r[2],
                     "method": r[3]
@@ -2896,7 +2971,7 @@ def find_pending_live_greeting(tiktok_user: str) -> dict:
         """, (u_clean,)).fetchone()
         if row:
             return {
-                "discord_id": row[0],
+                "discord_id": _normalize_discord_id(row[0]),
                 "tiktok_user": row[1],
                 "code": row[2],
                 "method": row[3]
@@ -2905,11 +2980,14 @@ def find_pending_live_greeting(tiktok_user: str) -> dict:
     finally:
         conn.close()
 
-def cancel_pending_verification(discord_id: int):
+def cancel_pending_verification(discord_id):
     """Membatalkan verifikasi yang sedang pending."""
+    did = _normalize_discord_id(discord_id)
+    if not did:
+        return
     conn = get_db_connection()
     try:
-        conn.execute("DELETE FROM pending_verifications WHERE discord_id = ?", (discord_id,))
+        conn.execute("DELETE FROM pending_verifications WHERE discord_id = ?", (did,))
         conn.commit()
     finally:
         conn.close()
