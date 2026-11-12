@@ -182,7 +182,7 @@ def _analytics_gift_where(start_date, end_date, host=None, account=None, viewer=
     if viewer:
         clauses.append("LOWER(g.viewer_username) = ?")
         params.append(str(viewer).strip().lower().lstrip("@"))
-    return " AND ".join(clauses), params
+    return " AND ".join(clauses), tuple(params)
 
 
 def _analytics_session_where(start_date, end_date, host=None, account=None):
@@ -194,7 +194,7 @@ def _analytics_session_where(start_date, end_date, host=None, account=None):
     if host:
         clauses.append("LOWER(COALESCE(NULLIF(scheduled_host, ''), tiktok_username)) = ?")
         params.append(str(host).strip().lower().lstrip("@"))
-    return " AND ".join(clauses), params
+    return " AND ".join(clauses), tuple(params)
 
 
 def get_analytics_summary(start_date, end_date, host=None, account=None, viewer=None) -> dict:
@@ -468,7 +468,7 @@ def get_analytics_gift_by_account(start_date, end_date, host=None, viewer=None) 
 
 def get_analytics_viewer_ranking(start_date, end_date, host=None, account=None, limit=100) -> list:
     where, params = _analytics_gift_where(start_date, end_date, host, account, None)
-    params = list(params) + [int(limit)]
+    params = tuple(list(params) + [int(limit)])
     conn = get_db_connection()
     try:
         cur = conn.cursor()
@@ -495,7 +495,7 @@ def get_analytics_viewer_ranking(start_date, end_date, host=None, account=None, 
 def get_analytics_viewer_host_spend(start_date, end_date, viewer=None, host=None,
                                     account=None, limit=200) -> list:
     where, params = _analytics_gift_where(start_date, end_date, host, account, viewer)
-    params = list(params) + [int(limit)]
+    params = tuple(list(params) + [int(limit)])
     conn = get_db_connection()
     try:
         cur = conn.cursor()
