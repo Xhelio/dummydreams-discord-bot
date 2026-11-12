@@ -48,9 +48,25 @@ def check_database_health() -> bool:
     _DB_HEALTH_CACHE["at"] = now
     return ok
 
-# Hanya host asli yang digunakan untuk deteksi host.
-VALID_TARGET_ACCOUNTS = [
-]
+# Hanya host asli yang digunakan untuk deteksi host (6 akun resmi).
+def _load_valid_target_accounts():
+    try:
+        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "config.json")
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        accounts = data.get("accounts") or []
+        out = []
+        for i, a in enumerate(accounts, 1):
+            uname = str(a.get("tiktok_username", "")).lower().lstrip("@").strip()
+            dname = str(a.get("account_name") or a.get("display_name") or uname).strip()
+            if uname:
+                out.append((i, uname, dname))
+        return out
+    except Exception as e:
+        print(f"[DB] Failed to load valid target accounts: {e}")
+        return []
+
+VALID_TARGET_ACCOUNTS = _load_valid_target_accounts()
 
 def get_channel_display_name(tiktok_username: str) -> str:
     """Mengembalikan nama channel resmi dari akun target TikTok."""
@@ -154,7 +170,8 @@ _ANALYTICS_HOST_LABEL = (
 
 
 def _analytics_gift_where(start_date, end_date, host=None, account=None, viewer=None):
-    clauses = ["g.log_date BETWEEN ? AND ?"]
+    # Use substr to be robust if log_date was stored with a time component.
+    clauses = ["substr(g.log_date, 1, 10) BETWEEN ? AND ?"]
     params = [str(start_date), str(end_date)]
     if host:
         clauses.append(_ANALYTICS_HOST_KEY + " = ?")
@@ -343,10 +360,10 @@ def get_analytics_timeseries(start_date, end_date, group_by="day", host=None,
     try:
         cur = conn.cursor()
         for log_date, coins, gifts in cur.execute(f"""
-            SELECT g.log_date, COALESCE(SUM(g.coins), 0), COALESCE(SUM(g.gift_count), 0)
+            SELECT substr(g.log_date, 1, 10) AS log_date, COALESCE(SUM(g.coins), 0), COALESCE(SUM(g.gift_count), 0)
             FROM gift_logs g
             WHERE {where}
-            GROUP BY g.log_date
+            GROUP BY substr(g.log_date, 1, 10)
         """, params).fetchall():
             parsed = _analytics_parse_date(log_date)
             if not parsed:
@@ -358,10 +375,10 @@ def get_analytics_timeseries(start_date, end_date, group_by="day", host=None,
             bucket["gifts"] += int(gifts or 0)
 
         for log_date, viewer_key in cur.execute(f"""
-            SELECT g.log_date, LOWER(g.viewer_username)
+            SELECT substr(g.log_date, 1, 10) AS log_date, LOWER(g.viewer_username)
             FROM gift_logs g
             WHERE {where}
-            GROUP BY g.log_date, LOWER(g.viewer_username)
+            GROUP BY substr(g.log_date, 1, 10), LOWER(g.viewer_username)
         """, params).fetchall():
             parsed = _analytics_parse_date(log_date)
             if not parsed:
@@ -506,16 +523,19 @@ def get_analytics_host_options() -> list:
     try:
         rows = conn.execute("""
             SELECT host FROM (
+                SELECT COALESCE(NULLIF(display_name, ''), NULLIF(tiktok_username, '')) AS host FROM hosts
+                UNION
                 SELECT COALESCE(NULLIF(host_name, ''), NULLIF(scheduled_host, ''), target_username) AS host
                 FROM gift_logs
                 UNION
                 SELECT COALESCE(NULLIF(scheduled_host, ''), tiktok_username) AS host
                 FROM live_sessions
             )
-            WHERE host IS NOT NULL AND host != ''
-            ORDER BY LOWER(host)
+            WHERE host IS NOT NULL AND TRIM(host) != '' AND LOWER(TRIM(host)) != 'host'
+            GROUP BY LOWER(TRIM(host))
+            ORDER BY LOWER(TRIM(host))
         """).fetchall()
-        return [r[0] for r in rows if r[0]]
+        return [str(r[0]).strip() for r in rows if r and r[0] and str(r[0]).strip()]
     except Exception as e:
         print(f"[Analytics] host options failed: {e}")
         return []
@@ -528,14 +548,17 @@ def get_analytics_account_options() -> list:
     try:
         rows = conn.execute("""
             SELECT account FROM (
-                SELECT LOWER(target_username) AS account FROM gift_logs
+                SELECT LOWER(TRIM(tiktok_username)) AS account FROM hosts
                 UNION
-                SELECT LOWER(tiktok_username) AS account FROM live_sessions
+                SELECT LOWER(TRIM(target_username)) AS account FROM gift_logs
+                UNION
+                SELECT LOWER(TRIM(tiktok_username)) AS account FROM live_sessions
             )
             WHERE account IS NOT NULL AND account != ''
+            GROUP BY account
             ORDER BY account
         """).fetchall()
-        return [r[0] for r in rows if r[0]]
+        return [str(r[0]).strip().lower().lstrip("@") for r in rows if r and r[0] and str(r[0]).strip()]
     except Exception as e:
         print(f"[Analytics] account options failed: {e}")
         return []
@@ -802,26 +825,93 @@ def delete_active_live_announcement(tiktok_username: str, channel_id=None):
         conn.close()
 
 
-def close_all_open_live_sessions():
-    """Close live sessions left open by a previous process (stale 'Live' status)."""
+def suspend_open_live_sessions() -> int:
+    """Tutup sesi yang masih terbuka saat proses bot berhenti/restart.
+
+    Sesi ditutup pada ``last_seen_at`` terakhir (bukan waktu startup), lalu
+    disimpan sebagai kandidat resume. Kalau observer reconnect dalam
+    ``LIVE_RESUME_GRACE_SECONDS``, sesi yang sama dilanjutkan dan jeda restart
+    dihitung sebagai paused time. Dengan begitu redeploy tidak memecah history
+    live yang sebenarnya sedang berjalan.
+    """
     wib = pytz.timezone('Asia/Jakarta')
-    now_str = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
+    now_dt = datetime.now(wib)
+    now_str = now_dt.strftime('%Y-%m-%d %H:%M:%S')
     conn = get_db_connection()
+    suspended = 0
     try:
-        conn.execute("""
-            UPDATE live_sessions
-            SET end_time = ?, duration_seconds = CASE
-                WHEN start_time IS NULL THEN 0
-                ELSE CASE
-                    WHEN CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0) < 0 THEN 0
-                    ELSE CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0)
-                END
-            END
-            WHERE end_time IS NULL
-        """, (now_str, now_str, now_str))
+        cur = conn.cursor()
+        try:
+            rows = cur.execute("""
+                SELECT session_id, tiktok_username, start_time,
+                       COALESCE(paused_seconds, 0), last_seen_at
+                FROM live_sessions
+                WHERE end_time IS NULL
+            """).fetchall()
+        except Exception:
+            # Kolom last_seen_at belum ada (DB sangat lama).
+            rows = cur.execute("""
+                SELECT session_id, tiktok_username, start_time,
+                       COALESCE(paused_seconds, 0), NULL
+                FROM live_sessions
+                WHERE end_time IS NULL
+            """).fetchall()
+        for session_id, username, start_time, paused_seconds, last_seen in rows:
+            user_clean = str(username or "").lower().lstrip("@")
+            if not user_clean:
+                continue
+            seen_str = str(last_seen or "")[:19]
+            try:
+                seen_dt = wib.localize(datetime.strptime(seen_str, '%Y-%m-%d %H:%M:%S'))
+            except Exception:
+                seen_dt = now_dt
+            # Jangan pernah menutup di masa depan / sebelum sesi dimulai.
+            if seen_dt > now_dt:
+                seen_dt = now_dt
+            seen_str = seen_dt.strftime('%Y-%m-%d %H:%M:%S')
+            duration_sec = 0
+            if start_time:
+                try:
+                    start_dt = wib.localize(
+                        datetime.strptime(str(start_time)[:19], '%Y-%m-%d %H:%M:%S')
+                    )
+                    duration_sec = max(
+                        0, int((seen_dt - start_dt).total_seconds()) - int(paused_seconds or 0)
+                    )
+                except Exception:
+                    duration_sec = 0
+            cur.execute("""
+                UPDATE live_sessions
+                SET end_time = ?, duration_seconds = ?, last_seen_at = ?
+                WHERE session_id = ? AND end_time IS NULL
+            """, (seen_str, duration_sec, seen_str, session_id))
+            for key, value in (
+                (f"resume_session_{user_clean}", str(session_id)),
+                (f"resume_last_seen_{user_clean}", seen_str),
+            ):
+                cur.execute("""
+                    INSERT INTO bot_settings (key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """, (key, value))
+            suspended += 1
         conn.commit()
+        if suspended:
+            print(f"[LiveSession] Suspended {suspended} open session(s) at last activity time.")
+        return suspended
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        print(f"[LiveSession] Failed to suspend open sessions: {e}")
+        return 0
     finally:
         conn.close()
+
+
+def close_all_open_live_sessions():
+    """Backward-compatible alias: suspend (not force-close) open sessions."""
+    return suspend_open_live_sessions()
 
 
 def reset_live_state(clear_logs: bool = True):
@@ -911,6 +1001,7 @@ def init_db():
                 end_time TIMESTAMP,
                 duration_seconds INTEGER DEFAULT 0,
                 paused_seconds INTEGER DEFAULT 0,
+                last_seen_at TEXT,
                 total_coins INTEGER DEFAULT 0,
                 scheduled_host TEXT
             )
@@ -1037,9 +1128,11 @@ def init_db():
                     pass
 
         # Migrasi live_sessions: akumulasi detik jeda grace period supaya
-        # durasi live tidak menghitung waktu kosong/pending.
+        # durasi live tidak menghitung waktu kosong/pending. last_seen_at
+        # dipakai untuk resume sesi setelah restart/deploy.
         for col, dtype in [
             ("paused_seconds", "INTEGER DEFAULT 0"),
+            ("last_seen_at", "TEXT"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE live_sessions ADD COLUMN {col} {dtype}")
@@ -1595,9 +1688,34 @@ def update_live_session_host(session_id: int, host_name: str):
     """Memperbarui nama host di live_sessions saat terdeteksi dari welcome message."""
     if not session_id:
         return
+    wib = pytz.timezone('Asia/Jakarta')
+    now_str = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
     conn = get_db_connection()
     try:
-        conn.execute("UPDATE live_sessions SET scheduled_host = ? WHERE session_id = ?", (host_name, session_id))
+        conn.execute(
+            "UPDATE live_sessions SET scheduled_host = ?, last_seen_at = ? "
+            "WHERE session_id = ? AND end_time IS NULL",
+            (host_name, now_str, session_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def touch_live_session(session_id: int, when: str = None):
+    """Catat bahwa sesi live masih aktif (heartbeat/event) untuk resume setelah restart."""
+    if not session_id:
+        return
+    if not when:
+        wib = pytz.timezone('Asia/Jakarta')
+        when = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
+    conn = get_db_connection()
+    try:
+        conn.execute(
+            "UPDATE live_sessions SET last_seen_at = ? "
+            "WHERE session_id = ? AND end_time IS NULL",
+            (str(when)[:19], session_id),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -1618,11 +1736,13 @@ def add_live_session_paused_seconds(session_id: int, seconds: int) -> int:
     conn = get_db_connection()
     try:
         cur = conn.cursor()
+        wib = pytz.timezone('Asia/Jakarta')
+        now_str = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
         cur.execute(
             "UPDATE live_sessions "
-            "SET paused_seconds = COALESCE(paused_seconds, 0) + ? "
+            "SET paused_seconds = COALESCE(paused_seconds, 0) + ?, last_seen_at = ? "
             "WHERE session_id = ? AND end_time IS NULL",
-            (seconds, session_id),
+            (seconds, now_str, session_id),
         )
         conn.commit()
         row = cur.execute(
@@ -1637,6 +1757,12 @@ def get_scheduled_host_name(tiktok_username: str, dt_obj: datetime = None) -> st
     """Mengambil nama host akun TikTok (berdasarkan welcome message yang terdeteksi)."""
     return get_current_host_for_account(tiktok_username)
 
+# Sesi yang ditutup karena proses bot restart/deploy boleh disambung lagi
+# kalau observer sudah reconnect dalam jendela ini. Ini mencegah history live
+# terpecah-pecah hanya karena redeploy, tanpa menghitung waktu bot mati.
+LIVE_RESUME_GRACE_SECONDS = 600
+
+
 def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
     wib = pytz.timezone('Asia/Jakarta')
     now_dt = datetime.now(wib)
@@ -1648,6 +1774,63 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
     conn = get_db_connection()
     try:
         cur = conn.cursor()
+
+        # 1) Coba lanjutkan sesi yang di-suspend saat bot restart/deploy.
+        resume_key = f"resume_session_{user_clean}"
+        resume_last_key = f"resume_last_seen_{user_clean}"
+        resume_row = cur.execute(
+            "SELECT value FROM bot_settings WHERE key = ?", (resume_key,)
+        ).fetchone()
+        if resume_row and str(resume_row[0] or "").strip():
+            try:
+                resume_id = int(str(resume_row[0]).strip())
+            except (TypeError, ValueError):
+                resume_id = 0
+            last_row = cur.execute(
+                "SELECT value FROM bot_settings WHERE key = ?", (resume_last_key,)
+            ).fetchone()
+            resume_last_dt = None
+            if last_row and last_row[0]:
+                try:
+                    resume_last_dt = wib.localize(
+                        datetime.strptime(str(last_row[0])[:19], '%Y-%m-%d %H:%M:%S')
+                    )
+                except Exception:
+                    resume_last_dt = None
+            gap = 0
+            if resume_last_dt is not None:
+                gap = max(0, int((now_dt - resume_last_dt).total_seconds()))
+            if resume_id and resume_last_dt is not None and gap <= LIVE_RESUME_GRACE_SECONDS:
+                old = cur.execute(
+                    "SELECT tiktok_username, end_time FROM live_sessions WHERE session_id = ?",
+                    (resume_id,),
+                ).fetchone()
+                if old and str(old[0] or "").lower() == user_clean and old[1]:
+                    cur.execute("""
+                        UPDATE live_sessions
+                        SET end_time = NULL,
+                            duration_seconds = 0,
+                            paused_seconds = COALESCE(paused_seconds, 0) + ?,
+                            scheduled_host = ?,
+                            last_seen_at = ?
+                        WHERE session_id = ?
+                    """, (gap, current_host, now_str, resume_id))
+                    cur.execute(
+                        "DELETE FROM bot_settings WHERE key IN (?, ?)",
+                        (resume_key, resume_last_key),
+                    )
+                    conn.commit()
+                    print(
+                        f"[LiveSession] Resumed session {resume_id} for @{user_clean} "
+                        f"after {gap}s restart gap (paused time excluded)."
+                    )
+                    return resume_id
+            # Resume window expired / data tidak valid: jangan buka sesi lama.
+            cur.execute(
+                "DELETE FROM bot_settings WHERE key IN (?, ?)",
+                (resume_key, resume_last_key),
+            )
+            conn.commit()
 
         active_rows = cur.execute("""
             SELECT session_id FROM live_sessions 
@@ -1668,9 +1851,14 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                             WHEN CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0) < 0 THEN 0
                             ELSE CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0)
                         END
-                    END
+                    END,
+                    last_seen_at = COALESCE(last_seen_at, ?)
                     WHERE session_id = ?
-                """, (now_str, now_str, now_str, stale_id))
+                """, (now_str, now_str, now_str, now_str, stale_id))
+            cur.execute(
+                "UPDATE live_sessions SET last_seen_at = ? WHERE session_id = ?",
+                (now_str, active_id),
+            )
             if explicit_host:
                 cur.execute("UPDATE live_sessions SET scheduled_host = ? WHERE session_id = ?", (current_host, active_id))
             conn.commit()
@@ -1680,9 +1868,9 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
         # after the disconnect/offline grace period always starts a new session
         # (with the host detected for that new live).
         cur.execute("""
-            INSERT INTO live_sessions (tiktok_username, start_time, scheduled_host) 
-            VALUES (?, ?, ?)
-        """, (user_clean, now_str, current_host))
+            INSERT INTO live_sessions (tiktok_username, start_time, scheduled_host, last_seen_at) 
+            VALUES (?, ?, ?, ?)
+        """, (user_clean, now_str, current_host, now_str))
         conn.commit()
         return cur.lastrowid
     finally:
@@ -1731,9 +1919,9 @@ def end_live_session(session_id: int, end_time: str = None):
 
         cur.execute("""
             UPDATE live_sessions 
-            SET end_time = ?, duration_seconds = ?
+            SET end_time = ?, duration_seconds = ?, last_seen_at = COALESCE(last_seen_at, ?)
             WHERE session_id = ?
-        """, (end_str, duration_sec, session_id))
+        """, (end_str, duration_sec, end_str, session_id))
         conn.commit()
     finally:
         conn.close()

@@ -55,6 +55,7 @@ from db import (
     set_current_host_for_account,
     update_live_session_host,
     add_live_session_paused_seconds,
+    touch_live_session,
     get_channel_display_name,
     get_host_aliases,
     get_host_connect_mode,
@@ -585,6 +586,52 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             # Reconnected within grace period
             pass
 
+    def schedule_disconnect(session_id=None) -> bool:
+        """Jadwalkan penutupan sesi setelah grace period.
+
+        Setiap disconnect baru memperbarui waktu disconnect dan me-reset timer,
+        sehingga sesi ditutup pada disconnect TERAKHIR (bukan yang pertama).
+        """
+        nonlocal disconnect_timer_task, current_session_id
+        sid = session_id or current_session_id
+        if not sid:
+            return False
+        if disconnect_timer_task and not disconnect_timer_task.done():
+            disconnect_timer_task.cancel()
+        disconnected_at = datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%Y-%m-%d %H:%M:%S')
+        disconnect_meta["session_id"] = sid
+        disconnect_meta["at"] = disconnected_at
+        disconnect_timer_task = asyncio.create_task(
+            delayed_disconnect_handler(sid, disconnected_at)
+        )
+        if current_session_id == sid:
+            current_session_id = None
+        stop_session_heartbeat()
+        return True
+
+    session_heartbeat_task = None
+
+    async def _session_heartbeat_loop():
+        while True:
+            await asyncio.sleep(30)
+            sid = current_session_id
+            if sid:
+                try:
+                    touch_live_session(sid)
+                except Exception:
+                    pass
+
+    def start_session_heartbeat():
+        nonlocal session_heartbeat_task
+        if session_heartbeat_task is None or session_heartbeat_task.done():
+            session_heartbeat_task = asyncio.create_task(_session_heartbeat_loop())
+
+    def stop_session_heartbeat():
+        nonlocal session_heartbeat_task
+        if session_heartbeat_task and not session_heartbeat_task.done():
+            session_heartbeat_task.cancel()
+        session_heartbeat_task = None
+
     def resolve_grace_reconnect() -> bool:
         """Batalkan grace timer dan catat jeda offline sebagai paused time.
 
@@ -769,6 +816,8 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                         update_live_session_host(current_session_id, "Host")
                     except Exception:
                         pass
+                touch_live_session(current_session_id)
+                start_session_heartbeat()
 
                 runtime_status.set_live(username_clean, current_host, source="event")
                 runtime_status.update_observer_diag(
@@ -838,13 +887,9 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 disconnect_msg = f"Disconnected from @{username_clean}'s live"
                 log_activity_event("disconnect", disconnect_msg, username_clean)
 
-                # Jalankan grace period agar tidak spam hapus/buat pengumuman jika hanya reconnect singkat
-                if current_session_id and (not disconnect_timer_task or disconnect_timer_task.done()):
-                    disconnected_at = datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%Y-%m-%d %H:%M:%S')
-                    disconnect_meta["session_id"] = current_session_id
-                    disconnect_meta["at"] = disconnected_at
-                    disconnect_timer_task = asyncio.create_task(delayed_disconnect_handler(current_session_id, disconnected_at))
-                    current_session_id = None
+                # Jalankan grace period agar tidak spam hapus/buat pengumuman jika hanya reconnect singkat.
+                # Disconnect berulang me-reset timer ke disconnect terakhir.
+                schedule_disconnect(current_session_id)
 
         @client.on(CommentEvent)
         async def on_comment(event: CommentEvent):
@@ -852,6 +897,8 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 user = event.user.unique_id.lower()
                 comment_text = event.comment
                 runtime_status.touch_live(username_clean)
+                if current_session_id:
+                    touch_live_session(current_session_id)
                 
                 # 1. Cek verifikasi live chat akun Discord
                 if comment_callback:
@@ -1005,6 +1052,8 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     nonlocal current_session_id
                     if not current_session_id:
                         current_session_id = start_live_session(username_clean, initial_host=current_host)
+                    touch_live_session(current_session_id)
+                    start_session_heartbeat()
 
                     # Insert the detailed log first: if this message id was
                     # already stored, skip aggregate updates entirely.
@@ -1081,6 +1130,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             await client_task
         except asyncio.CancelledError:
             # Observer stopped by supervisor (host paused/removed/restarted).
+            stop_session_heartbeat()
             if client_task and not client_task.done():
                 client_task.cancel()
             if disconnect_timer_task and not disconnect_timer_task.done():
@@ -1159,12 +1209,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 disconnect_msg = f"Disconnected from @{username_clean}'s live"
                 log_activity_event("disconnect", disconnect_msg, username_clean)
 
-                if current_session_id and (not disconnect_timer_task or disconnect_timer_task.done()):
-                    disconnected_at = datetime.now(pytz.timezone('Asia/Jakarta')).strftime('%Y-%m-%d %H:%M:%S')
-                    disconnect_meta["session_id"] = current_session_id
-                    disconnect_meta["at"] = disconnected_at
-                    disconnect_timer_task = asyncio.create_task(delayed_disconnect_handler(current_session_id, disconnected_at))
-                    current_session_id = None
+                schedule_disconnect(current_session_id)
 
             # Release this cycle's client. TikTokLive v7 starts non-blocking, so
             # an un-awaited task would otherwise leave sockets running forever.
@@ -1219,6 +1264,8 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     runtime_status.set_live(username_clean, current_host, source="probe")
                     if not current_session_id:
                         current_session_id = start_live_session(username_clean, initial_host=current_host)
+                    touch_live_session(current_session_id)
+                    start_session_heartbeat()
                     await _trigger_announcement(announcement_callback, username_clean, True, host_name=current_host)
                     ws_err = str(cycle_error) if cycle_error else "none"
                     log_activity_event(
@@ -1246,15 +1293,19 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     consecutive_failures = 0
             elif probe_result is False and not grace_pending:
                 if probed_live:
-                    runtime_status.clear_live(username_clean)
                     if current_session_id:
-                        try:
-                            end_live_session(current_session_id)
-                        except Exception:
-                            pass
-                        current_session_id = None
-                    await _trigger_announcement(announcement_callback, username_clean, False)
-                    log_activity_event("disconnect", f"Disconnected from @{username_clean}'s live (probe confirmed offline)", username_clean)
+                        # Probe bisa false sesaat (network hiccup). Jangan tutup
+                        # sesi langsung; pakai grace period yang sama seperti
+                        # DisconnectEvent, dan catat disconnect terakhir.
+                        schedule_disconnect(current_session_id)
+                        log_activity_event(
+                            "disconnect",
+                            f"Disconnected from @{username_clean}'s live (probe confirmed offline; "
+                            f"grace {LIVE_DISCONNECT_GRACE_SECONDS // 60}m started)",
+                            username_clean,
+                        )
+                    else:
+                        runtime_status.clear_live(username_clean)
                     probed_live = False
                 if cycle_error is None:
                     runtime_status.update_observer_diag(username_clean, status="offline", consecutive_failures=0, last_error=None)

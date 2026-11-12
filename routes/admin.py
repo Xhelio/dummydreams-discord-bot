@@ -395,6 +395,7 @@ def view_viewers():
 
         <div class="card">
             <h2>Viewer List</h2>
+            <div class="table-scroll">
             <table>
                 <tr>
                     <th>Username (@)</th>
@@ -433,6 +434,7 @@ def view_viewers():
                 <tr><td colspan="6">No viewer data recorded yet.</td></tr>
                 {% endfor %}
             </table>
+            </div>
         </div>
         AUTO_REFRESH_JS_PLACEHOLDER
     </body>
@@ -473,7 +475,7 @@ def view_viewer_detail(tiktok_user):
             WHERE LOWER(tiktok_user) = ? AND date = ?
         """, (user_clean, today_str)).fetchone()
 
-        today_coins = today_row[0] if today_row else 0
+        today_coins = (today_row[0] or 0) if today_row else 0
 
         daily_history = cur.execute("""
             SELECT date, coins 
@@ -535,12 +537,17 @@ def view_viewer_detail(tiktok_user):
         {% if grand_total_coins != logged_total_coins %}
         <div class="notice-warning">
             ⚠️ Total tersimpan ({{ grand_total_coins }} c) berbeda dengan jumlah gift log ({{ logged_total_coins }} c).
-            Jalankan <a href="/admin/data">Recalculate Coin Totals</a> untuk menyamakan.
+            {% if logged_total_coins == 0 and grand_total_coins > 0 %}
+                Jalankan <a href="/admin/data"><strong>Backfill Gift Log Historis</strong></a> lalu <a href="/admin/data">Recalculate Coin Totals</a> di Main Menu.
+            {% else %}
+                Jalankan <a href="/admin/data">Recalculate Coin Totals</a> untuk menyamakan.
+            {% endif %}
         </div>
         {% endif %}
 
         <div class="card">
             <h2>📅 Daily Coin History</h2>
+            <div class="table-scroll">
             <table>
                 <tr>
                     <th>Date</th>
@@ -555,10 +562,12 @@ def view_viewer_detail(tiktok_user):
                 <tr><td colspan="2">No daily coin records yet.</td></tr>
                 {% endfor %}
             </table>
+            </div>
         </div>
 
         <div class="card">
             <h2>🎁 Recent Gift Log</h2>
+            <div class="table-scroll">
             <table>
                 <tr>
                     <th>Date & Time</th>
@@ -587,6 +596,7 @@ def view_viewer_detail(tiktok_user):
                 <tr><td colspan="6">No gift history recorded yet.</td></tr>
                 {% endfor %}
             </table>
+            </div>
         </div>
         AUTO_REFRESH_JS_PLACEHOLDER
     </body>
@@ -630,6 +640,7 @@ def view_monitor():
                 s.scheduled_host
             FROM live_sessions s
             ORDER BY s.start_time DESC
+            LIMIT 300
         """).fetchall()
 
         conn.close()
@@ -789,6 +800,7 @@ def view_monitor():
                 <button type="submit">+ Add Target Host</button>
             </form>
             <br>
+            <div class="table-scroll">
             <table>
                 <tr><th>ID</th><th>Username TikTok</th><th>Channel Name</th><th>Live Host</th><th>Realtime Status</th><th>Action</th></tr>
                 {% for h in hosts %}
@@ -813,10 +825,12 @@ def view_monitor():
                 <tr><td colspan="6">No targets registered yet.</td></tr>
                 {% endfor %}
             </table>
+            </div>
         </div>
 
         <div class="card">
             <h2>📹 Live Session History</h2>
+            <div class="table-scroll">
             <table>
                 <tr>
                     <th>Username (@)</th>
@@ -861,6 +875,7 @@ def view_monitor():
                 <tr><td colspan="6">No live session history yet.</td></tr>
                 {% endfor %}
             </table>
+            </div>
         </div>
         AUTO_REFRESH_JS_PLACEHOLDER
     </body>
@@ -885,7 +900,7 @@ def add_host():
         conn.close()
     return redirect('/admin/monitor?msg=' + quote_plus('Host ditambahkan/diperbarui.') + '&msg_type=success')
 
-@admin_bp.route('/toggle-host/<int:host_id>')
+@admin_bp.route('/toggle-host/<int:host_id>', methods=['GET', 'POST'])
 def toggle_host(host_id):
     conn = get_db_connection()
     conn.execute("UPDATE hosts SET is_active = CASE WHEN is_active = 1 THEN 0 ELSE 1 END WHERE host_id = ?", (host_id,))
@@ -893,7 +908,7 @@ def toggle_host(host_id):
     conn.close()
     return redirect('/admin/monitor?msg=' + quote_plus('Status aktif host diperbarui.') + '&msg_type=success')
 
-@admin_bp.route('/delete-host/<int:host_id>')
+@admin_bp.route('/delete-host/<int:host_id>', methods=['GET', 'POST'])
 def delete_host(host_id):
     conn = get_db_connection()
     conn.execute("DELETE FROM hosts WHERE host_id = ?", (host_id,))
@@ -1397,6 +1412,8 @@ def view_analytics():
             'account': account_filter,
             'viewer': viewer_filter,
             'group': group_by,
+            'metric': metric,
+            'chart': chart_type,
         }
         params.update(overrides)
         query = '&'.join(f"{k}={quote_plus(str(v))}" for k, v in params.items() if v)
@@ -2131,11 +2148,13 @@ def view_verifications():
             <p class="muted" style="margin-bottom: 10px;">
                 Verified role and verification channel settings are managed in <strong>Bot Settings</strong> to keep all bot controls in one place.
             </p>
+            <div class="table-scroll">
             <table>
                 <tr><th>Setting</th><th>Value</th></tr>
                 <tr><td>Verified Role ID</td><td><code>{{ verified_role_id or '-' }}</code></td></tr>
                 <tr><td>Verification Channel ID</td><td><code>{{ verification_channel_id or '-' }}</code></td></tr>
             </table>
+            </div>
             <p style="margin-top: 12px;">
                 <a href="/admin/settings" class="nav-btn" style="display:inline-flex;">⚙️ Open Bot Settings</a>
             </p>

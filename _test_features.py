@@ -11,10 +11,10 @@ print("✅ DB init OK")
 hosts = db.get_active_hosts()
 print(f"✅ Active hosts ({len(hosts)}): {hosts}")
 
-# Expected accounts
+# Expected accounts (from config/config.json)
 expected_accounts = [
     'clarissadreams', 'georgevilora', 'stefannyalisha',
-    'julliannedreams', 'dummydreamsentertaiment', 'franklyndreams'
+    'juliannedreams', 'dummydreamsentertaiment', 'franklyndreams'
 ]
 for acc in expected_accounts:
     if acc in hosts:
@@ -24,7 +24,7 @@ for acc in expected_accounts:
 
 print()
 
-# Test host detection
+# Test host detection (current aliases: Luna/Sinta/Zize/Beatrix/Fearless/Yosa/Yuca)
 tests = [
     ("ZIZE\u2019s here!", "Zize"),
     ("Zize's here!", "Zize"),
@@ -32,15 +32,18 @@ tests = [
     ("Mommy is here", "Sinta"),
     ("Momy is live", "Sinta"),
     ("shinta is streaming", "Sinta"),
-    ("SOLEN\u2019s here", "Solen"),
-    ("Solen's Live", "Solen"),
-    ("welcome everyone, Julianne is live!", "Julianne"),
+    ("SOLEN\u2019s here", None),
+    ("Solen's Live", None),
+    ("welcome everyone, Julianne is live!", None),
     ("ITS YUCA TIME", "Yuca"),
-    ("Yuka is here", "Yuca"),
-    ("hey its IELYA", "Ielya"),
-    ("ILYA here", "Ielya"),
-    ("COLE in the house", "Cole"),
+    ("Yuka is here", None),
+    ("hey its IELYA", None),
+    ("ILYA here", None),
+    ("COLE in the house", None),
     ("Luna's stream", "Luna"),
+    ("Beatrix is here", "Beatrix"),
+    ("Fearless on cam", "Fearless"),
+    ("Yosa is live", "Yosa"),
     ("halo semuanya", None),
     ("welcome to the stream", None),
     ("ZIZE and SOLEN together", "Zize"),  # returns first match

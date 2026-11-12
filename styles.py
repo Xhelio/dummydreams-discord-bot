@@ -171,16 +171,25 @@ NAV_HTML = """
     var p = window.location.pathname || '';
     document.querySelectorAll('.nav-links .nav-btn').forEach(function(a){
       var d = a.getAttribute('data-path') || '';
-      if (p === d || (d !== '/admin/data' && p.indexOf(d) === 0)) a.classList.add('active');
+      var active = (p === d) || (d !== '/admin/data' && p.indexOf(d) === 0);
+      if (!active && p.indexOf('/admin/viewer') === 0 && d === '/admin/viewers') active = true;
+      if (!active && p.indexOf('/admin/host') === 0 && d === '/admin/monitor') active = true;
+      if (active) a.classList.add('active');
     });
     var params = new URLSearchParams(window.location.search);
     var msg = params.get('msg');
     var type = params.get('msg_type') || 'success';
     if (msg) {
+      if (document.querySelector('.flash-banner-msg')) {
+        params.delete('msg'); params.delete('msg_type');
+        var qs0 = params.toString();
+        window.history.replaceState({}, '', window.location.pathname + (qs0 ? ('?' + qs0) : ''));
+        return;
+      }
       var allowed = ['success','info','warning','danger'];
       if (allowed.indexOf(type) === -1) type = 'success';
       var banner = document.createElement('div');
-      banner.className = 'notice-' + type;
+      banner.className = 'notice-' + type + ' flash-banner-msg';
       banner.style.position = 'relative';
       banner.style.margin = '0 0 16px 0';
       banner.textContent = msg;

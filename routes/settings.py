@@ -121,11 +121,7 @@ def view_settings():
         </div>
         NAV_HTML_PLACEHOLDER
 
-        {% if flash_msg %}
-        <div class="notice-{{ flash_type if flash_type in ['success','info','warning','danger'] else 'success' }}">{{ flash_msg }}</div>
-        {% elif saved %}
-        <div class="notice-success">✅ Settings saved. Changes are applied by the bot immediately.</div>
-        {% endif %}
+        {# Flash messages are rendered by NAV_HTML from ?msg= to avoid duplicates. #}
 
         <form action="/admin/settings/save" method="POST">
             <div class="card">
@@ -411,7 +407,7 @@ def view_settings():
                     rows.forEach(cb => {
                         cb.disabled = !master.checked;
                         if (master.checked) {
-                            cb.checked = cb.dataset.saved !== '0' && cb.dataset.stored === '1';
+                            cb.checked = cb.dataset.saved === '1';
                         } else {
                             cb.checked = false;
                         }
@@ -634,7 +630,7 @@ def save_hosts_batch():
     return redirect("/admin/settings?msg=" + _url_q(f"Perubahan host disimpan (changed={changed}, deleted={deleted}).") + "&msg_type=success")
 
 
-@settings_bp.route("/toggle-host-priority/<int:host_id>")
+@settings_bp.route("/toggle-host-priority/<int:host_id>", methods=["GET", "POST"])
 def toggle_host_priority_route(host_id):
     # Kept for backward compatibility; settings UI now uses batch save.
     conn = get_db_connection()
@@ -648,7 +644,7 @@ def toggle_host_priority_route(host_id):
             log_activity_event("system", f"Host @{(row[0] or '').lower()} set to {state}.", (row[0] or "").lower())
     finally:
         conn.close()
-    return redirect("/admin/settings?msg=" + _url_q("Host dihapus.") + "&msg_type=success")
+    return redirect("/admin/settings?msg=" + _url_q("Prioritas host diperbarui.") + "&msg_type=success")
 
 
 @settings_bp.route("/settings/alias/add", methods=["POST"])

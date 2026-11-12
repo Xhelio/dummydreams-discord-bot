@@ -40,7 +40,7 @@ from db import (
     is_feature_enabled,
     tier_reset_due,
     mark_tier_reset_done,
-    close_all_open_live_sessions
+    suspend_open_live_sessions
 )
 from utils import get_schedule_info, load_summary_config
 from server import keep_alive
@@ -1860,7 +1860,7 @@ async def slash_unclaim(interaction: discord.Interaction, member: discord.Member
 
 async def main():
     init_db()
-    close_all_open_live_sessions()
+    suspend_open_live_sessions()
     set_verification_refresh_handler(schedule_verification_panel_refresh)
     set_presence_refresh_handler(schedule_presence_refresh)
     keep_alive(handle_api_announcement)
