@@ -1738,25 +1738,73 @@ def end_live_session(session_id: int, end_time: str = None):
     finally:
         conn.close()
 
-def _get_table_columns(cur, table: str) -> set:
-    """Ambil nama kolom tabel (aman untuk SQLite maupun Turso/libsql)."""
+def _get_table_column_info(cur, table: str) -> list:
+    """Ambil detail kolom tabel: nama, tipe, NOT NULL, default, primary key."""
     try:
         rows = cur.execute(f"PRAGMA table_info({table})").fetchall()
-        return {str(r[1]) for r in rows if len(r) > 1}
     except Exception:
-        return set()
+        return []
+    info = []
+    for row in rows:
+        if len(row) < 2:
+            continue
+        info.append({
+            "name": str(row[1]),
+            "type": str(row[2] or ""),
+            "notnull": bool(row[3]) if len(row) > 3 else False,
+            "default": row[4] if len(row) > 4 else None,
+            "pk": bool(row[5]) if len(row) > 5 else False,
+        })
+    return info
+
+
+def _get_table_columns(cur, table: str) -> set:
+    """Ambil nama kolom tabel (aman untuk SQLite maupun Turso/libsql)."""
+    return {col["name"] for col in _get_table_column_info(cur, table)}
+
+
+def _fallback_gift_log_value(name: str, col_type: str, data: dict):
+    """Nilai aman untuk kolom NOT NULL lama yang tidak ada di data kita."""
+    col_type = (col_type or "").upper()
+    if name == "tiktok_username":
+        # Schema lama menyimpan akun target di kolom NOT NULL ini.
+        return data.get("target_username") or data.get("viewer_username") or ""
+    if name == "target_username":
+        return data.get("tiktok_username") or "unknown"
+    if name == "viewer_username":
+        return "__unknown__"
+    if any(token in col_type for token in ("INT", "REAL", "NUM", "DEC", "FLOA", "DOUB")):
+        return 0
+    return ""
 
 
 def _insert_gift_log_row(cur, data: dict, or_ignore: bool = True) -> list:
     """Insert gift log hanya memakai kolom yang benar-benar ada di DB.
 
     Ini membuat penulisan gift log tetap berhasil walau schema produksi
-    tertinggal/korup (mis. kolom host_name/msg_id belum pernah terbuat).
+    tertinggal/korup. Kolom NOT NULL lama (mis. ``tiktok_username``) otomatis
+    diisi supaya constraint tidak menggagalkan insert.
     """
-    existing = _get_table_columns(cur, "gift_logs")
+    info = _get_table_column_info(cur, "gift_logs")
+    existing = {col["name"] for col in info}
     if not existing:
         existing = set(data.keys())
     insert_cols = [col for col in data.keys() if col in existing]
+
+    # Lengkapi kolom NOT NULL tanpa default yang belum kita isi.
+    for col in info:
+        name = col["name"]
+        if name in insert_cols:
+            continue
+        if col["notnull"] and col["default"] is None and not col["pk"]:
+            fallback = _fallback_gift_log_value(name, col["type"], data)
+            data[name] = fallback
+            insert_cols.append(name)
+            print(
+                f"[GiftLog] Filling legacy NOT NULL column '{name}' with "
+                f"{fallback!r} so the gift log can be stored."
+            )
+
     required = {"viewer_username", "coins"}
     missing = required - set(insert_cols)
     if missing:
@@ -1796,6 +1844,7 @@ def log_gift_transaction(session_id: int, target_user: str, viewer_user: str, vi
     viewer_clean = (viewer_user or "").lower()
 
     data = {
+        "tiktok_username": target_clean,
         "session_id": session_id,
         "viewer_username": viewer_clean,
         "viewer_display_name": viewer_display,
@@ -1868,6 +1917,7 @@ def test_gift_log_write() -> dict:
     now_dt = datetime.now(wib)
     stamp = now_dt.strftime('%Y%m%d%H%M%S%f')
     data = {
+        "tiktok_username": "__selftest__",
         "session_id": None,
         "viewer_username": "__selftest__",
         "viewer_display_name": "Self Test",
@@ -1948,6 +1998,7 @@ def backfill_gift_logs_from_daily() -> dict:
             if coins <= 0:
                 continue
             data = {
+                "tiktok_username": "backfill",
                 "session_id": None,
                 "viewer_username": user or "",
                 "viewer_display_name": display_name or user or "",
@@ -1992,6 +2043,7 @@ def backfill_gift_logs_from_daily() -> dict:
             """, (user, user)).fetchone()
             date = (date_row[0] if date_row and date_row[0] else "2020-01-01")
             data = {
+                "tiktok_username": "backfill",
                 "session_id": None,
                 "viewer_username": user or "",
                 "viewer_display_name": display_name or user or "",
