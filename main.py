@@ -184,6 +184,53 @@ async def grant_verified_access(member: discord.Member, tiktok_user: str, total_
 
     return True, role_info
 
+
+async def grant_verified_access_for_discord_id(discord_id, tiktok_user: str, total_coins: int) -> tuple:
+    """Grant verified (and tier) role across all guilds for a Discord user ID.
+
+    Works even when the interaction happens in DMs or the member is not cached.
+    Returns (granted_any: bool, role_info: str).
+    """
+    try:
+        did = int(str(discord_id).strip())
+    except (TypeError, ValueError):
+        return False, " ⚠️ Discord ID tidak valid untuk pemberian role."
+
+    found = 0
+    granted = 0
+    already = 0
+    problems = []
+    for guild in list(getattr(bot, "guilds", []) or []):
+        member = guild.get_member(did)
+        if member is None:
+            try:
+                member = await guild.fetch_member(did)
+            except Exception:
+                member = None
+        if member is None:
+            continue
+        found += 1
+        try:
+            ok, info = await grant_verified_access(member, tiktok_user, total_coins)
+            if "belum bisa diberikan otomatis" in (info or "") or "⚠️" in (info or ""):
+                problems.append(f"{guild.name}: {info.strip()}")
+            elif "has been granted" in (info or ""):
+                granted += 1
+            else:
+                already += 1
+        except Exception as e:
+            problems.append(f"{guild.name}: {e}")
+
+    if found == 0:
+        return False, " ⚠️ Akun Discord tidak ditemukan di server bot. Pastikan kamu sudah join server, lalu coba Verifikasi Ulang/Beri Role."
+    if problems:
+        # If some succeeded or already ok, be explicit but still report issues.
+        summary = "; ".join(problems[:2])
+        return granted > 0 or already > 0, f" ⚠️ Role belum bisa diberikan otomatis di sebagian server ({summary})."
+    if granted > 0:
+        return True, " Role verifikasi telah diberikan."
+    return True, " Role sudah aktif."
+
 def handle_api_announcement(username: str, is_live: bool, host_name: str = None):
     try:
         loop = bot.loop if bot.is_ready() else asyncio.get_event_loop()
@@ -1069,26 +1116,29 @@ class BioVerificationView(discord.ui.View):
     )
     async def check_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
         # Defer immediately: DB/Turso calls and TikTok fetch can exceed Discord's
-        # 3-second interaction response deadline.
+        # 3-second interaction response deadline. Defer on the message so we can
+        # update the verification panel in place (not an ephemeral-only response).
         try:
-            await interaction.response.defer(ephemeral=True)
+            await interaction.response.defer()
         except discord.InteractionResponded:
             pass
         except Exception:
             return
 
         if not is_feature_enabled("verification"):
-            await interaction.followup.send(
-                "⛔ Verification is currently disabled. Please try again later.",
-                ephemeral=True
+            await interaction.edit_original_response(
+                content="⛔ Verification is currently disabled. Please try again later.",
+                embed=None,
+                view=None
             )
             return
 
         tiktok_user, code = self._resolve_pending(interaction.user.id)
         if not tiktok_user:
-            await interaction.followup.send(
-                "⌛ Your verification session expired. Open the verification panel and start again.",
-                ephemeral=True
+            await interaction.edit_original_response(
+                content="⌛ Your verification session expired. Open the verification panel and start again.",
+                embed=None,
+                view=None
             )
             return
 
@@ -1104,12 +1154,14 @@ class BioVerificationView(discord.ui.View):
                 tiktok_user
             )
 
-            if isinstance(interaction.user, discord.Member):
-                _, role_info = await grant_verified_access(
-                    interaction.user, tiktok_user, total_coins
+            # Grant verified/tier roles across all guilds (works in DM and in-server).
+            try:
+                _, role_info = await grant_verified_access_for_discord_id(
+                    interaction.user.id, tiktok_user, total_coins
                 )
-            else:
-                role_info = " Server access has been unlocked."
+            except Exception as e:
+                print(f"[Verification] Auto-grant after bio verify failed for {interaction.user.id}: {e}")
+                role_info = f" ⚠️ Verifikasi berhasil, tapi gagal memberi role otomatis: {e}. Hubungi admin."
 
             embed = discord.Embed(
                 title="🎉 Verification Successful!",
@@ -1179,12 +1231,18 @@ class BioVerificationView(discord.ui.View):
                 return
         self.tiktok_user = tiktok_user or self.tiktok_user
         self.code = code
-        await interaction.followup.send(
-            f"**Verification code for @{tiktok_user or 'your TikTok'}:**\n"
-            f"```\n{code}\n```\n"
-            f"Tap and hold the code to copy, then paste it into your TikTok bio.",
-            ephemeral=True
+        embed = discord.Embed(
+            title="📋 Verification Code",
+            description=(
+                f"TikTok: **@{tiktok_user or 'your TikTok'}**\n\n"
+                f"**Kode (tap & tahan untuk copy):**\n"
+                f"```text\n{code}\n```\n"
+                f"Tempel kode ini ke bio TikTok kamu, lalu klik **Verify Bio**."
+            ),
+            color=discord.Color.blurple(),
         )
+        # Also include plain code for easy selection/copy on clients that show content.
+        await interaction.followup.send(content=f"`{code}`", embed=embed, ephemeral=True)
 
     @discord.ui.button(
         label="Change Method",
@@ -1203,9 +1261,10 @@ class BioVerificationView(discord.ui.View):
         pending = get_pending_verification(interaction.user.id)
         tiktok_user = (pending or {}).get("tiktok_user") or self.tiktok_user
         if not tiktok_user:
-            await interaction.followup.send(
-                "⌛ Your verification session expired. Open the verification panel and start again.",
-                ephemeral=True
+            await interaction.edit_original_response(
+                content="⌛ Your verification session expired. Open the verification panel and start again.",
+                embed=None,
+                view=None
             )
             return
         _, total_coins, _ = is_tiktok_user_in_db(tiktok_user)
@@ -1262,7 +1321,9 @@ class LiveVerificationView(discord.ui.View):
                     interaction.user, self.tiktok_user, self.total_coins
                 )
             else:
-                role_info = " Server access has been unlocked."
+                _, role_info = await grant_verified_access_for_discord_id(
+                    interaction.user.id, self.tiktok_user, self.total_coins
+                )
 
             embed = discord.Embed(
                 title="🎉 Live Verification Successful!",
@@ -1327,7 +1388,9 @@ class LiveGreetingVerificationView(discord.ui.View):
                     interaction.user, self.tiktok_user, self.total_coins
                 )
             else:
-                role_info = " Server access has been unlocked."
+                _, role_info = await grant_verified_access_for_discord_id(
+                    interaction.user.id, self.tiktok_user, self.total_coins
+                )
 
             embed = discord.Embed(
                 title="🎉 Live Greeting Verification Successful!",
@@ -1414,15 +1477,15 @@ async def handle_live_comment_verification(tiktok_user: str, comment_text: str, 
     # Get the coin balance
     _, total_coins, _ = is_tiktok_user_in_db(u_clean)
 
-    # Grant the verified role in every guild the member belongs to
-    for guild in bot.guilds:
-        member = guild.get_member(int(discord_id))
-        if member:
-            try:
-                await grant_verified_access(member, u_clean, total_coins)
-                print(f"[Verification] Granted verified role to {member.display_name} in {guild.name}")
-            except Exception as e:
-                print(f"[Verification] Error granting role in {guild.name}: {e}")
+    # Grant the verified role in every guild the member belongs to (fetch if not cached)
+    try:
+        granted_any, role_info = await grant_verified_access_for_discord_id(discord_id, u_clean, total_coins)
+        if granted_any:
+            print(f"[Verification] Auto-granted verified role for @{u_clean} (Discord {discord_id}). {role_info.strip()}")
+        else:
+            print(f"[Verification] Auto-grant role issue for @{u_clean} (Discord {discord_id}): {role_info.strip()}")
+    except Exception as e:
+        print(f"[Verification] Error granting verified role for @{u_clean} (Discord {discord_id}): {e}")
 
     # Send a DM notification when the user's DMs are open
     try:
