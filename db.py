@@ -24,6 +24,12 @@ import pytz
 _DB_HEALTH_CACHE = {"ok": True, "at": 0.0}
 
 
+def get_database_backend() -> str:
+    if HAS_LIBSQL and TURSO_URL:
+        return "Turso/libSQL"
+    return "SQLite lokal"
+
+
 def check_database_health() -> bool:
     now = time.time()
     if now - _DB_HEALTH_CACHE["at"] < 10:
@@ -1732,70 +1738,85 @@ def end_live_session(session_id: int, end_time: str = None):
     finally:
         conn.close()
 
+def _get_table_columns(cur, table: str) -> set:
+    """Ambil nama kolom tabel (aman untuk SQLite maupun Turso/libsql)."""
+    try:
+        rows = cur.execute(f"PRAGMA table_info({table})").fetchall()
+        return {str(r[1]) for r in rows if len(r) > 1}
+    except Exception:
+        return set()
+
+
+def _insert_gift_log_row(cur, data: dict, or_ignore: bool = True) -> list:
+    """Insert gift log hanya memakai kolom yang benar-benar ada di DB.
+
+    Ini membuat penulisan gift log tetap berhasil walau schema produksi
+    tertinggal/korup (mis. kolom host_name/msg_id belum pernah terbuat).
+    """
+    existing = _get_table_columns(cur, "gift_logs")
+    if not existing:
+        existing = set(data.keys())
+    insert_cols = [col for col in data.keys() if col in existing]
+    required = {"viewer_username", "coins"}
+    missing = required - set(insert_cols)
+    if missing:
+        raise RuntimeError(
+            "Kolom wajib gift_logs tidak ditemukan: " + ", ".join(sorted(missing))
+        )
+    verb = "INSERT OR IGNORE" if or_ignore else "INSERT"
+    placeholders = ", ".join(["?"] * len(insert_cols))
+    sql = (
+        f"{verb} INTO gift_logs ({', '.join(insert_cols)}) "
+        f"VALUES ({placeholders})"
+    )
+    cur.execute(sql, tuple(data[col] for col in insert_cols))
+    return insert_cols
+
+
 def log_gift_transaction(session_id: int, target_user: str, viewer_user: str, viewer_display: str, gift_name: str, gift_count: int, coins: int, msg_id: str = None, host_name: str = None):
     """Mencatat log gift secara terperinci sesuai waktu WIB & host terjadwal.
 
     Returns:
-      True  -> row stored (full columns, or legacy fallback when the DB schema
-               is missing the newer columns).
+      True  -> row stored (hanya kolom yang ada di schema).
       False -> duplicate/replayed message id, nothing stored.
       None  -> the gift log could not be written at all (already reported).
     """
     wib = pytz.timezone('Asia/Jakarta')
     now_dt = datetime.now(wib)
-    
+
     log_date = now_dt.strftime('%Y-%m-%d')
     log_time = now_dt.strftime('%H:%M:%S')
     log_datetime = now_dt.strftime('%Y-%m-%d %H:%M:%S')
-    
+
     target_clean = target_user.lower()
     scheduled_host = get_scheduled_host_name(target_clean, now_dt)
     # Host yang sedang tampil saat gift masuk (hasil LiveIntroEvent). Fallback ke
     # host terjadwal bila observer belum sempat mendeteksi host.
     host_clean = (host_name or "").strip() or (scheduled_host or "").strip() or "Host"
-
-    full_sql = """
-        INSERT OR IGNORE INTO gift_logs (
-            session_id, 
-            viewer_username, 
-            viewer_display_name, 
-            gift_name, 
-            gift_count, 
-            coins, 
-            log_date, 
-            log_time, 
-            log_datetime, 
-            target_username, 
-            scheduled_host,
-            msg_id,
-            host_name
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """
-    legacy_sql = """
-        INSERT INTO gift_logs (
-            session_id, viewer_username, viewer_display_name, gift_name,
-            gift_count, coins, log_date, log_time, log_datetime,
-            target_username, scheduled_host
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """
     viewer_clean = (viewer_user or "").lower()
-    full_values = (
-        session_id, viewer_clean, viewer_display, gift_name, gift_count, coins,
-        log_date, log_time, log_datetime, target_clean, scheduled_host,
-        (str(msg_id) if msg_id else None), host_clean,
-    )
-    legacy_values = (
-        session_id, viewer_clean, viewer_display, gift_name, gift_count, coins,
-        log_date, log_time, log_datetime, target_clean, scheduled_host,
-    )
+
+    data = {
+        "session_id": session_id,
+        "viewer_username": viewer_clean,
+        "viewer_display_name": viewer_display,
+        "gift_name": gift_name,
+        "gift_count": gift_count,
+        "coins": coins,
+        "log_date": log_date,
+        "log_time": log_time,
+        "log_datetime": log_datetime,
+        "target_username": target_clean,
+        "scheduled_host": scheduled_host,
+        "msg_id": (str(msg_id) if msg_id else None),
+        "host_name": host_clean,
+    }
 
     conn = get_db_connection()
     try:
         cur = conn.cursor()
-        msg_id_clean = str(msg_id) if msg_id else None
-        if msg_id_clean:
+        columns = _get_table_columns(cur, "gift_logs")
+        msg_id_clean = data["msg_id"]
+        if msg_id_clean and "msg_id" in columns:
             try:
                 already = cur.execute(
                     "SELECT 1 FROM gift_logs WHERE msg_id = ? LIMIT 1", (msg_id_clean,)
@@ -1803,54 +1824,36 @@ def log_gift_transaction(session_id: int, target_user: str, viewer_user: str, vi
                 if already:
                     return False
             except Exception as dedupe_error:
-                # Kolom msg_id belum ada di DB produksi: lewati dedupe dan
-                # biarkan insert fallback yang menyelamatkan gift ini.
                 try:
                     conn.rollback()
                 except Exception:
                     pass
-                print(f"[GiftLog] msg_id column unavailable ({dedupe_error}); inserting without dedupe.")
-        primary_error_text = None
-        try:
-            cur.execute(full_sql, full_values)
-        except Exception as primary_error:
-            # Self-healing for production DBs where a newer column/index was not
-            # created yet: never lose the gift, fall back to legacy columns.
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-            primary_error_text = str(primary_error)
-            print(
-                f"[GiftLog] Full insert failed for @{viewer_clean} ({gift_name}): "
-                f"{primary_error}; retrying with legacy columns."
-            )
-            cur.execute(legacy_sql, legacy_values)
+                print(f"[GiftLog] Dedupe check failed ({dedupe_error}); continuing insert.")
+
+        _insert_gift_log_row(cur, data, or_ignore=True)
         if session_id:
             cur.execute("UPDATE live_sessions SET total_coins = total_coins + ? WHERE session_id = ?", (coins, session_id))
         conn.commit()
-        if primary_error_text:
-            # Catat setelah commit supaya tidak menahan lock database.
-            try:
-                log_activity_event(
-                    "system",
-                    f"[GiftLog] Primary insert failed ({primary_error_text}); gift stored with legacy columns "
-                    f"for @{viewer_clean} ({gift_name}, {coins}c). Jalankan redeploy/migrasi DB.",
-                    target_clean,
-                )
-            except Exception:
-                pass
+        try:
+            set_setting("gift_log_last_ok", log_datetime)
+        except Exception:
+            pass
         return True
     except Exception as e:
         try:
             conn.rollback()
         except Exception:
             pass
-        print(f"[GiftLog] FAILED to store gift log for @{viewer_user} ({gift_name}, {coins}c): {e}")
+        error_text = f"{type(e).__name__}: {e}"
+        print(f"[GiftLog] FAILED to store gift log for @{viewer_user} ({gift_name}, {coins}c): {error_text}")
+        try:
+            set_setting("gift_log_last_error", f"{log_datetime} | {error_text}")
+        except Exception:
+            pass
         try:
             log_activity_event(
                 "system",
-                f"[GiftLog] GAGAL menulis gift log untuk @{viewer_user} ({gift_name}, {coins}c): {e}",
+                f"[GiftLog] GAGAL menulis gift log untuk @{viewer_user} ({gift_name}, {coins}c): {error_text}",
                 target_clean,
             )
         except Exception:
@@ -1858,6 +1861,171 @@ def log_gift_transaction(session_id: int, target_user: str, viewer_user: str, vi
         return None
     finally:
         conn.close()
+
+def test_gift_log_write() -> dict:
+    """Uji tulis/hapus gift_logs untuk mendiagnosis kegagalan insert di produksi."""
+    wib = pytz.timezone('Asia/Jakarta')
+    now_dt = datetime.now(wib)
+    stamp = now_dt.strftime('%Y%m%d%H%M%S%f')
+    data = {
+        "session_id": None,
+        "viewer_username": "__selftest__",
+        "viewer_display_name": "Self Test",
+        "gift_name": "__selftest__",
+        "gift_count": 1,
+        "coins": 0,
+        "log_date": now_dt.strftime('%Y-%m-%d'),
+        "log_time": now_dt.strftime('%H:%M:%S'),
+        "log_datetime": now_dt.strftime('%Y-%m-%d %H:%M:%S'),
+        "target_username": "__selftest__",
+        "scheduled_host": "Self Test",
+        "msg_id": f"selftest-{stamp}",
+        "host_name": "Self Test",
+    }
+    columns = []
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        columns = sorted(_get_table_columns(cur, "gift_logs"))
+        inserted_columns = _insert_gift_log_row(cur, data, or_ignore=False)
+        conn.commit()
+        cur.execute("DELETE FROM gift_logs WHERE viewer_username = ?", ("__selftest__",))
+        conn.commit()
+        return {
+            "ok": True,
+            "backend": get_database_backend(),
+            "columns": columns,
+            "inserted_columns": inserted_columns,
+            "message": "Insert & delete baris tes gift_logs berhasil.",
+        }
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "backend": get_database_backend(),
+            "columns": columns,
+            "error": f"{type(e).__name__}: {e}",
+        }
+    finally:
+        conn.close()
+
+
+def backfill_gift_logs_from_daily() -> dict:
+    """Isi gift_logs historis dari daily_tiktok_gifts + saldo awal tersimpan.
+
+    Berguna jika koin lama sudah masuk ke tiktok_gifts tetapi detail gift_logs
+    belum pernah tercatat. Baris buatan ditandai jelas sebagai "Backfill" dan
+    tidak menimpa tanggal yang sudah punya detail asli.
+    """
+    wib = pytz.timezone('Asia/Jakarta')
+    now_dt = datetime.now(wib)
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        inserted_daily = 0
+        inserted_opening = 0
+        daily_coins = 0
+        opening_coins = 0
+
+        daily_rows = cur.execute("""
+            SELECT LOWER(d.tiktok_user) AS u, d.date, COALESCE(SUM(d.coins), 0),
+                   MAX(d.display_name)
+            FROM daily_tiktok_gifts d
+            WHERE d.date IS NOT NULL AND d.date != ''
+              AND NOT EXISTS (
+                  SELECT 1 FROM gift_logs g
+                  WHERE LOWER(g.viewer_username) = LOWER(d.tiktok_user)
+                    AND g.log_date = d.date
+              )
+            GROUP BY LOWER(d.tiktok_user), d.date
+            ORDER BY d.date
+        """).fetchall()
+        for user, date, coins, display_name in daily_rows:
+            coins = int(coins or 0)
+            if coins <= 0:
+                continue
+            data = {
+                "session_id": None,
+                "viewer_username": user or "",
+                "viewer_display_name": display_name or user or "",
+                "gift_name": "Backfill harian",
+                "gift_count": 1,
+                "coins": coins,
+                "log_date": date,
+                "log_time": "00:00:00",
+                "log_datetime": f"{date} 00:00:00",
+                "target_username": "backfill",
+                "scheduled_host": "Backfill",
+                "msg_id": f"backfill-daily-{user}-{date}",
+                "host_name": "Backfill",
+            }
+            _insert_gift_log_row(cur, data, or_ignore=True)
+            inserted_daily += 1
+            daily_coins += coins
+        conn.commit()
+
+        diff_rows = cur.execute("""
+            SELECT LOWER(g.tiktok_user) AS u, MAX(g.display_name),
+                   COALESCE(g.total_coins, 0) - COALESCE(l.coins, 0) AS diff
+            FROM tiktok_gifts g
+            LEFT JOIN (
+                SELECT LOWER(viewer_username) AS u, SUM(coins) AS coins
+                FROM gift_logs GROUP BY LOWER(viewer_username)
+            ) l ON LOWER(g.tiktok_user) = l.u
+            WHERE COALESCE(g.total_coins, 0) > COALESCE(l.coins, 0)
+        """).fetchall()
+        for user, display_name, diff in diff_rows:
+            diff = int(diff or 0)
+            if diff <= 0:
+                continue
+            date_row = cur.execute("""
+                SELECT MIN(d) FROM (
+                    SELECT MIN(date) AS d FROM daily_tiktok_gifts
+                    WHERE LOWER(tiktok_user) = LOWER(?)
+                    UNION ALL
+                    SELECT MIN(log_date) AS d FROM gift_logs
+                    WHERE LOWER(viewer_username) = LOWER(?)
+                )
+            """, (user, user)).fetchone()
+            date = (date_row[0] if date_row and date_row[0] else "2020-01-01")
+            data = {
+                "session_id": None,
+                "viewer_username": user or "",
+                "viewer_display_name": display_name or user or "",
+                "gift_name": "Backfill saldo awal",
+                "gift_count": 1,
+                "coins": diff,
+                "log_date": date,
+                "log_time": "00:00:00",
+                "log_datetime": f"{date} 00:00:00",
+                "target_username": "backfill",
+                "scheduled_host": "Backfill",
+                "msg_id": f"backfill-opening-{user}",
+                "host_name": "Backfill",
+            }
+            _insert_gift_log_row(cur, data, or_ignore=True)
+            inserted_opening += 1
+            opening_coins += diff
+        conn.commit()
+        return {
+            "inserted_daily": inserted_daily,
+            "daily_coins": daily_coins,
+            "inserted_opening": inserted_opening,
+            "opening_coins": opening_coins,
+            "at": now_dt.strftime('%Y-%m-%d %H:%M:%S'),
+        }
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return {"error": f"{type(e).__name__}: {e}"}
+    finally:
+        conn.close()
+
 
 def save_gift_data(username: str, display_name: str, coins: int) -> int:
     conn = get_db_connection()
@@ -1982,6 +2150,23 @@ def get_coin_integrity() -> dict:
             (today_str,),
         ).fetchone()
         last_log_row = cur.execute("SELECT MAX(log_datetime) FROM gift_logs").fetchone()
+        try:
+            setting_rows = cur.execute(
+                "SELECT key, value FROM bot_settings "
+                "WHERE key IN ('gift_log_last_error', 'gift_log_last_ok')"
+            ).fetchall()
+            gift_log_settings = {r[0]: r[1] for r in setting_rows}
+        except Exception:
+            gift_log_settings = {}
+        last_write_error = gift_log_settings.get("gift_log_last_error", "") or ""
+        last_write_ok = gift_log_settings.get("gift_log_last_ok", "") or ""
+        # Sembunyikan error lama jika penulisan terakhir sudah berhasil.
+        if last_write_error and last_write_ok and last_write_error[:19] <= last_write_ok[:19]:
+            last_write_error = ""
+        try:
+            gift_log_columns = sorted(_get_table_columns(cur, "gift_logs"))
+        except Exception:
+            gift_log_columns = []
         mismatches = cur.execute("""
             SELECT g.tiktok_user, COALESCE(g.total_coins, 0) AS stored,
                    COALESCE(l.coins, 0) AS logged
@@ -2003,6 +2188,10 @@ def get_coin_integrity() -> dict:
             "today_log_rows": int(today_log_row[0] or 0) if today_log_row else 0,
             "today_log_coins": int(today_log_row[1] or 0) if today_log_row else 0,
             "last_log_at": last_log_row[0] if last_log_row and last_log_row[0] else "",
+            "backend": get_database_backend(),
+            "gift_log_columns": gift_log_columns,
+            "last_write_error": last_write_error,
+            "last_write_ok": last_write_ok,
             "mismatches": [
                 {"viewer": r[0], "stored": int(r[1] or 0), "logged": int(r[2] or 0)}
                 for r in mismatches

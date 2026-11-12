@@ -21,6 +21,8 @@ from db import (
     sync_valid_hosts,
     get_coin_integrity,
     recalculate_coin_totals,
+    test_gift_log_write,
+    backfill_gift_logs_from_daily,
     get_all_verification_status,
     save_verification_status,
     delete_verification_status,
@@ -76,6 +78,15 @@ def view_data():
             {% if integrity.error %}
             <div class="notice-danger">Gagal membaca data koin: {{ integrity.error }}</div>
             {% else %}
+            <div class="muted" style="font-size: 0.82rem; margin-bottom: 10px;">
+                Database: <strong>{{ integrity.backend }}</strong>
+                {% if integrity.last_write_ok %} · tulis terakhir OK: {{ integrity.last_write_ok }}{% endif %}
+            </div>
+            {% if integrity.last_write_error %}
+            <div class="notice-danger">
+                Error tulis gift log terakhir: <code>{{ integrity.last_write_error }}</code>
+            </div>
+            {% endif %}
             <div class="stat-grid">
                 <div class="stat-box">
                     <div class="muted">Total koin tersimpan (viewer)</div>
@@ -106,21 +117,23 @@ def view_data():
             {% if integrity.stored_total > 0 and integrity.logged_total == 0 %}
             <div class="notice-danger">
                 Total koin tersimpan ada ({{ integrity.stored_total }} c) tapi gift log masih kosong.
-                Ini biasanya berarti penulisan detail gift gagal. Cek Activity Log untuk pesan
-                <strong>[GiftLog]</strong>, lalu redeploy agar kolom/migrasi baru terpasang.
-                Gift baru akan otomatis dicatat setelah itu.
+                Ini biasanya berarti detail gift historis belum pernah tercatat atau penulisan gagal.
+                Jalankan <strong>Tes Tulis Gift Log</strong> untuk melihat error database, lalu
+                <strong>Backfill Gift Log Historis</strong> agar data lama ikut tampil di analytics.
             </div>
             {% elif integrity.today_log_rows == 0 and integrity.today_total > 0 %}
             <div class="notice-warning">
                 Koin hari ini masuk ({{ integrity.today_total }} c) tapi belum ada baris gift log hari ini.
-                Kalau gift baru saja masuk, tunggu refresh berikutnya; kalau tetap kosong, cek Activity Log
-                untuk pesan <strong>[GiftLog]</strong>.
+                Kalau gift baru saja masuk, tunggu refresh berikutnya; kalau tetap kosong, jalankan
+                <strong>Tes Tulis Gift Log</strong> dan cek Activity Log untuk pesan <strong>[GiftLog]</strong>.
             </div>
             {% endif %}
             {% if integrity.stored_total != integrity.logged_total %}
             <div class="notice-warning">
                 Ada selisih {{ integrity.stored_total - integrity.logged_total }} c antara total tersimpan dan gift log.
-                Klik <strong>Recalculate</strong> untuk menyamakan semua total dari gift log.
+                Untuk data historis yang detail gift-nya tidak ada, gunakan
+                <strong>Backfill Gift Log Historis</strong>. <strong>Recalculate</strong> hanya untuk
+                menyamakan total dari gift log yang sudah ada (dan tidak akan menghapus total jika log masih kosong).
             </div>
             {% else %}
             <div class="notice-success">✅ Total koin konsisten dengan gift log.</div>
@@ -140,7 +153,13 @@ def view_data():
             </table>
             </div>
             {% endif %}
-            <form action="/admin/recalculate-coins" method="POST" onsubmit="return confirm('Hitung ulang SEMUA total koin dari gift log? Total yang diedit manual tanpa log akan hilang.');" style="margin-top: 12px;">
+            <form action="/admin/gift-log-selftest" method="POST" style="display:inline-block; margin-top: 12px; margin-right: 8px;">
+                <button type="submit" class="btn-action" style="background:#7c3aed;">🧪 Tes Tulis Gift Log</button>
+            </form>
+            <form action="/admin/backfill-gift-logs" method="POST" onsubmit="return confirm('Isi gift log historis dari data harian + saldo awal tersimpan? Baris buatan akan ditandai Backfill dan tidak menimpa detail asli.');" style="display:inline-block; margin-top: 12px; margin-right: 8px;">
+                <button type="submit" class="btn-action" style="background:#b45309;">🧩 Backfill Gift Log Historis</button>
+            </form>
+            <form action="/admin/recalculate-coins" method="POST" onsubmit="return confirm('Hitung ulang SEMUA total koin dari gift log? Total yang diedit manual tanpa log akan hilang.');" style="display:inline-block; margin-top: 12px;">
                 <button type="submit" class="btn-save" style="background:#0e7490;">🔄 Recalculate Coin Totals dari Gift Log</button>
             </form>
             {% endif %}
@@ -157,6 +176,52 @@ def view_data():
     </html>
     """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
     return render_template_string(html, integrity=integrity)
+
+@admin_bp.route('/gift-log-selftest', methods=['POST'])
+def gift_log_selftest():
+    result = test_gift_log_write()
+    columns = ", ".join(result.get("columns", []) or []) or "-"
+    if result.get("ok"):
+        msg = (
+            f"✅ Tes tulis gift log BERHASIL ({result.get('backend')}). "
+            f"Kolom terpasang: {columns}"
+        )
+        msg_type = "success"
+    else:
+        msg = (
+            f"❌ Tes tulis gift log GAGAL ({result.get('backend')}): "
+            f"{result.get('error')}. Kolom terpasang: {columns}"
+        )
+        msg_type = "danger"
+    return redirect("/admin/data?msg=" + quote_plus(msg[:900]) + "&msg_type=" + msg_type)
+
+
+@admin_bp.route('/backfill-gift-logs', methods=['POST'])
+def backfill_gift_logs():
+    result = backfill_gift_logs_from_daily()
+    if result.get("error"):
+        return redirect(
+            "/admin/data?msg=" + quote_plus("Gagal backfill gift log: " + str(result["error"]))
+            + "&msg_type=danger"
+        )
+    try:
+        from db import log_activity_event
+        log_activity_event(
+            "system",
+            f"Admin backfilled gift logs: daily_rows={result.get('inserted_daily')}, "
+            f"daily_coins={result.get('daily_coins')}c, opening_rows={result.get('inserted_opening')}, "
+            f"opening_coins={result.get('opening_coins')}c.",
+            "",
+        )
+    except Exception:
+        pass
+    msg = (
+        f"Backfill gift log selesai: {result.get('inserted_daily')} baris harian "
+        f"({result.get('daily_coins')} c) + {result.get('inserted_opening')} saldo awal "
+        f"({result.get('opening_coins')} c)."
+    )
+    return redirect("/admin/data?msg=" + quote_plus(msg) + "&msg_type=success")
+
 
 @admin_bp.route('/recalculate-coins', methods=['POST'])
 def recalculate_coins():
