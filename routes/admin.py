@@ -1969,7 +1969,7 @@ def check_discord_verification(discord_id, use_api: bool = True) -> dict:
             except Exception as e:
                 # Jangan gagalkan seluruh pengecekan hanya karena fetch ulang
                 # timeout; hasil cache tetap dipakai.
-                print(f"[Verification] Fresh member fetch failed for {discord_id}: {e}")
+                print(f"[Verification] Fresh member fetch failed for {discord_id_int}: {e}")
     return info
 
 
@@ -1987,7 +1987,7 @@ async def _grant_role_async(bot, discord_id: int) -> dict:
     member = None
     guild = None
     for g in list(getattr(bot, "guilds", []) or []):
-        m = g.get_member(discord_id_int)
+        m = g.get_member(discord_id)
         if m:
             member, guild = m, g
             break
