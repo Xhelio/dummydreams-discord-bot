@@ -792,14 +792,31 @@ def get_push_code() -> str:
     return push_code or "unknown"
 
 
+def get_bot_env() -> str:
+    """Return the deployment environment label: 'stable' (default), 'test', or custom."""
+    raw = str(os.environ.get("BOT_ENV") or os.environ.get("APP_ENV") or "stable").strip().lower()
+    if raw in ("prod", "production", "stable", "live"):
+        return "stable"
+    if raw in ("test", "testing", "staging", "dev", "development"):
+        return "test"
+    return raw or "stable"
+
+
 async def apply_bot_presence():
     if not bot.is_ready():
         return
     env_debug = str(os.environ.get("DEBUG_MODE", "")).strip().lower() in ("1", "true", "yes", "on")
     debug_mode = get_bool_setting("debug_mode", False) or env_debug
+    bot_env = get_bot_env()
     push_code = get_push_code()
-    presence_name = f"DEBUG {push_code} | !help / /help" if debug_mode else "!help | /help | TikTok live monitor"
-    print(f"[Discord] Presence updated: {presence_name} (debug={debug_mode})")
+    parts = []
+    if bot_env != "stable":
+        parts.append(bot_env.upper())
+    if debug_mode:
+        parts.append(f"DEBUG {push_code}")
+    parts.append("!help / /help | TikTok live monitor")
+    presence_name = " | ".join(parts)
+    print(f"[Discord] Presence updated: {presence_name} (env={bot_env}, debug={debug_mode})")
     try:
         await bot.change_presence(
             activity=discord.Activity(type=discord.ActivityType.watching, name=presence_name)
@@ -1557,7 +1574,10 @@ async def handle_live_comment_verification(tiktok_user: str, comment_text: str, 
 
 @bot.event
 async def on_ready():
-    print(f"[Discord] Bot logged in as {bot.user}")
+    bot_env = get_bot_env()
+    print(f"[Discord] Bot logged in as {bot.user} (env={bot_env}, version={get_push_code()})")
+    if bot_env == "test":
+        print("[Discord] TEST environment active: use a separate bot token, database, and server from stable.")
     runtime_status.set_bot_ready(str(bot.user))
     # Register persistent views so verification buttons keep working after restarts
     bot.add_view(VerificationChannelView())
