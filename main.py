@@ -373,14 +373,24 @@ async def _resolve_announcement_channel(announcement_session: dict = None):
         return None
 
 async def _fetch_announcement_message(channel, message_id):
-    """Mengambil pesan pengumuman lama dari sesi yang tersimpan."""
+    """Fetch a stored announcement message.
+
+    Returns (message, missing):
+      - (Message, False) when found
+      - (None, True) when the message is confirmed deleted/missing
+      - (None, False) on transient/unknown fetch errors (do NOT treat as missing)
+    """
     if not channel or not message_id:
-        return None
+        return None, True
     try:
-        return await channel.fetch_message(int(message_id))
+        msg = await channel.fetch_message(int(message_id))
+        return msg, False
+    except discord.NotFound:
+        print(f"[Discord] Stored announcement message {message_id} not found (deleted).")
+        return None, True
     except Exception as e:
-        print(f"[Discord] Stored announcement message {message_id} is no longer available ({e}).")
-        return None
+        print(f"[Discord] Could not fetch announcement message {message_id} (transient?): {e}")
+        return None, False
 
 async def process_live_announcement(username: str, is_live: bool, host_name: str = None):
     """Maintain one live announcement message per target account per channel.
@@ -402,7 +412,7 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
                 for session in sessions:
                     try:
                         channel = await _resolve_announcement_channel(session)
-                        old_msg = await _fetch_announcement_message(
+                        old_msg, missing = await _fetch_announcement_message(
                             channel, session.get("message_id")
                         )
                         if old_msg:
@@ -411,8 +421,10 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
                                 print(f"[Discord] Deleted live announcement for @{user_key} in channel {session.get('channel_id')}.")
                             except Exception as e:
                                 print(f"[Discord] Failed to delete announcement message for @{user_key} in {session.get('channel_id')}: {e}")
+                        elif missing:
+                            print(f"[Discord] Announcement message already missing for @{user_key} in {session.get('channel_id')}; clearing session.")
                         else:
-                            print(f"[Discord] Announcement message missing/unfetchable for @{user_key} in {session.get('channel_id')}; clearing session.")
+                            print(f"[Discord] Could not verify announcement message for @{user_key} in {session.get('channel_id')} (transient fetch error); clearing session record but leaving message untouched to avoid duplicates.")
                     except Exception as e:
                         print(f"[Discord] Error while cleaning announcement for @{user_key} in {session.get('channel_id')}: {e}")
                     finally:
@@ -430,6 +442,19 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
             if not configured_channels:
                 print("[Discord] Notification failed: no announcement channel configured.")
                 return
+            # Dedupe while preserving order to avoid duplicate sends on misconfig.
+            seen_channels = set()
+            deduped_channels = []
+            for cid in configured_channels:
+                try:
+                    key = int(cid)
+                except (TypeError, ValueError):
+                    key = cid
+                if key in seen_channels:
+                    continue
+                seen_channels.add(key)
+                deduped_channels.append(cid)
+            configured_channels = deduped_channels
 
             sched_host, account_name = get_schedule_info(user_key)
             final_host_name = host_name or sched_host or account_name or "Host"
@@ -448,13 +473,16 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
                     stored_channel = None
                 if stored_channel not in configured_channels:
                     channel = await _resolve_announcement_channel(session)
-                    old_msg = await _fetch_announcement_message(channel, session.get("message_id"))
+                    old_msg, missing = await _fetch_announcement_message(channel, session.get("message_id"))
                     if old_msg:
                         try:
                             await old_msg.delete()
                         except Exception:
                             pass
-                    delete_active_live_announcement(user_key, session.get("channel_id"))
+                    # Only drop the session record when we are sure it's gone or deleted.
+                    # If fetch failed transiently, keep the record to avoid duplicates later.
+                    if old_msg or missing:
+                        delete_active_live_announcement(user_key, session.get("channel_id"))
 
             for channel_id in configured_channels:
                 session = get_active_live_announcement(user_key, channel_id)
@@ -463,7 +491,7 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
                     continue
 
                 if session:
-                    old_msg = await _fetch_announcement_message(channel, session.get("message_id"))
+                    old_msg, missing = await _fetch_announcement_message(channel, session.get("message_id"))
                     if old_msg:
                         if old_msg.content != live_content:
                             try:
@@ -472,6 +500,10 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
                             except Exception as e:
                                 print(f"[Discord] Failed to edit announcement for @{user_key}: {e}")
                         # Session exists and message is valid: never send a duplicate.
+                        continue
+                    if not missing:
+                        # Transient fetch failure: do NOT send a replacement (would duplicate).
+                        print(f"[Discord] Skipping announcement send for @{user_key} in {channel_id}: existing message could not be verified (will retry next trigger).")
                         continue
                     print(f"[Discord] Stored announcement message missing for @{user_key} in {channel_id}; sending a replacement.")
 
@@ -484,12 +516,20 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
                 try:
                     saved = save_active_live_announcement(user_key, channel.id, new_msg.id, final_host_name)
                     if not saved:
-                        print(f"[Discord] Announcement sent but session was not saved for @{user_key} in {channel.id} (Msg ID: {new_msg.id}).")
+                        print(f"[Discord] Announcement sent but session was not saved for @{user_key} in {channel.id} (Msg ID: {new_msg.id}); deleting message to avoid duplicate.")
+                        try:
+                            await new_msg.delete()
+                        except Exception:
+                            pass
                     else:
                         print(f"[Discord] Sent live announcement for @{user_key} in {channel.id} (Msg ID: {new_msg.id}).")
                 except Exception as e:
                     # If we sent a message but failed to save its ID, duplicates can happen on next trigger.
-                    print(f"[Discord] CRITICAL: sent announcement but failed to save session for @{user_key} in {channel.id} (Msg ID: {new_msg.id}): {e}")
+                    print(f"[Discord] CRITICAL: sent announcement but failed to save session for @{user_key} in {channel.id} (Msg ID: {new_msg.id}): {e}; deleting message to avoid duplicate.")
+                    try:
+                        await new_msg.delete()
+                    except Exception:
+                        pass
 
             update_active_live_announcement_host(user_key, final_host_name)
     except Exception as e:
