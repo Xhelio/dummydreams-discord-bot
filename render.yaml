@@ -9,8 +9,11 @@
 #
 # Notes:
 # - `plan: starter` keeps the service always on. Render's free plan sleeps
-#   after inactivity, which would stop the Discord gateway and the TikTok
-#   observer. Use a paid always-on plan for both services.
+#   after ~15 minutes without HTTP traffic, which stops the Discord gateway
+#   and the TikTok observer. Free + an external keep-alive ping (UptimeRobot
+#   every 5 minutes hitting /health) works as best effort, but the free plan
+#   allows only ~750 instance-hours/month per workspace, i.e. one always-on
+#   service. Use a paid always-on plan for stable.
 # - Python version comes from `.python-version` (3.11.9).
 # - `PORT` is injected by Render automatically; do not set it here.
 

@@ -55,12 +55,19 @@ def home():
 @app.route('/health')
 def health():
     # Lightweight health/readiness endpoint for hosting monitors.
+    # `ok` reflects the database only (stable contract for uptime monitors);
+    # `bot_ready` additionally reflects the Discord gateway connection.
     try:
-        from runtime_status import get_live_snapshot
+        from runtime_status import get_live_snapshot, get_bot_status
         live = get_live_snapshot()
         live_count = len(live) if isinstance(live, dict) else 0
+        bot_status = get_bot_status()
+        bot_ready = bool(bot_status.get("online"))
+        bot_user = bot_status.get("user")
     except Exception:
         live_count = 0
+        bot_ready = False
+        bot_user = None
     try:
         from db import get_db_connection
         conn = get_db_connection()
@@ -69,9 +76,17 @@ def health():
         db_ok = True
     except Exception:
         db_ok = False
+    env = (os.environ.get("BOT_ENV") or os.environ.get("APP_ENV") or "stable").strip().lower()
+    if env in ("prod", "production", "live"):
+        env = "stable"
+    elif env in ("testing", "staging", "dev", "development"):
+        env = "test"
     return jsonify({
         "ok": db_ok,
         "db": db_ok,
+        "bot_ready": bot_ready,
+        "bot_user": bot_user,
+        "env": env or "stable",
         "live_tracked": live_count,
     }), (200 if db_ok else 503)
 

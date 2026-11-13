@@ -129,8 +129,45 @@ Health check:
 
 ```bash
 curl -s https://dummydreams-stable.onrender.com/health
-# {"db":true,"live_tracked":0,"ok":true}
+# {"db":true,"bot_ready":true,"bot_user":"...","env":"stable","live_tracked":0,"ok":true}
 ```
+
+### Free plan + UptimeRobot (keep-alive)
+
+Render free instances spin down after ~15 minutes without HTTP traffic.
+An external monitor that requests `/health` every 5 minutes keeps the
+instance (and therefore the bot) awake.
+
+1. UptimeRobot → **Add New Monitor**
+   - Monitor Type: **HTTP(s)**
+   - URL: `https://<service>.onrender.com/health`
+   - Monitoring Interval: **5 minutes** (free plan minimum)
+   - Method: GET, expected status 200
+2. Add a second check for the bot itself:
+   - Monitor Type: **Keyword**
+   - URL: the same `/health`
+   - Keyword: `"bot_ready":true`
+   - Alert when keyword **not exists**
+
+   This catches the case where the web process answers but the Discord
+   gateway is disconnected (a plain 200 would look healthy anyway).
+
+Limits you must respect on the free plan:
+
+- **750 instance-hours/month per workspace.** One always-on service is
+  ~730 hours, so only **one** free service can stay up 24/7. Two services
+  left awake all month (~1460 hours) will be suspended until the next
+  month.
+- No SSH, no one-off jobs, no persistent disk: run `preflight.py` and any
+  backup/dump locally, and keep all data in Turso.
+- Deploys and platform restarts still happen; open sessions are suspended
+  with the 10-minute grace window, so expect a short gap during redeploys.
+- Cold start after a sleep takes tens of seconds, so the first monitor
+  check may briefly report "down".
+
+Practical split: **stable on an always-on paid plan**, **test on free +
+UptimeRobot** (or test only when needed). Free + keep-alive is a
+best-effort solution, not a guaranteed-uptime one.
 
 ---
 
@@ -274,8 +311,11 @@ git push origin v1.0.0
 
 ## 9. Health and operations
 
-- `GET /health` returns JSON with the database status and tracked live
-  count. Returns HTTP 503 if the database check fails.
+- `GET /health` returns JSON with database status, Discord readiness, and
+  tracked live count. Returns HTTP 503 if the database check fails.
+  - `ok` / `db` — database reachable
+  - `bot_ready` — Discord gateway connected (use for monitor keyword checks)
+  - `bot_user`, `env`, `live_tracked` — diagnostics
 - `python scripts/preflight.py` validates configuration without touching
   data.
 - The admin panel is served with `waitress` when installed, otherwise with
@@ -302,5 +342,6 @@ git push origin v1.0.0
 - [ ] `/welcome-setup` posted in `#rules`.
 - [ ] Announcement/leaderboard channels configured.
 - [ ] End-to-end verification tested with a real account.
+- [ ] Uptime monitor on `/health`, with a keyword alert for `"bot_ready":true`.
 - [ ] Backups of the production database configured.
 - [ ] Secrets rotated if they were ever shared.
