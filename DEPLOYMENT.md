@@ -329,7 +329,66 @@ git push origin v1.0.0
 
 ---
 
-## 10. Checklist before going live
+## 10. Chatbot (Ollama di laptop, bot di Render)
+
+Bot bisa membalas seperti chatbot dengan memanggil **Ollama**. Inferensi lokal di laptop **tidak kena biaya API per token**. Koneksi Render (cloud) → laptop (WiFi) bisa dibuat **gratis** lewat Cloudflare Tunnel, tapi Render-nya sendiri tetap mengikuti batasan paket (free sleep / 750 jam) kecuali pakai paket always-on.
+
+### 10.1 Siapkan Ollama di laptop
+
+```bash
+# install Ollama (lihat https://ollama.com), lalu jalankan
+ollama serve
+ollama pull llama3.1   # atau model lain
+```
+
+Cek lokal: `curl http://localhost:11434/api/tags`
+
+### 10.2 Expose ke internet (Cloudflare Tunnel, gratis)
+
+Jalankan di laptop yang sama:
+
+```bash
+# install cloudflared, lalu quick tunnel (tanpa akun, URL sementara):
+cloudflared tunnel --url http://localhost:11434
+```
+
+Catat URL HTTPS yang diberikan (mis. `https://xxx.trycloudflare.com`). Itu adalah `OLLAMA_BASE_URL` yang diisi di Render.
+
+Catatan:
+- Quick tunnel memberi URL **sementara** (berubah saat restart). Untuk URL tetap, buat named tunnel dengan akun Cloudflare (tetap gratis).
+- **Amankan endpoint:** siapa pun yang tahu URL bisa memanggil modelmu. Gunakan Cloudflare Access/service token, atau set `LLM_API_KEY` dan pasang reverse proxy di depan Ollama yang memvalidasi `Authorization: Bearer <key>`. Jangan biarkan terbuka tanpa proteksi.
+
+### 10.3 Environment variable
+
+Di Render (atau `.env` lokal):
+
+```env
+OLLAMA_BASE_URL=https://xxx.trycloudflare.com
+OLLAMA_MODEL=llama3.1
+LLM_API_KEY=                 # opsional, untuk proteksi tunnel
+CHATBOT_SYSTEM_PROMPT=       # opsional
+CHATBOT_MAX_HISTORY=10
+CHATBOT_TIMEOUT_SECONDS=90
+CHATBOT_COOLDOWN_SECONDS=3
+```
+
+Chatbot aktif otomatis bila `OLLAMA_BASE_URL` dan `OLLAMA_MODEL` terisi. Set `CHATBOT_ENABLED=0` untuk mematikan.
+
+### 10.4 Cara pakai di Discord
+
+- **Server:** mention bot (`@Bot pesan`) atau **reply** ke pesan bot.
+- **DM:** kirim pesan langsung ke bot.
+- Perintah `!` dan slash command tetap berfungsi. Riwayat percakapan disimpan per-channel (in-memory, reset saat bot restart).
+
+### 10.5 Batasan
+
+- Laptop + WiFi + tunnel harus aktif; jika mati, bot akan diam (timeout) saat dipanggil.
+- Latensi lebih tinggi (Render ↔ internet ↔ laptop).
+- Butuh **Message Content Intent** aktif di Developer Portal (sudah dipakai bot ini) dan bot punya izin baca/kirim pesan di channel.
+
+---
+
+## 11. Checklist before going live
 
 - [ ] Separate Discord bot and token for stable.
 - [ ] Separate Turso database (no shared data with test).
@@ -345,3 +404,4 @@ git push origin v1.0.0
 - [ ] Uptime monitor on `/health`, with a keyword alert for `"bot_ready":true`.
 - [ ] Backups of the production database configured.
 - [ ] Secrets rotated if they were ever shared.
+- [ ] (Opsional) Jika chatbot aktif: tunnel aman, `OLLAMA_BASE_URL`/`OLLAMA_MODEL` terisi, dan laptop selalu-on saat dipakai.

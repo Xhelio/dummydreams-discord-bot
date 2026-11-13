@@ -48,6 +48,7 @@ from observer import run_all_observers, get_current_live_hosts, is_any_host_live
 from verification import async_verify_tiktok_bio
 from routes.settings import set_verification_refresh_handler, set_presence_refresh_handler
 import runtime_status
+import chatbot
 
 DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN')
 ANNOUNCEMENT_CHANNEL_ID = int(os.environ.get('ANNOUNCEMENT_CHANNEL_ID', "0"))
@@ -1573,11 +1574,32 @@ async def handle_live_comment_verification(tiktok_user: str, comment_text: str, 
 # --- Discord Events & Commands ---
 
 @bot.event
+async def on_message(message):
+    # Chatbot: reply when mentioned / replied to (and in DMs), then still process commands.
+    try:
+        if await chatbot.should_respond(message, bot.user):
+            async with message.channel.typing():
+                reply, err = await chatbot.generate_reply(message, bot.user)
+            if reply:
+                await message.reply(reply, mention_author=False)
+            elif err and str(os.environ.get("CHATBOT_DEBUG", "")).strip().lower() in ("1", "true", "yes", "on"):
+                print(f"[Chatbot] error: {err}")
+    except Exception as e:
+        print(f"[Chatbot] handler error: {e}")
+    await bot.process_commands(message)
+
+
+@bot.event
 async def on_ready():
     bot_env = get_bot_env()
     print(f"[Discord] Bot logged in as {bot.user} (env={bot_env}, version={get_push_code()})")
     if bot_env == "test":
         print("[Discord] TEST environment active: use a separate bot token, database, and server from stable.")
+    if chatbot.is_chatbot_enabled():
+        cfg = chatbot.get_chatbot_config()
+        print(f"[Chatbot] enabled (model={cfg.get('model')}, base_url={cfg.get('base_url')})")
+    else:
+        print("[Chatbot] disabled (set OLLAMA_BASE_URL and OLLAMA_MODEL to enable)")
 
     # Optional safety guard: ensure this deployment is connected to the intended guild.
     expected_guild_id = str(os.environ.get("EXPECTED_GUILD_ID", "") or "").strip()
