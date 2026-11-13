@@ -326,7 +326,7 @@ def view_settings():
                     <label for="non_priority_slow_seconds" class="muted" style="display:block; margin-bottom:4px;">Interval lambat (detik)</label>
                     <input id="non_priority_slow_seconds" type="number" name="non_priority_slow_seconds" min="60" step="10" value="{{ non_priority_slow_seconds }}">
                 </div>
-                <button type="submit">Simpan Mode Prioritas</button>
+                <button type="submit">Save Mode Prioritas</button>
             </form>
             <form action="/admin/settings/host/add" method="POST" class="form-grid" style="grid-template-columns: 1fr auto; margin-bottom: 12px;">
                 <input type="text" name="tiktok_username" placeholder="TikTok username (@...) — channel name is fetched automatically" required>
@@ -349,7 +349,7 @@ def view_settings():
                             </td>
                             <td>
                                 <label style="display:inline-flex; align-items:center; gap:6px; color:#fca5a5; font-size:0.85rem;">
-                                    <input type="checkbox" name="delete_{{ h[0] }}" value="1"> Hapus
+                                    <input type="checkbox" name="delete_{{ h[0] }}" value="1"> Delete
                                 </label>
                             </td>
                         </tr>
@@ -359,7 +359,7 @@ def view_settings():
                     </table>
                 </div>
                 <div style="margin-top:12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-                    <button type="submit">Simpan Perubahan Host (Active/Prioritas/Hapus)</button>
+                    <button type="submit">Save Perubahan Host (Active/Prioritas/Delete)</button>
                     <span class="muted">Ubah banyak host sekaligus lalu klik simpan sekali (tanpa toggle satu-satu).</span>
                 </div>
             </form>
@@ -546,7 +546,7 @@ def add_tier():
     if role_id.isdigit():
         add_role_tier(group_key, role_id, min_coins)
         return redirect("/admin/settings?msg=" + _url_q("Tier ditambahkan.") + "&msg_type=success")
-    return redirect("/admin/settings?msg=" + _url_q("Role ID tidak valid.") + "&msg_type=warning")
+    return redirect("/admin/settings?msg=" + _url_q("Invalid role ID.") + "&msg_type=warning")
 
 
 @settings_bp.route("/settings/tier/delete/<int:tier_id>", methods=["POST"])

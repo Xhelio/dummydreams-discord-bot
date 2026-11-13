@@ -135,7 +135,7 @@ async def grant_verified_access(member: discord.Member, tiktok_user: str, total_
     verified_role = get_verified_role(member.guild) if member and member.guild else None
 
     if verified_role is None:
-        problems.append("role verifikasi belum diatur di Bot Settings")
+        problems.append("the verification role is not configured in Bot Settings")
     elif verified_role in member.roles:
         pass
     else:
@@ -145,10 +145,10 @@ async def grant_verified_access(member: discord.Member, tiktok_user: str, total_
                 me = await member.guild.fetch_member(bot.user.id)
             if me is not None and verified_role >= me.top_role:
                 problems.append(
-                    f"posisi role bot ({me.top_role.name}) di bawah role verifikasi ({verified_role.name})"
+                    f"the bot's role ({me.top_role.name}) is below the verification role ({verified_role.name})"
                 )
             elif me is not None and not me.guild_permissions.manage_roles:
-                problems.append("bot tidak punya izin Manage Roles")
+                problems.append("the bot does not have Manage Roles permission")
             else:
                 await member.add_roles(
                     verified_role,
@@ -156,7 +156,7 @@ async def grant_verified_access(member: discord.Member, tiktok_user: str, total_
                 )
                 roles_added_names.append(verified_role.name)
         except Exception as e:
-            problems.append(f"Discord menolak pemberian role: {e}")
+            problems.append(f"Discord rejected the role assignment: {e}")
 
     if problems:
         problem_text = "; ".join(problems)
@@ -164,16 +164,16 @@ async def grant_verified_access(member: discord.Member, tiktok_user: str, total_
         try:
             log_activity_event(
                 "system",
-                f"[Verify] Gagal memberi role verifikasi ke {member} untuk @{tiktok_user}: {problem_text}.",
+                f"[Verify] Failed to grant verified role to {member} for @{tiktok_user}: {problem_text}.",
                 tiktok_user,
             )
         except Exception:
             pass
-        role_info = f" ⚠️ Role belum bisa diberikan otomatis ({problem_text}). Hubungi admin."
+        role_info = f" ⚠️ The role could not be granted automatically ({problem_text}). Please contact an admin."
     else:
         role_info = (
             f" Role **{', '.join(roles_added_names)}** has been granted."
-            if roles_added_names else " Role has been activated."
+            if roles_added_names else " The role is already active."
         )
 
     # Berikan juga tier roles sesuai total koin yang ada.
@@ -194,7 +194,7 @@ async def grant_verified_access_for_discord_id(discord_id, tiktok_user: str, tot
     try:
         did = int(str(discord_id).strip())
     except (TypeError, ValueError):
-        return False, " ⚠️ Discord ID tidak valid untuk pemberian role."
+        return False, " ⚠️ Invalid Discord ID for role assignment."
 
     found = 0
     granted = 0
@@ -212,7 +212,7 @@ async def grant_verified_access_for_discord_id(discord_id, tiktok_user: str, tot
         found += 1
         try:
             ok, info = await grant_verified_access(member, tiktok_user, total_coins)
-            if "belum bisa diberikan otomatis" in (info or "") or "⚠️" in (info or ""):
+            if "could not be granted automatically" in (info or "") or "⚠️" in (info or ""):
                 problems.append(f"{guild.name}: {info.strip()}")
             elif "has been granted" in (info or ""):
                 granted += 1
@@ -222,14 +222,14 @@ async def grant_verified_access_for_discord_id(discord_id, tiktok_user: str, tot
             problems.append(f"{guild.name}: {e}")
 
     if found == 0:
-        return False, " ⚠️ Akun Discord tidak ditemukan di server bot. Pastikan kamu sudah join server, lalu coba Verifikasi Ulang/Beri Role."
+        return False, " ⚠️ Discord account not found in any server the bot is in. Make sure you have joined the server, then try re-verifying or ask an admin to grant the role."
     if problems:
         # If some succeeded or already ok, be explicit but still report issues.
         summary = "; ".join(problems[:2])
-        return granted > 0 or already > 0, f" ⚠️ Role belum bisa diberikan otomatis di sebagian server ({summary})."
+        return granted > 0 or already > 0, f" ⚠️ Role could not be granted automatically in some servers ({summary})."
     if granted > 0:
-        return True, " Role verifikasi telah diberikan."
-    return True, " Role sudah aktif."
+        return True, " The verification role has been granted."
+    return True, " The role is already active."
 
 def handle_api_announcement(username: str, is_live: bool, host_name: str = None):
     try:
@@ -688,6 +688,49 @@ def build_verification_panel_embed() -> discord.Embed:
         color=discord.Color.from_rgb(0, 168, 255)
     )
     embed.set_footer(text="Dummy Dream Bot • Verification & Security System")
+    return embed
+
+
+def build_rules_welcome_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="📜 Welcome to the Server!",
+        description=(
+            "Welcome! We’re glad to have you here.\n"
+            "Please take a moment to read the rules below to help keep this community safe, friendly, and enjoyable for everyone."
+        ),
+        color=discord.Color.blurple(),
+    )
+    embed.add_field(
+        name="Server Rules (1/2)",
+        value=(
+            "**1. Be respectful.** Treat everyone with kindness. Harassment, hate speech, discrimination, bullying, or personal attacks are not allowed.\n"
+            "**2. Keep it appropriate.** No NSFW, explicit, or disturbing content. Keep discussions and media suitable for the community.\n"
+            "**3. No spam or self-promotion.** Avoid flooding chats, excessive mentions, repeated messages, or unsolicited advertising/links without permission.\n"
+            "**4. Use the right channels.** Post content in the appropriate channels and follow any pinned guidelines or channel topics."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Server Rules (2/2)",
+        value=(
+            "**5. No cheating, scams, or malicious activity.** Do not share malware, phishing links, exploits, or attempt to deceive/scam members.\n"
+            "**6. Protect privacy and safety.** Do not share personal information (yours or others’) or engage in doxxing.\n"
+            "**7. Follow Discord’s Terms & Guidelines.** Comply with [Discord’s Terms of Service](https://discord.com/terms) and [Community Guidelines](https://discord.com/guidelines).\n"
+            "**8. Listen to staff.** Moderators and admins may take action to maintain a safe environment. Contact staff respectfully if you need help."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Getting Started",
+        value=(
+            "• **Read & follow the rules** to keep access to the server.\n"
+            "• **Verify your account** (if required) in the designated verification channel to unlock full access/roles.\n"
+            "• **Introduce yourself** and join the conversation in the appropriate channels.\n"
+            "• If you need help, reach out to a moderator or admin."
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="By participating in this server, you agree to follow these rules.")
     return embed
 
 
@@ -1161,7 +1204,7 @@ class BioVerificationView(discord.ui.View):
                 )
             except Exception as e:
                 print(f"[Verification] Auto-grant after bio verify failed for {interaction.user.id}: {e}")
-                role_info = f" ⚠️ Verifikasi berhasil, tapi gagal memberi role otomatis: {e}. Hubungi admin."
+                role_info = f" ⚠️ Verification succeeded, but the role could not be granted automatically: {e}. Please contact an admin."
 
             embed = discord.Embed(
                 title="🎉 Verification Successful!",
@@ -1179,24 +1222,24 @@ class BioVerificationView(discord.ui.View):
             wib = pytz.timezone("Asia/Jakarta")
             checked_at = datetime.now(wib).strftime("%H:%M:%S WIB")
             raw_bio = current_bio if current_bio is not None else ""
-            shown_bio = raw_bio if str(raw_bio).strip() != "" else "(bio kosong / tidak terbaca / profil mungkin privat)"
+            shown_bio = raw_bio if str(raw_bio).strip() != "" else "(bio is empty / could not be read / profile may be private)"
             shown_bio = str(shown_bio)
             if len(shown_bio) > 1200:
-                shown_bio = shown_bio[:1200] + "\n…(dipotong)"
+                shown_bio = shown_bio[:1200] + "\n…(truncated)"
             # Escape triple backticks to keep code block intact
             shown_bio_safe = shown_bio.replace("```", "'''")
             embed = discord.Embed(
                 title="⚠️ Verification Text Not Found in Bio",
                 description=(
                     f"The text **`{code}`** was not found in the TikTok bio of **@{tiktok_user}**.\n\n"
-                    f"📄 **Bio yang terbaca bot (terakhir dicek {checked_at}):**\n"
+                    f"📄 **Bio read by the bot (last checked {checked_at}):**\n"
                     f"```text\n{shown_bio_safe}\n```\n"
                     f"💡 **Tips:**\n"
-                    f"1. Pastikan kamu menekan **Save** di profil TikTok.\n"
-                    f"2. Tunggu 5–15 detik setelah save agar data TikTok ter-update, lalu coba lagi.\n"
-                    f"3. Pastikan teks **`{code}`** ada persis di bio (pakai tombol **📋 Copy Code** agar tidak salah ketik).\n"
-                    f"4. Jika bio privat/tidak terbaca, coba metode verifikasi lain.\n\n"
-                    f"🔁 *Kamu bisa klik **Verify Bio** lagi kapan saja.*"
+                    f"1. Make sure you pressed **Save** in your TikTok profile.\n"
+                    f"2. Wait 5–15 seconds after saving so TikTok updates the data, then try again.\n"
+                    f"3. Make sure the full text **`{code}`** is in your bio (use the **📋 Copy Code** button to avoid typos).\n"
+                    f"4. If your bio is private or cannot be read, try another verification method.\n\n"
+                    f"🔁 *You can click **Verify Bio** again anytime.*"
                 ),
                 color=discord.Color.orange()
             )
@@ -1235,9 +1278,9 @@ class BioVerificationView(discord.ui.View):
             title="📋 Verification Code",
             description=(
                 f"TikTok: **@{tiktok_user or 'your TikTok'}**\n\n"
-                f"**Kode (tap & tahan untuk copy):**\n"
+                f"**Code (tap and hold to copy):**\n"
                 f"```text\n{code}\n```\n"
-                f"Tempel kode ini ke bio TikTok kamu, lalu klik **Verify Bio**."
+                f"Paste this code into your TikTok bio, then click **Verify Bio**."
             ),
             color=discord.Color.blurple(),
         )
@@ -1941,6 +1984,25 @@ async def slash_set_verified_role(interaction: discord.Interaction, role: discor
         return
     set_setting("verified_role_id", str(role.id))
     await interaction.followup.send(f"✅ Verified role set to: **{role.name}** (`{role.id}`)", ephemeral=True)
+
+
+verification_group = app_commands.Group(name="verification", description="Verification setup commands")
+
+
+@verification_group.command(name="setup", description="Admin: send the welcome/rules message to this channel")
+async def verification_setup(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    if not is_admin_member(interaction.user) or not interaction.guild or not interaction.channel:
+        await interaction.followup.send(
+            "🛡️ This command is restricted to administrators in a server channel.",
+            ephemeral=True,
+        )
+        return
+    await interaction.channel.send(embed=build_rules_welcome_embed())
+    await interaction.followup.send("✅ Welcome/rules message sent to this channel.", ephemeral=True)
+
+
+bot.tree.add_command(verification_group)
 
 
 @bot.tree.command(name="unclaim", description="Admin: remove a member's linked TikTok account")

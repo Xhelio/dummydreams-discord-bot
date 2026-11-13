@@ -4,3 +4,4 @@ libsql-experimental
 python-dotenv
 pytz
 flask
+waitress

@@ -76,61 +76,61 @@ def view_data():
         <div class="card">
             <h2>🪙 Coin Integrity</h2>
             {% if integrity.error %}
-            <div class="notice-danger">Gagal membaca data koin: {{ integrity.error }}</div>
+            <div class="notice-danger">Failed to read coin data: {{ integrity.error }}</div>
             {% else %}
             <div class="muted" style="font-size: 0.82rem; margin-bottom: 10px;">
                 Database: <strong>{{ integrity.backend }}</strong>
-                {% if integrity.last_write_ok %} · tulis terakhir OK: {{ integrity.last_write_ok }}{% endif %}
+                {% if integrity.last_write_ok %} · last write OK: {{ integrity.last_write_ok }}{% endif %}
             </div>
             {% if integrity.last_write_error %}
             <div class="notice-danger">
-                Error tulis gift log terakhir: <code>{{ integrity.last_write_error }}</code>
+                Last gift log write error: <code>{{ integrity.last_write_error }}</code>
             </div>
             {% endif %}
             <div class="stat-grid">
                 <div class="stat-box">
-                    <div class="muted">Total koin tersimpan (viewer)</div>
+                    <div class="muted">Stored total coins (viewers)</div>
                     <div class="stat-number">{{ integrity.stored_total }} c</div>
                 </div>
                 <div class="stat-box">
-                    <div class="muted">Total dari gift log (detail)</div>
+                    <div class="muted">Total from gift log (details)</div>
                     <div class="stat-number">{{ integrity.logged_total }} c</div>
                 </div>
                 <div class="stat-box">
-                    <div class="muted">Koin hari ini (WIB)</div>
+                    <div class="muted">Coins today (WIB)</div>
                     <div class="stat-number">{{ integrity.today_total }} c</div>
                 </div>
                 <div class="stat-box">
-                    <div class="muted">Gift log hari ini (WIB)</div>
+                    <div class="muted">Gift log today (WIB)</div>
                     <div class="stat-number">{{ integrity.today_log_coins }} c</div>
-                    <div class="muted" style="font-size: 0.8rem;">{{ integrity.today_log_rows }} baris</div>
+                    <div class="muted" style="font-size: 0.8rem;">{{ integrity.today_log_rows }} rows</div>
                 </div>
                 <div class="stat-box">
-                    <div class="muted">Baris gift log</div>
+                    <div class="muted">Gift log rows</div>
                     <div class="stat-number">{{ integrity.gift_log_rows }}</div>
                 </div>
                 <div class="stat-box">
-                    <div class="muted">Gift log terakhir</div>
+                    <div class="muted">Last gift log</div>
                     <div class="stat-number" style="font-size: 1rem;">{{ integrity.last_log_at or '-' }}</div>
                 </div>
             </div>
             {% if integrity.stored_total > 0 and integrity.logged_total == 0 %}
             <div class="notice-danger">
-                Total koin tersimpan ada ({{ integrity.stored_total }} c) tapi gift log masih kosong.
-                Ini biasanya berarti detail gift historis belum pernah tercatat atau penulisan gagal.
+                Stored coin total exists ({{ integrity.stored_total }} c) but the gift log is still empty.
+                This usually means historical gift details were never recorded or writes failed.
                 Jalankan <strong>Tes Tulis Gift Log</strong> untuk melihat error database, lalu
                 <strong>Backfill Gift Log Historis</strong> agar data lama ikut tampil di analytics.
             </div>
             {% elif integrity.today_log_rows == 0 and integrity.today_total > 0 %}
             <div class="notice-warning">
-                Koin hari ini masuk ({{ integrity.today_total }} c) tapi belum ada baris gift log hari ini.
+                Koin today masuk ({{ integrity.today_total }} c) tapi belum ada rows gift log today.
                 Kalau gift baru saja masuk, tunggu refresh berikutnya; kalau tetap kosong, jalankan
                 <strong>Tes Tulis Gift Log</strong> dan cek Activity Log untuk pesan <strong>[GiftLog]</strong>.
             </div>
             {% endif %}
             {% if integrity.stored_total != integrity.logged_total %}
             <div class="notice-warning">
-                Ada selisih {{ integrity.stored_total - integrity.logged_total }} c antara total tersimpan dan gift log.
+                Ada selisih {{ integrity.stored_total - integrity.logged_total }} c antara total stored dan gift log.
                 Untuk data historis yang detail gift-nya tidak ada, gunakan
                 <strong>Backfill Gift Log Historis</strong>. <strong>Recalculate</strong> hanya untuk
                 menyamakan total dari gift log yang sudah ada (dan tidak akan menghapus total jika log masih kosong).
@@ -156,7 +156,7 @@ def view_data():
             <form action="/admin/gift-log-selftest" method="POST" style="display:inline-block; margin-top: 12px; margin-right: 8px;">
                 <button type="submit" class="btn-action" style="background:#7c3aed;">🧪 Tes Tulis Gift Log</button>
             </form>
-            <form action="/admin/backfill-gift-logs" method="POST" onsubmit="return confirm('Isi gift log historis dari data harian + saldo awal tersimpan? Baris buatan akan ditandai Backfill dan tidak menimpa detail asli.');" style="display:inline-block; margin-top: 12px; margin-right: 8px;">
+            <form action="/admin/backfill-gift-logs" method="POST" onsubmit="return confirm('Isi gift log historis dari data harian + saldo awal stored? Baris buatan akan ditandai Backfill dan tidak menimpa detail asli.');" style="display:inline-block; margin-top: 12px; margin-right: 8px;">
                 <button type="submit" class="btn-action" style="background:#b45309;">🧩 Backfill Gift Log Historis</button>
             </form>
             <form action="/admin/recalculate-coins" method="POST" onsubmit="return confirm('Hitung ulang SEMUA total koin dari gift log? Total yang diedit manual tanpa log akan hilang.');" style="display:inline-block; margin-top: 12px;">
@@ -201,7 +201,7 @@ def backfill_gift_logs():
     result = backfill_gift_logs_from_daily()
     if result.get("error"):
         return redirect(
-            "/admin/data?msg=" + quote_plus("Gagal backfill gift log: " + str(result["error"]))
+            "/admin/data?msg=" + quote_plus("Failed backfill gift log: " + str(result["error"]))
             + "&msg_type=danger"
         )
     try:
@@ -216,7 +216,7 @@ def backfill_gift_logs():
     except Exception:
         pass
     msg = (
-        f"Backfill gift log selesai: {result.get('inserted_daily')} baris harian "
+        f"Backfill gift log selesai: {result.get('inserted_daily')} rows harian "
         f"({result.get('daily_coins')} c) + {result.get('inserted_opening')} saldo awal "
         f"({result.get('opening_coins')} c)."
     )
@@ -227,7 +227,7 @@ def backfill_gift_logs():
 def recalculate_coins():
     result = recalculate_coin_totals()
     if result.get("error"):
-        msg = "Gagal recalculate: " + str(result["error"])
+        msg = "Failed recalculate: " + str(result["error"])
         return redirect("/admin/data?msg=" + quote_plus(msg) + "&msg_type=danger")
     try:
         from db import log_activity_event
@@ -238,7 +238,7 @@ def recalculate_coins():
         )
     except Exception:
         pass
-    msg = f"Coin totals dihitung ulang: {result.get('viewers')} viewer, total {result.get('total_coins')} c, hari ini {result.get('today_coins')} c."
+    msg = f"Coin totals dihitung ulang: {result.get('viewers')} viewer, total {result.get('total_coins')} c, today {result.get('today_coins')} c."
     return redirect("/admin/data?msg=" + quote_plus(msg) + "&msg_type=success")
 
 @admin_bp.route('/host/<host_name>', methods=['GET'])
@@ -289,7 +289,7 @@ def view_host_detail(host_name):
     </head>
     <body>
         <div class="header">
-            <h1>👤 Shift History Detail: <span style="color: #38bdf8;">{{ host_name }}</span></h1>
+            <h1>👤 Shift History Details: <span style="color: #38bdf8;">{{ host_name }}</span></h1>
             <a href="/admin/schedule" class="nav-btn">⬅ Back to Schedule</a>
         </div>
         NAV_HTML_PLACEHOLDER
@@ -509,12 +509,12 @@ def view_viewer_detail(tiktok_user):
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Viewer Detail: @{{ username }}</title>
+        <title>Viewer Details: @{{ username }}</title>
         <style>BASE_CSS_PLACEHOLDER</style>
     </head>
     <body>
         <div class="header">
-            <h1>👤 Viewer Detail: <span style="color: #38bdf8;">{{ display_name }}</span> (@{{ username }})</h1>
+            <h1>👤 Viewer Details: <span style="color: #38bdf8;">{{ display_name }}</span> (@{{ username }})</h1>
             <a href="/admin/viewers" class="nav-btn">⬅ Back to Viewer List</a>
         </div>
         NAV_HTML_PLACEHOLDER
@@ -536,7 +536,7 @@ def view_viewer_detail(tiktok_user):
 
         {% if grand_total_coins != logged_total_coins %}
         <div class="notice-warning">
-            ⚠️ Total tersimpan ({{ grand_total_coins }} c) berbeda dengan jumlah gift log ({{ logged_total_coins }} c).
+            ⚠️ Total stored ({{ grand_total_coins }} c) berbeda dengan jumlah gift log ({{ logged_total_coins }} c).
             {% if logged_total_coins == 0 and grand_total_coins > 0 %}
                 Jalankan <a href="/admin/data"><strong>Backfill Gift Log Historis</strong></a> lalu <a href="/admin/data">Recalculate Coin Totals</a> di Main Menu.
             {% else %}
@@ -739,10 +739,10 @@ def view_monitor():
 
         {% if rate_limited_any %}
         <div class="notice-warning">
-            ⚠️ Satu atau lebih akun sedang kena <strong>rate limit sign-server</strong> (EulerStream), jadi websocket
-            tidak bisa connect dan <code>LiveIntroEvent</code> tidak diterima. Tambahkan API key di
+            ⚠️ Satu or lebih akun sedang kena <strong>rate limit sign-server</strong> (EulerStream), jadi websocket
+            tidak bisa connect dan <code>LiveIntroEvent</code> tidak diterima. Addkan API key di
             <a href="https://www.eulerstream.com/pricing" target="_blank" rel="noopener">eulerstream.com/pricing</a>
-            atau tunggu cooldown selesai. Tombol <em>Refresh/Reset</em> akan mencoba ulang sekarang (memakai kuota).
+            or tunggu cooldown selesai. Tombol <em>Refresh/Reset</em> akan mencoba ulang sekarang (memakai kuota).
         </div>
         {% endif %}
 
@@ -923,7 +923,7 @@ def edit_coin():
     try:
         new_coins = max(0, int(raw_coins or 0))
     except (TypeError, ValueError):
-        return redirect('/admin/viewers?msg=' + quote_plus('Nilai koin tidak valid (harus angka).') + '&msg_type=danger')
+        return redirect('/admin/viewers?msg=' + quote_plus('Invalid coin value (must be a number).') + '&msg_type=danger')
     if not username:
         return redirect('/admin/viewers?msg=' + quote_plus('Username viewer kosong.') + '&msg_type=danger')
     old_coins = 0
@@ -1201,15 +1201,15 @@ def _fmt_duration(seconds) -> str:
 
 
 ANALYTICS_PRESETS = [
-    ("today", "Hari ini"),
-    ("yesterday", "Kemarin"),
-    ("7d", "7 hari terakhir"),
-    ("30d", "30 hari terakhir"),
-    ("90d", "90 hari terakhir"),
-    ("this_week", "Minggu ini"),
-    ("this_month", "Bulan ini"),
+    ("today", "Today"),
+    ("yesterday", "Yesterday"),
+    ("7d", "7 hari last"),
+    ("30d", "30 hari last"),
+    ("90d", "90 hari last"),
+    ("this_week", "This week"),
+    ("this_month", "This month"),
     ("last_month", "Bulan lalu"),
-    ("all", "Semua waktu"),
+    ("all", "All time"),
     ("custom", "Kustom"),
 ]
 
@@ -1455,15 +1455,15 @@ def view_analytics():
         <div class="card">
             <div class="card-header">
                 <h2>🔎 Filter &amp; Rentang</h2>
-                <span class="muted" style="font-size:0.8rem;">Semua metrik di bawah mengikuti filter ini</span>
+                <span class="muted" style="font-size:0.8rem;">All metrik di bawah mengikuti filter ini</span>
             </div>
             <div class="analytics-chips">
-                <button type="button" class="nav-btn" onclick="applyPreset('today')">Hari ini</button>
+                <button type="button" class="nav-btn" onclick="applyPreset('today')">Today</button>
                 <button type="button" class="nav-btn" onclick="applyPreset('7d')">7 hari</button>
                 <button type="button" class="nav-btn" onclick="applyPreset('30d')">30 hari</button>
-                <button type="button" class="nav-btn" onclick="applyPreset('this_month')">Bulan ini</button>
+                <button type="button" class="nav-btn" onclick="applyPreset('this_month')">This month</button>
                 <button type="button" class="nav-btn" onclick="applyPreset('last_month')">Bulan lalu</button>
-                <button type="button" class="nav-btn" onclick="applyPreset('all')">Semua</button>
+                <button type="button" class="nav-btn" onclick="applyPreset('all')">All</button>
             </div>
             <form method="GET" action="/admin/analytics" class="analytics-form" id="analytics-form">
                 <div class="form-grid">
@@ -1482,15 +1482,15 @@ def view_analytics():
                     </label>
                     <label>Host
                         <select name="host">
-                            <option value="">Semua host</option>
+                            <option value="">All host</option>
                             {% for h in host_options %}
                             <option value="{{ h }}" {% if host_filter|lower == h|lower %}selected{% endif %}>{{ h }}</option>
                             {% endfor %}
                         </select>
                     </label>
-                    <label>Akun TikTok
+                    <label>TikTok Account
                         <select name="account">
-                            <option value="">Semua akun</option>
+                            <option value="">All akun</option>
                             {% for a in account_options %}
                             <option value="{{ a }}" {% if account_filter|lower == a|lower %}selected{% endif %}>@{{ a }}</option>
                             {% endfor %}
@@ -1507,7 +1507,7 @@ def view_analytics():
                         </select>
                     </label>
                     <label>&nbsp;
-                        <button type="submit" class="btn-save" style="background:#0e7490;">Terapkan Filter</button>
+                        <button type="submit" class="btn-save" style="background:#0e7490;">Apply Filter</button>
                     </label>
                 </div>
                 <p class="muted" style="font-size:0.76rem; margin-top:8px;">Preset "Kustom" memakai tanggal Dari/Sampai. Filter viewer dipakai untuk analisa spent viewer &amp; grafik pribadinya.</p>
@@ -1583,7 +1583,7 @@ def view_analytics():
                         <td>{{ b.sessions }}</td>
                     </tr>
                     {% else %}
-                    <tr><td colspan="5" class="muted">Tidak ada data pada rentang ini.</td></tr>
+                    <tr><td colspan="5" class="muted">No data pada rentang ini.</td></tr>
                     {% endfor %}
                 </table>
             </div>
@@ -1596,7 +1596,7 @@ def view_analytics():
             </div>
             <div class="table-scroll analytics-scroll">
                 <table>
-                    <tr><th>#</th><th>Host</th><th>Koin</th><th>Share</th><th>Gift</th><th>Viewer</th><th>Akun</th><th>Sesi</th><th>Durasi live</th></tr>
+                    <tr><th>#</th><th>Host</th><th>Koin</th><th>Share</th><th>Gift</th><th>Viewer</th><th>Akun</th><th>Sesi</th><th>Duration live</th></tr>
                     {% for h in host_rows %}
                     <tr>
                         <td>{{ loop.index }}</td>
@@ -1626,7 +1626,7 @@ def view_analytics():
             </div>
             <div class="table-scroll analytics-scroll">
                 <table>
-                    <tr><th>#</th><th>Akun TikTok</th><th>Koin</th><th>Share</th><th>Gift</th><th>Viewer</th><th>Host</th><th>Sesi</th><th>Durasi live</th></tr>
+                    <tr><th>#</th><th>TikTok Account</th><th>Koin</th><th>Share</th><th>Gift</th><th>Viewer</th><th>Host</th><th>Sesi</th><th>Duration live</th></tr>
                     {% for a in account_rows %}
                     <tr>
                         <td>{{ loop.index }}</td>
@@ -1727,7 +1727,7 @@ def view_analytics():
                 var labels = DATA.labels || [];
                 var values = DATA[state.metric] || [];
                 if (!labels.length) {
-                    wrap.innerHTML = '<div class="muted" style="padding:40px;text-align:center;">Tidak ada data untuk filter ini.</div>';
+                    wrap.innerHTML = '<div class="muted" style="padding:40px;text-align:center;">No data untuk filter ini.</div>';
                     return;
                 }
                 var width = Math.max(320, wrap.clientWidth || 800);
@@ -1836,7 +1836,7 @@ def _get_bot_instance():
         candidate = getattr(module, "bot", None) if module is not None else None
         if candidate is not None and hasattr(candidate, "is_ready"):
             return candidate
-    # Fallback terakhir: instance yang didaftarkan main.py ke runtime_status.
+    # Fallback last: instance yang didaftarkan main.py ke runtime_status.
     try:
         from runtime_status import get_bot_instance
         candidate = get_bot_instance()
@@ -1877,7 +1877,7 @@ def check_discord_verification(discord_id, use_api: bool = True) -> dict:
             raise ValueError
         discord_id_int = int(did_str)  # Python int is exact (no float)
     except (TypeError, ValueError):
-        info["error"] = "Discord ID tidak valid."
+        info["error"] = "Invalid Discord ID."
         return info
 
     bot = _get_bot_instance()
@@ -1902,7 +1902,7 @@ def check_discord_verification(discord_id, use_api: bool = True) -> dict:
                 )
                 member, guild = future.result(timeout=10)
             except Exception as e:
-                info["error"] = f"Gagal cek ke Discord: {e}"
+                info["error"] = f"Failed cek ke Discord: {e}"
         else:
             info["error"] = "Event loop bot tidak berjalan."
 
@@ -1917,8 +1917,8 @@ def check_discord_verification(discord_id, use_api: bool = True) -> dict:
             info["discord_handle"] = str(user)
         if not info["error"]:
             info["error"] = (
-                "Member tidak ditemukan di server (mungkin sudah keluar)."
-                if use_api else "Belum dicek (member tidak ada di cache bot)."
+                "Member not found di server (mungkin sudah keluar)."
+                if use_api else "Not checked yet (member tidak ada di cache bot)."
             )
         return info
 
@@ -1931,7 +1931,7 @@ def check_discord_verification(discord_id, use_api: bool = True) -> dict:
         import main as bot_module
         role = bot_module.get_verified_role(guild)
     except Exception as e:
-        info["error"] = f"Gagal membaca role verifikasi: {e}"
+        info["error"] = f"Failed membaca role verifikasi: {e}"
         return info
 
     if role is None:
@@ -1995,7 +1995,7 @@ async def _grant_role_async(bot, discord_id: int) -> dict:
         member, guild = await _fetch_member_from_guilds(bot, discord_id)
 
     if member is None or guild is None:
-        result["error"] = "Member tidak ditemukan di server (mungkin sudah keluar)."
+        result["error"] = "Member not found di server (mungkin sudah keluar)."
         return result
 
     result["discord_name"] = getattr(member, "display_name", None) or getattr(member, "name", "") or ""
@@ -2006,7 +2006,7 @@ async def _grant_role_async(bot, discord_id: int) -> dict:
         import main as bot_module
         role = bot_module.get_verified_role(guild)
     except Exception as e:
-        result["error"] = f"Gagal membaca role verifikasi: {e}"
+        result["error"] = f"Failed membaca role verifikasi: {e}"
         return result
 
     if role is None:
@@ -2024,7 +2024,7 @@ async def _grant_role_async(bot, discord_id: int) -> dict:
         try:
             me = await guild.fetch_member(bot.user.id)
         except Exception as e:
-            result["error"] = f"Tidak bisa memeriksa role bot di server: {e}"
+            result["error"] = f"No bisa memeriksa role bot di server: {e}"
             return result
 
     if role >= me.top_role:
@@ -2057,7 +2057,7 @@ def grant_verified_role(discord_id) -> dict:
             raise ValueError("not digits")
         did_int = int(did_str)  # safe in Python; never via float
     except (TypeError, ValueError):
-        return {"status": "error", "error": "Discord ID tidak valid."}
+        return {"status": "error", "error": "Invalid Discord ID."}
 
     bot = _get_bot_instance()
     if bot is None or not getattr(bot, "is_ready", lambda: False)():
@@ -2075,11 +2075,11 @@ def grant_verified_role(discord_id) -> dict:
     except TimeoutError:
         return {"status": "error", "error": "Discord tidak merespons dalam 20 detik. Coba lagi.", "discord_id": did_str}
     except Exception as e:
-        return {"status": "error", "error": f"Gagal memberi role: {e}", "discord_id": did_str}
+        return {"status": "error", "error": f"Failed memberi role: {e}", "discord_id": did_str}
 
 
 def _save_grant_result(discord_id, result: dict):
-    """Simpan status verifikasi berdasarkan hasil pemberian role."""
+    """Save status verifikasi berdasarkan hasil pemberian role."""
     discord_id = str(discord_id).strip()
     status = result.get("status")
     info = {
@@ -2121,7 +2121,7 @@ def view_verifications():
     except Exception as e:
         return f"<h3>Database Error: {e}</h3>", 500
 
-    # Isi otomatis baris yang belum pernah dicek, hanya dari cache bot (tanpa API).
+    # Isi otomatis rows yang never dicek, hanya dari cache bot (tanpa API).
     # Normalize Discord IDs to strings for consistent display/lookup.
     users = [(str(u[0]).strip(),) + tuple(u[1:]) for u in users]
     pending = [(str(p[0]).strip(),) + tuple(p[1:]) for p in pending]
@@ -2180,10 +2180,10 @@ def view_verifications():
                 Kolom <strong>Role Status</strong> mengecek langsung ke Discord apakah member benar-benar masih punya role verifikasi.
             </p>
             <form action="/admin/reverify-all" method="POST" onsubmit="return confirm('Verifikasi ulang role semua akun terverifikasi?');" style="margin-bottom: 12px; display:inline-block; margin-right:8px;">
-                <button type="submit" class="btn-save" style="background:#0e7490;">🔁 Verifikasi Ulang Semua</button>
+                <button type="submit" class="btn-save" style="background:#0e7490;">🔁 Re-verify All</button>
             </form>
             <form action="/admin/grant-role-all" method="POST" onsubmit="return confirm('Beri role verifikasi ke semua akun terverifikasi yang belum punya role?');" style="margin-bottom: 12px; display:inline-block;">
-                <button type="submit" class="btn-save" style="background:#15803d;">🛡️ Beri Role ke Semua</button>
+                <button type="submit" class="btn-save" style="background:#15803d;">🛡️ Grant Role to All</button>
             </form>
             <div class="table-scroll">
             <table>
@@ -2213,13 +2213,13 @@ def view_verifications():
                     <td><span class="badge">{{ u[2] }} c</span></td>
                     <td>
                         {% if not st %}
-                        <span class="badge" style="background:#475569;">Belum dicek</span>
+                        <span class="badge" style="background:#475569;">Not checked yet</span>
                         {% elif st[4] == 1 %}
-                        <span class="badge" style="background:#15803d;">✅ Punya role{% if st[5] %} ({{ st[5] }}){% endif %}</span>
+                        <span class="badge" style="background:#15803d;">✅ Has role{% if st[5] %} ({{ st[5] }}){% endif %}</span>
                         {% elif st[4] == 0 %}
                         <span class="badge" style="background:#b91c1c;">❌ Belum punya role</span>
                         {% else %}
-                        <span class="badge" style="background:#a16207;">⚠️ Tidak bisa dicek</span>
+                        <span class="badge" style="background:#a16207;">⚠️ Could not check</span>
                         {% endif %}
                         {% if st and st[7] %}
                         <br><span class="muted" style="font-size: 0.75rem;">{{ st[7] }}</span>
@@ -2230,10 +2230,10 @@ def view_verifications():
                     </td>
                     <td>
                         <form action="/admin/reverify-user/{{ u[0] }}" method="POST" style="display:inline;">
-                            <button type="submit" class="btn-action" style="background:#0e7490;">🔁 Verifikasi Ulang</button>
+                            <button type="submit" class="btn-action" style="background:#0e7490;">🔁 Re-verify</button>
                         </form>
                         <form action="/admin/grant-role/{{ u[0] }}" method="POST" style="display:inline;" onsubmit="return confirm('Beri role verifikasi ke Discord ID {{ u[0] }}?');">
-                            <button type="submit" class="btn-action" style="background:#15803d; margin-left: 6px;">🛡️ Beri Role</button>
+                            <button type="submit" class="btn-action" style="background:#15803d; margin-left: 6px;">🛡️ Grant Role</button>
                         </form>
                         <form action="/admin/unclaim-user/{{ u[0] }}" method="POST" onsubmit="return confirm('Remove the account link for Discord ID {{ u[0] }}?');" style="display:inline; margin-left: 6px;">
                             <button type="submit" class="btn-action btn-del">Unclaim</button>
@@ -2304,9 +2304,9 @@ def reverify_user(discord_id):
         msg = f"✅ Member {info.get('discord_name') or discord_id} sudah punya role {info.get('role_name') or ''}.".strip()
         return redirect('/admin/verifications?msg=' + quote_plus(msg) + '&msg_type=success')
     if info.get("has_role") is False:
-        msg = f"❌ Member {info.get('discord_name') or discord_id} BELUM punya role {info.get('role_name') or 'verifikasi'}. Link TikTok tetap ada, tapi role tidak ditemukan."
+        msg = f"❌ Member {info.get('discord_name') or discord_id} BELUM punya role {info.get('role_name') or 'verifikasi'}. Link TikTok tetap ada, tapi role not found."
         return redirect('/admin/verifications?msg=' + quote_plus(msg) + '&msg_type=danger')
-    msg = f"⚠️ Tidak bisa mengecek {discord_id}: {info.get('error') or 'unknown error'}"
+    msg = f"⚠️ No bisa mengecek {discord_id}: {info.get('error') or 'unknown error'}"
     return redirect('/admin/verifications?msg=' + quote_plus(msg) + '&msg_type=warning')
 
 @admin_bp.route('/grant-role/<discord_id>', methods=['POST'])
@@ -2334,7 +2334,7 @@ def grant_role(discord_id):
         msg = f"ℹ️ {name} sudah punya role {role_name}."
         msg_type = "success"
     else:
-        msg = f"⚠️ Gagal memberi role ke {name}: {result.get('error') or 'unknown error'}"
+        msg = f"⚠️ Failed memberi role ke {name}: {result.get('error') or 'unknown error'}"
         msg_type = "danger"
     return redirect('/admin/verifications?msg=' + quote_plus(msg) + '&msg_type=' + msg_type)
 
@@ -2346,7 +2346,7 @@ def grant_role_all():
         rows = conn.execute("SELECT discord_id FROM user_mappings").fetchall()
         conn.close()
     except Exception as e:
-        return redirect('/admin/verifications?msg=' + quote_plus(f'Gagal membaca data verifikasi: {e}') + '&msg_type=danger')
+        return redirect('/admin/verifications?msg=' + quote_plus(f'Failed to read verification data: {e}') + '&msg_type=danger')
 
     granted = 0
     already = 0
@@ -2360,7 +2360,7 @@ def grant_role_all():
         did = str(discord_id).strip()
         known = known_statuses.get(did)
         if known and len(known) > 4 and known[4] == 1:
-            # Status terakhir bilang sudah punya role; konfirmasi cepat dari
+            # Status last bilang sudah punya role; konfirmasi cepat dari
             # cache bot supaya akun yang role-nya dicabut tetap diperbaiki.
             cached = check_discord_verification(did, use_api=False)
             if cached.get("has_role") is True:
@@ -2404,7 +2404,7 @@ def reverify_all():
         rows = conn.execute("SELECT discord_id FROM user_mappings").fetchall()
         conn.close()
     except Exception as e:
-        return redirect('/admin/verifications?msg=' + quote_plus(f'Gagal membaca data verifikasi: {e}') + '&msg_type=danger')
+        return redirect('/admin/verifications?msg=' + quote_plus(f'Failed to read verification data: {e}') + '&msg_type=danger')
 
     total = 0
     ok = 0
