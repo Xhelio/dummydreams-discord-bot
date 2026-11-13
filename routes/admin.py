@@ -375,6 +375,26 @@ def view_viewers():
             ORDER BY g.total_coins DESC
         """, (today_str,)).fetchall()
         conn.close()
+
+        # Realtime live status: prefer in-memory snapshot (source of truth) over DB rows.
+        # A viewer shows "Live" when their TikTok account is one of the tracked accounts
+        # currently live now.
+        live_snapshot = get_live_snapshot() or {}
+        live_snapshot_keys = {str(k).lower().lstrip("@") for k in live_snapshot.keys()}
+        enriched = []
+        for v in viewers:
+            username = str(v[0] or "").lower().lstrip("@")
+            db_channel = str(v[3] or "").lower().lstrip("@") if v[3] else ""
+            if username in live_snapshot_keys:
+                active_channel = username
+            elif db_channel and db_channel in live_snapshot_keys:
+                # DB points to a tracked account that is confirmed live in realtime.
+                active_channel = db_channel
+            else:
+                # Not live in realtime snapshot; avoid showing stale DB "live" state.
+                active_channel = None
+            enriched.append((v[0], v[1], v[2], active_channel, v[4]))
+        viewers = enriched
     except Exception as e:
         return f"<h3>Database Error: {e}</h3>", 500
 
