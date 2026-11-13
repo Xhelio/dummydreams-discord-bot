@@ -2005,6 +2005,19 @@ async def verification_setup(interaction: discord.Interaction):
 bot.tree.add_command(verification_group)
 
 
+@bot.tree.command(name="welcome-setup", description="Admin: send the welcome/rules message to this channel")
+async def slash_welcome_setup(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    if not is_admin_member(interaction.user) or not interaction.guild or not interaction.channel:
+        await interaction.followup.send(
+            "🛡️ This command is restricted to administrators in a server channel.",
+            ephemeral=True,
+        )
+        return
+    await interaction.channel.send(embed=build_rules_welcome_embed())
+    await interaction.followup.send("✅ Welcome/rules message sent to this channel.", ephemeral=True)
+
+
 @bot.tree.command(name="unclaim", description="Admin: remove a member's linked TikTok account")
 @app_commands.describe(member="Member to unclaim")
 async def slash_unclaim(interaction: discord.Interaction, member: discord.Member):
