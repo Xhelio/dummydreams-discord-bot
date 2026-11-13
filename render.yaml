@@ -1,0 +1,86 @@
+# Render Blueprint — two fully separate deployments (stable + test)
+#
+# Usage:
+#   1. Push this file to `main`.
+#   2. In Render: New + -> Blueprint -> pick this repo -> Apply.
+#   3. Render asks for the `sync: false` secrets. Use the STABLE bot token
+#      and STABLE Turso database for `dummydreams-stable`, and the TEST bot
+#      token and TEST database for `dummydreams-test`.
+#
+# Notes:
+# - `plan: starter` keeps the service always on. Render's free plan sleeps
+#   after inactivity, which would stop the Discord gateway and the TikTok
+#   observer. Use a paid always-on plan for both services.
+# - Python version comes from `.python-version` (3.11.9).
+# - `PORT` is injected by Render automatically; do not set it here.
+
+services:
+  # ---------------------------------------------------------------- STABLE
+  - type: web
+    name: dummydreams-stable
+    runtime: python
+    plan: starter
+    region: singapore
+    branch: main
+    autoDeploy: true
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /health
+    envVars:
+      - key: BOT_ENV
+        value: stable
+      - key: DEBUG_MODE
+        value: "0"
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: EXPECTED_GUILD_ID
+        sync: false
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+      - key: ADMIN_USERNAME
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: ANNOUNCEMENT_CHANNEL_ID
+        sync: false
+      - key: VERIFIED_ROLE_ID
+        sync: false
+      - key: API_SECRET_KEY
+        sync: false
+
+  # ------------------------------------------------------------------ TEST
+  - type: web
+    name: dummydreams-test
+    runtime: python
+    plan: starter
+    region: singapore
+    branch: test
+    autoDeploy: true
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /health
+    envVars:
+      - key: BOT_ENV
+        value: test
+      - key: DEBUG_MODE
+        value: "1"
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: EXPECTED_GUILD_ID
+        sync: false
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+      - key: ADMIN_USERNAME
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: ANNOUNCEMENT_CHANNEL_ID
+        sync: false
+      - key: VERIFIED_ROLE_ID
+        sync: false
+      - key: API_SECRET_KEY
+        sync: false
