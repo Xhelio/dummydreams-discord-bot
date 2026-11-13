@@ -366,34 +366,53 @@ def view_viewers():
                 g.tiktok_user, 
                 g.display_name, 
                 g.total_coins,
-                COALESCE(a.tiktok_username, s.tiktok_username) as active_channel,
+                NULL as active_channel,
                 COALESCE(d.coins, 0) as today_coins
             FROM tiktok_gifts g
-            LEFT JOIN active_live_announcements a ON LOWER(g.tiktok_user) = LOWER(a.tiktok_username)
-            LEFT JOIN live_sessions s ON LOWER(g.tiktok_user) = LOWER(s.tiktok_username) AND s.end_time IS NULL
             LEFT JOIN daily_tiktok_gifts d ON LOWER(d.tiktok_user) = LOWER(g.tiktok_user) AND d.date = ?
             ORDER BY g.total_coins DESC
         """, (today_str,)).fetchall()
+
+        # "Sedang menonton stream": viewer punya aktivitas gift di sesi live yang
+        # masih berjalan (end_time IS NULL) pada akun target yang terkonfirmasi live
+        # realtime (runtime snapshot). Kita tidak punya event join/presence TikTok,
+        # jadi indikator ini berbasis aktivitas gift terbaru di stream yang sedang live.
+        live_snapshot = get_live_snapshot() or {}
+        live_accounts = [str(k).lower().lstrip("@") for k in live_snapshot.keys() if k]
+        watching = {}  # viewer_username -> (target_account, last_activity)
+        if live_accounts:
+            placeholders = ",".join(["?"] * len(live_accounts))
+            rows = cur.execute(f"""
+                SELECT
+                    LOWER(g.viewer_username) AS viewer,
+                    LOWER(COALESCE(NULLIF(g.target_username, ''), s.tiktok_username)) AS target,
+                    MAX(COALESCE(g.log_datetime, g.created_at, '')) AS last_activity
+                FROM gift_logs g
+                JOIN live_sessions s ON s.session_id = g.session_id
+                WHERE s.end_time IS NULL
+                  AND LOWER(s.tiktok_username) IN ({placeholders})
+                GROUP BY LOWER(g.viewer_username), LOWER(COALESCE(NULLIF(g.target_username, ''), s.tiktok_username))
+            """, tuple(live_accounts)).fetchall()
+            for viewer_u, target_u, last_dt in rows:
+                if not viewer_u or not target_u:
+                    continue
+                prev = watching.get(viewer_u)
+                if not prev or str(last_dt or "") >= str(prev[1] or ""):
+                    watching[viewer_u] = (target_u, last_dt)
+
         conn.close()
 
-        # Realtime live status: prefer in-memory snapshot (source of truth) over DB rows.
-        # A viewer shows "Live" when their TikTok account is one of the tracked accounts
-        # currently live now.
-        live_snapshot = get_live_snapshot() or {}
-        live_snapshot_keys = {str(k).lower().lstrip("@") for k in live_snapshot.keys()}
         enriched = []
         for v in viewers:
             username = str(v[0] or "").lower().lstrip("@")
-            db_channel = str(v[3] or "").lower().lstrip("@") if v[3] else ""
-            if username in live_snapshot_keys:
-                active_channel = username
-            elif db_channel and db_channel in live_snapshot_keys:
-                # DB points to a tracked account that is confirmed live in realtime.
-                active_channel = db_channel
+            w = watching.get(username)
+            if w:
+                active_channel = w[0]          # stream/account being watched
+                last_activity = w[1] or ""
             else:
-                # Not live in realtime snapshot; avoid showing stale DB "live" state.
                 active_channel = None
-            enriched.append((v[0], v[1], v[2], active_channel, v[4]))
+                last_activity = ""
+            enriched.append((v[0], v[1], v[2], active_channel, v[4], last_activity))
         viewers = enriched
     except Exception as e:
         return f"<h3>Database Error: {e}</h3>", 500
@@ -437,9 +456,10 @@ def view_viewers():
                     <td>{{ v[4] }} c</td>
                     <td>
                         {% if v[3] %}
-                        <a href="https://www.tiktok.com/@{{ v[3] }}/live" target="_blank" class="badge badge-active">🔴 Live Now ↗</a>
+                        <a href="https://www.tiktok.com/@{{ v[3] }}/live" target="_blank" class="badge badge-active" title="Aktif di live (gift terakhir: {{ v[5] or '-' }})">👀 Watching @{{ v[3] }} ↗</a>
+                        <div class="field-help">Aktif di stream live (gift terakhir: {{ v[5] or '-' }})</div>
                         {% else %}
-                        <span class="badge badge-inactive">Offline</span>
+                        <span class="badge badge-inactive">Tidak terdeteksi</span>
                         {% endif %}
                     </td>
                     <td>
