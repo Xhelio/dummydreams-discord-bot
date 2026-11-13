@@ -52,3 +52,8 @@ __pycache__/
 *.pyc
 routes/__pycache__/
 *.db
+
+# Environment secrets
+.env
+.env.*
+!.env.example
