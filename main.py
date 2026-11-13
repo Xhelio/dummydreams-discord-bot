@@ -1578,6 +1578,19 @@ async def on_ready():
     print(f"[Discord] Bot logged in as {bot.user} (env={bot_env}, version={get_push_code()})")
     if bot_env == "test":
         print("[Discord] TEST environment active: use a separate bot token, database, and server from stable.")
+
+    # Optional safety guard: ensure this deployment is connected to the intended guild.
+    expected_guild_id = str(os.environ.get("EXPECTED_GUILD_ID", "") or "").strip()
+    if expected_guild_id.isdigit():
+        current_ids = {str(g.id) for g in (bot.guilds or [])}
+        if expected_guild_id not in current_ids:
+            print(
+                f"[Discord] WARNING: connected guilds {sorted(current_ids)} do not include "
+                f"EXPECTED_GUILD_ID={expected_guild_id}. Check BOT_ENV/token/config before writing data."
+            )
+        else:
+            print(f"[Discord] Guild check OK: connected to expected guild {expected_guild_id}.")
+
     runtime_status.set_bot_ready(str(bot.user))
     # Register persistent views so verification buttons keep working after restarts
     bot.add_view(VerificationChannelView())
