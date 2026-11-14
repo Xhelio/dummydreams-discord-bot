@@ -810,7 +810,7 @@ def build_verification_panel_embed() -> discord.Embed:
             "1. Click the **[ 🔑 Verify TikTok Account ]** button below.\n"
             "2. Enter your TikTok username in the form.\n"
             "3. Verification continues in your **Direct Messages** (so it won't disappear).\n"
-            "4. Choose a verification method (**Live Greeting**, **Live Chat Code**, or **Bio**).\n"
+            "4. Choose a verification method (**Live Greeting** or **Bio**).\n"
             "5. Once confirmed, your TikTok account is permanently linked and your server access role activates automatically!"
         ),
         color=discord.Color.from_rgb(0, 168, 255)
@@ -1109,8 +1109,12 @@ def build_verification_start(discord_user_id: int, tiktok_user: str, total_coins
         inline=False
     )
     embed.add_field(
-        name="🔴 Option 2 — Live chat code",
-        value="Type the verification code in the live chat while one of our hosts is live. The bot detects it automatically.",
+        name="🔴 Option 2 — Live greeting",
+        value=(
+            "Join one of our live streams and post a normal welcome message such as "
+            "`hello`, `hello host`, or `hiii` from your TikTok account. "
+            "The bot detects it automatically."
+        ),
         inline=False
     )
     return embed, VerificationMethodChoiceView(tiktok_user, code, total_coins)
@@ -1154,10 +1158,22 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
             )
             return
         u_clean = self.username_input.value.strip().lstrip('@').lower()
+        actor = f"{interaction.user} (ID {interaction.user.id})"
+
+        log_activity_event(
+            "verification",
+            f"[VERIFY ATTEMPT] {actor} requested verification for @{u_clean}.",
+            u_clean
+        )
 
         # 1. Discord user already linked?
         existing_tiktok = get_user_mapping(interaction.user.id)
         if existing_tiktok:
+            log_activity_event(
+                "verification",
+                f"[VERIFY ATTEMPT] {actor} blocked: Discord account already linked to @{existing_tiktok}.",
+                u_clean
+            )
             await interaction.followup.send(
                 f"ℹ️ Your Discord account is already verified with TikTok **@{existing_tiktok}**.\n"
                 f"You do not need to verify again.",
@@ -1168,6 +1184,11 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
         # 2. TikTok account claimed by someone else?
         is_claimed, claimed_discord_id = is_user_already_claimed(u_clean)
         if is_claimed:
+            log_activity_event(
+                "verification",
+                f"[VERIFY ATTEMPT] {actor} blocked: @{u_clean} is already claimed by Discord ID {claimed_discord_id}.",
+                u_clean
+            )
             await interaction.followup.send(
                 f"❌ TikTok account **@{u_clean}** is already linked to another Discord account.\n"
                 f"One TikTok account can only be claimed by one Discord account. "
@@ -1243,6 +1264,18 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
             )
             return
 
+        flow_name = (
+            "low-activity"
+            if int(total_coins or 0) < MIN_COINS_FOR_STANDARD_VERIFICATION
+            else "standard"
+        )
+        log_activity_event(
+            "verification",
+            f"[VERIFY ATTEMPT] {actor} started {flow_name} verification for @{u_clean} "
+            f"({int(total_coins or 0):,} c).",
+            u_clean
+        )
+
         embed, view = build_verification_start(
             interaction.user.id, u_clean, total_coins, display_name
         )
@@ -1263,7 +1296,7 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
             await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
 class VerificationMethodChoiceView(discord.ui.View):
-    """Standard verification (10+ coins): bio code or live chat code."""
+    """Standard verification (10+ coins): bio code or live greeting."""
     def __init__(self, tiktok_user: str, code: str, total_coins: int):
         super().__init__(timeout=None)
         self.tiktok_user = tiktok_user
@@ -1272,44 +1305,44 @@ class VerificationMethodChoiceView(discord.ui.View):
 
     @discord.ui.button(label="Verify via Bio", style=discord.ButtonStyle.primary, emoji="📝")
     async def via_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
+        log_activity_event(
+            "verification",
+            f"[VERIFY METHOD] {interaction.user} (ID {interaction.user.id}) chose bio for @{self.tiktok_user}.",
+            self.tiktok_user
+        )
         self.code = create_pending_verification(interaction.user.id, self.tiktok_user, method='bio')
         await interaction.response.edit_message(
             embed=build_bio_verification_embed(self.tiktok_user, self.code),
             view=BioVerificationView(self.tiktok_user, self.code, self.total_coins)
         )
 
-    @discord.ui.button(label="Verify via Live Chat", style=discord.ButtonStyle.danger, emoji="🔴")
+    @discord.ui.button(label="Verify via Live Greeting", style=discord.ButtonStyle.danger, emoji="🔴")
     async def via_live(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.code = create_pending_verification(interaction.user.id, self.tiktok_user, method='live_code')
+        # Live verification uses a normal welcome message, not a secret code.
+        create_pending_verification(interaction.user.id, self.tiktok_user, method='live_greeting')
+        log_activity_event(
+            "verification",
+            f"[VERIFY METHOD] {interaction.user} (ID {interaction.user.id}) chose live greeting for @{self.tiktok_user}.",
+            self.tiktok_user
+        )
         live_hosts = get_current_live_hosts()
         if live_hosts:
-            host_text = "🟢 **Hosts live right now:**\n" + "\n".join(
-                [f"• `@{h}` (https://www.tiktok.com/@{h}/live)" for h in live_hosts]
-            )
+            embed = build_live_greeting_embed(self.tiktok_user, live_hosts)
         else:
-            host_text = (
-                "⚪ **No host is live right now.**\n"
-                "💡 *Use the bio verification method if you do not want to wait.*"
+            embed = discord.Embed(
+                title="⏳ Waiting for a Live Stream",
+                description=(
+                    f"No host is live right now.\n\n"
+                    f"TikTok account **@{self.tiktok_user}** will be verified automatically "
+                    f"as soon as you post a welcome message (for example `hello` or `hiii`) "
+                    f"in one of our live streams.\n\n"
+                    f"💡 *You can switch to bio verification if you do not want to wait.*"
+                ),
+                color=discord.Color.yellow()
             )
-
-        embed = discord.Embed(
-            title="🔴 Verify via Live Chat",
-            description=(
-                f"TikTok account: **@{self.tiktok_user}**\n\n"
-                f"🔑 **Your verification code:**\n"
-                f"```text\n{self.code}\n```\n"
-                f"{host_text}\n\n"
-                f"**Steps:**\n"
-                f"1. Join one of our live streams.\n"
-                f"2. Post a comment containing `{self.code}` from TikTok account **@{self.tiktok_user}**.\n"
-                f"3. The bot detects it automatically and gives you the role.\n\n"
-                f"⏱️ *The bot is listening to live chat... (code expires in 15 minutes)*"
-            ),
-            color=discord.Color.red()
-        )
         await interaction.response.edit_message(
             embed=embed,
-            view=LiveVerificationView(self.tiktok_user, self.code, self.total_coins)
+            view=LiveGreetingVerificationView(self.tiktok_user, self.total_coins)
         )
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
@@ -1326,6 +1359,11 @@ class LowActivityVerificationView(discord.ui.View):
 
     @discord.ui.button(label="Verify via Live Greeting", style=discord.ButtonStyle.danger, emoji="🔴")
     async def via_live_greeting(self, interaction: discord.Interaction, button: discord.ui.Button):
+        log_activity_event(
+            "verification",
+            f"[VERIFY METHOD] {interaction.user} (ID {interaction.user.id}) chose live greeting for @{self.tiktok_user}.",
+            self.tiktok_user
+        )
         live_hosts = get_current_live_hosts()
         if not live_hosts:
             code = create_pending_verification(interaction.user.id, self.tiktok_user, method='bio')
@@ -1347,6 +1385,11 @@ class LowActivityVerificationView(discord.ui.View):
 
     @discord.ui.button(label="Verify via Bio", style=discord.ButtonStyle.success, emoji="📝")
     async def via_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
+        log_activity_event(
+            "verification",
+            f"[VERIFY METHOD] {interaction.user} (ID {interaction.user.id}) chose bio for @{self.tiktok_user}.",
+            self.tiktok_user
+        )
         code = create_pending_verification(interaction.user.id, self.tiktok_user, method='bio')
         await interaction.response.edit_message(
             embed=build_bio_verification_embed(self.tiktok_user, code),
@@ -1365,7 +1408,8 @@ def build_live_greeting_embed(tiktok_user: str, live_hosts: list) -> discord.Emb
     return discord.Embed(
         title="🔴 Verify via Live Greeting",
         description=(
-            f"TikTok account: **@{tiktok_user}**\n\n"
+            f"TikTok account: **@{tiktok_user}**\n"
+            f"No verification code needed — just greet normally.\n\n"
             f"🟢 **Hosts live right now:**\n{host_lines}\n\n"
             f"**What to do:**\n"
             f"1. Join one of the live streams above using TikTok account **@{tiktok_user}**.\n"
@@ -1446,7 +1490,7 @@ class BioVerificationView(discord.ui.View):
             _, total_coins, _ = is_tiktok_user_in_db(tiktok_user)
             log_activity_event(
                 "verification",
-                f"[BIO] @{tiktok_user} verified via TikTok bio.",
+                f"[BIO] {interaction.user} (ID {interaction.user.id}) verified @{tiktok_user} via TikTok bio.",
                 tiktok_user
             )
 
@@ -1472,6 +1516,12 @@ class BioVerificationView(discord.ui.View):
             )
             await interaction.edit_original_response(embed=embed, view=None)
         else:
+            log_activity_event(
+                "verification",
+                f"[BIO] {interaction.user} (ID {interaction.user.id}) failed bio verification for "
+                f"@{tiktok_user}: code `{code}` not found in the profile bio.",
+                tiktok_user
+            )
             wib = pytz.timezone("Asia/Jakarta")
             checked_at = datetime.now(wib).strftime("%H:%M:%S WIB")
             raw_bio = current_bio if current_bio is not None else ""
@@ -1701,6 +1751,12 @@ class LiveGreetingVerificationView(discord.ui.View):
             await interaction.response.edit_message(embed=embed, view=None)
             return
 
+        log_activity_event(
+            "verification",
+            f"[VERIFY CHECK] {interaction.user} (ID {interaction.user.id}) checked status for "
+            f"@{self.tiktok_user}: not verified yet.",
+            self.tiktok_user
+        )
         live_hosts = get_current_live_hosts()
         if live_hosts:
             embed = build_live_greeting_embed(self.tiktok_user, live_hosts)
@@ -1733,8 +1789,9 @@ class LiveGreetingVerificationView(discord.ui.View):
 async def handle_live_comment_verification(tiktok_user: str, comment_text: str, target_host: str):
     """Verify a pending request when the matching TikTok account comments in a live stream.
 
-    Supports both the standard verification code and the English welcome-message
-    flow used for accounts with fewer than 10 coins.
+    Greeting messages (``hello``, ``hiii``, ...) are the normal path for both the
+    standard and the low-activity flows. Matching a legacy verification code is
+    still supported so old pending requests finish normally.
     """
     if not is_feature_enabled("verification"):
         return
@@ -1770,14 +1827,16 @@ async def handle_live_comment_verification(tiktok_user: str, comment_text: str, 
     if greeting_used:
         log_activity_event(
             "verification",
-            f"[LIVE GREETING] @{u_clean} verified via welcome message \"{comment_text}\" in @{target_host}'s live.",
+            f"[LIVE GREETING] Discord ID {discord_id} verified @{u_clean} via welcome message "
+            f"\"{comment_text}\" in @{target_host}'s live.",
             target_host
         )
         print(f"[Verification] Live greeting verified for @{u_clean} (Discord ID: {discord_id})")
     else:
         log_activity_event(
             "verification",
-            f"[LIVE CODE] @{u_clean} verified via live chat code in @{target_host}'s live.",
+            f"[LIVE CODE] Discord ID {discord_id} verified @{u_clean} via live chat code "
+            f"in @{target_host}'s live.",
             target_host
         )
         print(f"[Verification] Live comment verified for @{u_clean} (Discord ID: {discord_id})")
