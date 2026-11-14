@@ -92,6 +92,8 @@ def view_settings():
         "leaderboard_channel_id": get_setting("leaderboard_channel_id", "") or "",
         "allowed_channel_ids": "\n".join(str(x) for x in get_json_list_setting("allowed_channel_ids")),
         "allowed_channels_enabled": get_bool_setting("allowed_channels_enabled", False),
+        "coin_only_verification_enabled": get_bool_setting("coin_only_verification_enabled", False),
+        "coin_only_min_coins": get_setting("coin_only_min_coins", "100") or "100",
     }
     tier_cfg = get_tier_settings()
     tier_cfg["announce_channel_id"] = get_setting("role_tier_announce_channel_id", "") or ""
@@ -187,6 +189,41 @@ def view_settings():
                             <input type="checkbox" name="allowed_channels_enabled" value="1" {% if s.allowed_channels_enabled %}checked{% endif %}>
                             Restrict commands to these channels (off = every channel is allowed)
                         </label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>🔓 Coin-only Verification</h2>
+                <div class="switch-row">
+                    <label class="switch-label" for="coin_only_mode">
+                        <input type="checkbox" id="coin_only_mode" name="coin_only_verification_enabled" value="1" {% if s.coin_only_verification_enabled %}checked{% endif %}>
+                        <span>Grant the verified role from coins only</span>
+                    </label>
+                    <span class="switch-help">
+                        Members claim a TikTok username with <strong>no ownership proof</strong>. If that
+                        account already has at least the minimum coins, the link is created and the
+                        verified + tier roles are granted immediately.
+                    </span>
+                </div>
+                <div class="form-grid two-col" style="margin-top: 10px;">
+                    <div>
+                        <label class="field-label">Minimum coins for automatic grant</label>
+                        <input type="number" name="coin_only_min_coins" min="0" step="1" value="{{ s.coin_only_min_coins }}" inputmode="numeric">
+                        <small class="field-help">
+                            Recommended: <strong>100</strong> (roughly one real supporter). Values below 50
+                            make impersonation cheap. Use 0 only if you accept anybody claiming any account.
+                        </small>
+                    </div>
+                    <div>
+                        <span class="badge" style="background: {% if s.coin_only_verification_enabled %}#b45309{% else %}#475569{% endif %};">
+                            {% if s.coin_only_verification_enabled %}Coin-only mode ON{% else %}Normal verification{% endif %}
+                        </span>
+                        <small class="field-help" style="display:block; margin-top:8px;">
+                            ⚠️ Coin-only mode removes the ownership check. Anyone who knows a
+                            supporter's TikTok name can claim it and steal their status. Keep the
+                            threshold high and review the verification log regularly.
+                        </small>
                     </div>
                 </div>
             </div>
@@ -491,6 +528,14 @@ def save_settings():
         "announcement_channel_ids",
         json.dumps(_parse_id_list(request.form.get("announcement_channel_ids", "")))
     )
+
+    new_coin_only = _checkbox("coin_only_verification_enabled")
+    set_setting("coin_only_verification_enabled", new_coin_only)
+    try:
+        min_coins = max(0, int(request.form.get("coin_only_min_coins", "100")))
+    except (TypeError, ValueError):
+        min_coins = 100
+    set_setting("coin_only_min_coins", str(min_coins))
 
     set_setting("role_tiers_mode", request.form.get("role_tiers_mode", "replace"))
     old_reset_enabled = get_bool_setting("role_tier_reset_enabled", False)

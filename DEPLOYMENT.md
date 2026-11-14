@@ -405,3 +405,53 @@ Chatbot aktif otomatis bila `OLLAMA_BASE_URL` dan `OLLAMA_MODEL` terisi. Set `CH
 - [ ] Backups of the production database configured.
 - [ ] Secrets rotated if they were ever shared.
 - [ ] (Opsional) Jika chatbot aktif: tunnel aman, `OLLAMA_BASE_URL`/`OLLAMA_MODEL` terisi, dan laptop selalu-on saat dipakai.
+
+---
+
+## 12. Coin-only verification ("role murni")
+
+Admin panel → **Bot Settings → 🔓 Coin-only Verification**.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `coin_only_verification_enabled` | `0` | When on, a member who claims a TikTok username is linked **without ownership proof** if that account already has at least the minimum coins. |
+| `coin_only_min_coins` | `100` | Minimum total coins on the claimed TikTok account. Recommended: 100. |
+
+Behaviour when the toggle is on and the claimed account meets the threshold:
+
+1. `user_mappings` is created right away.
+2. Verified role + coin tier roles are granted on every server the bot is in.
+3. `discord_verification_status` is saved and an `[Coin-only]` line is written to the activity log.
+4. Accounts that are already claimed by another Discord user are still rejected.
+5. Accounts below the threshold keep the normal bio / live-chat verification flow.
+
+### Pros
+
+- Zero friction: a supporter gets the role in the same minute they click Verify.
+- No waiting for the host to be live, no bio editing, fewer support tickets.
+- Works while the bot is offline from TikTok (no live chat listener needed).
+- Conversions and retention improve because access is immediate.
+
+### Cons
+
+- **No proof of ownership.** Anyone who knows a supporter's TikTok username can claim it
+  before the real owner does and take their roles, tier, and standing.
+- The data becomes untrustworthy: `user_mappings` may point to the wrong person, analytics
+  per viewer/host can be attributed to the wrong Discord account.
+- Tier roles and future rewards (giveaways, resets) are granted to a possibly wrong account.
+- Reversing a bad claim is manual: unclaim in the admin panel now revokes verified + tier
+  roles, but the real owner must still re-verify.
+- A low threshold makes impersonation cheap. Keep it ≥ 100 coins and change it whenever
+  gift activity spikes.
+
+### Revoking on unclaim
+
+Both paths now strip Discord roles, not just the database row:
+
+- Admin panel → Verifications → **Unclaim** (`/admin/unclaim-user/<discord_id>`).
+- Discord `/unclaim @member` and `!unclaim @member`.
+
+They remove the verified role **and** every role listed in `role_tiers` (reset and permanent
+groups) across all guilds, delete `user_mappings` + `discord_verification_status`, and log the
+result to the activity log. If the bot is not running (Flask-only process) the link is still
+removed and the panel shows a warning that roles could not be revoked.

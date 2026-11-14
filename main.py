@@ -40,7 +40,9 @@ from db import (
     is_feature_enabled,
     tier_reset_due,
     mark_tier_reset_done,
-    suspend_open_live_sessions
+    suspend_open_live_sessions,
+    save_verification_status,
+    delete_verification_status
 )
 from utils import get_schedule_info, load_summary_config
 from server import keep_alive
@@ -231,6 +233,90 @@ async def grant_verified_access_for_discord_id(discord_id, tiktok_user: str, tot
     if granted > 0:
         return True, " The verification role has been granted."
     return True, " The role is already active."
+
+async def revoke_verification_roles_for_discord_id(discord_id) -> tuple:
+    """Remove the verified role AND every coin tier role for a Discord user.
+
+    Used when a link is removed (admin "Unclaim" or /unclaim) so Discord never
+    keeps a role that the database no longer justifies.
+    Returns (ok: bool, detail: str).
+    """
+    try:
+        did = int(str(discord_id).strip())
+    except (TypeError, ValueError):
+        return False, "Invalid Discord ID."
+
+    tier_role_ids = set()
+    try:
+        for tier in get_role_tiers(None) or []:
+            rid = str(tier.get("role_id") or "").strip()
+            if rid.isdigit():
+                tier_role_ids.add(int(rid))
+    except Exception as e:
+        print(f"[Role Error] Could not load tier roles for revoke: {e}")
+
+    found = 0
+    removed_total = 0
+    problems = []
+
+    for guild in list(getattr(bot, "guilds", []) or []):
+        member = guild.get_member(did)
+        if member is None:
+            try:
+                member = await guild.fetch_member(did)
+            except Exception:
+                member = None
+        if member is None:
+            continue
+        found += 1
+
+        roles_to_remove = []
+        try:
+            verified_role = get_verified_role(guild)
+        except Exception:
+            verified_role = None
+        if verified_role is not None and verified_role in member.roles:
+            roles_to_remove.append(verified_role)
+        for role in member.roles:
+            if role.id in tier_role_ids and role not in roles_to_remove:
+                roles_to_remove.append(role)
+
+        if not roles_to_remove:
+            continue
+        try:
+            await member.remove_roles(*roles_to_remove, reason="Unclaim: revoke verification and tier roles")
+            removed_total += len(roles_to_remove)
+            print(
+                f"[Discord] Revoked {len(roles_to_remove)} role(s) from {member} in '{guild.name}': "
+                f"{', '.join(r.name for r in roles_to_remove)}"
+            )
+        except Exception as e:
+            problems.append(f"{guild.name}: {e}")
+            print(f"[Role Error] Failed to revoke roles for {did} in '{guild.name}': {e}")
+
+    if found == 0:
+        return False, "Discord account not found in any server the bot is in."
+    if problems:
+        return removed_total > 0, "Could not revoke in: " + "; ".join(problems[:2])
+    return True, f"Removed {removed_total} role(s)."
+
+
+def revoke_verification_roles(discord_id) -> tuple:
+    """Existing event-loop-safe wrapper for Flask routes (runs on the bot loop)."""
+    try:
+        loop = getattr(bot, "loop", None)
+    except Exception:
+        loop = None
+    if loop is None or not loop.is_running():
+        return False, "Bot event loop is not running."
+    try:
+        future = asyncio.run_coroutine_threadsafe(
+            revoke_verification_roles_for_discord_id(discord_id), loop
+        )
+        return future.result(timeout=20)
+    except Exception as e:
+        return False, f"Revoke failed: {e}"
+
 
 def handle_api_announcement(username: str, is_live: bool, host_name: str = None):
     try:
@@ -876,6 +962,45 @@ def schedule_presence_refresh():
 
 MIN_COINS_FOR_STANDARD_VERIFICATION = 10
 
+
+def get_coin_only_verification_config() -> dict:
+    """Coin-only verification ("role murni"): grant access with no ownership proof.
+
+    The claimed TikTok account only has to reach ``coin_only_min_coins`` total
+    coins. Admins control it from Bot Settings.
+    """
+    try:
+        enabled = get_bool_setting("coin_only_verification_enabled", False)
+    except Exception:
+        enabled = False
+    try:
+        min_coins = int(get_setting("coin_only_min_coins", "100") or 100)
+    except (TypeError, ValueError):
+        min_coins = 100
+    if min_coins < 0:
+        min_coins = 0
+    return {"enabled": enabled, "min_coins": min_coins}
+
+
+def build_coin_only_success_embed(tiktok_user: str, total_coins: int, min_coins: int,
+                                  role_info: str) -> discord.Embed:
+    """Confirmation embed for a coin-only (no proof) grant."""
+    return discord.Embed(
+        title="✅ Verification Complete (Coin-only)",
+        description=(
+            f"Your Discord account is now linked to TikTok **@{tiktok_user}**.\n\n"
+            f"💰 Total coins: **{total_coins:,} c** "
+            f"(minimum for automatic access: **{min_coins:,} c**)\n"
+            f"🎭 Role: {role_info or 'granted'}\n\n"
+            f"⚠️ This access was granted **without ownership proof** because the "
+            f"account already reached the coin threshold. If this account is not "
+            f"yours, contact an admin immediately — claiming someone else's account "
+            f"can get your Discord account removed from the server."
+        ),
+        color=discord.Color.green()
+    )
+
+
 WELCOME_GREETINGS = {
     "hi", "hii", "hiii", "hiiii", "hey", "heyy", "hello", "helo", "hallo",
     "yo", "greetings", "welcome",
@@ -1052,6 +1177,62 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
 
         # 3. Look up the account (may not exist yet / may have less than 10 coins)
         exists, total_coins, display_name = is_tiktok_user_in_db(u_clean)
+
+        # 3b. Coin-only mode: grant access without ownership proof once the
+        # claimed account has reached the admin-configured coin threshold.
+        coin_cfg = get_coin_only_verification_config()
+        if coin_cfg["enabled"] and int(total_coins or 0) >= coin_cfg["min_coins"]:
+            if not bind_user_mapping(interaction.user.id, u_clean):
+                await interaction.followup.send(
+                    "❌ I could not link your account right now. Please try again.",
+                    ephemeral=True
+                )
+                return
+
+            log_activity_event(
+                "verification",
+                f"[Coin-only] {interaction.user} (ID {interaction.user.id}) linked @{u_clean} "
+                f"with {total_coins} coins (no proof, threshold {coin_cfg['min_coins']}).",
+                u_clean
+            )
+            granted, role_info = await grant_verified_access_for_discord_id(
+                interaction.user.id, u_clean, total_coins
+            )
+            try:
+                save_verification_status(
+                    interaction.user.id,
+                    discord_name=str(interaction.user),
+                    discord_handle=getattr(interaction.user, "name", "") or "",
+                    guild_name=getattr(interaction.guild, "name", "") if interaction.guild else "",
+                    has_role=True if granted else None,
+                    role_name=role_info or "",
+                    error="" if granted else (role_info or "Role could not be granted"),
+                )
+            except Exception as e:
+                print(f"[Verification] Failed to save coin-only status: {e}")
+
+            if granted:
+                embed = build_coin_only_success_embed(
+                    u_clean, total_coins, coin_cfg["min_coins"], role_info
+                )
+            else:
+                embed = discord.Embed(
+                    title="⚠️ Account linked, but the role could not be granted",
+                    description=(
+                        f"Your Discord account is now linked to TikTok **@{u_clean}** "
+                        f"({total_coins:,} c).\n\n"
+                        f"**Reason:** {role_info}\n\n"
+                        f"Please contact an admin so they can grant the role manually."
+                    ),
+                    color=discord.Color.orange()
+                )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            print(
+                f"[Verification] Coin-only grant for {interaction.user} -> "
+                f"@{u_clean} ({total_coins} c) | {role_info}"
+            )
+            return
+
         embed, view = build_verification_start(
             interaction.user.id, u_clean, total_coins, display_name
         )
@@ -1730,22 +1911,60 @@ async def set_verified_role_cmd(ctx, role: discord.Role):
     set_setting("verified_role_id", str(role.id))
     await ctx.send(f"✅ Verified role set to: **{role.name}** (`{role.id}`)")
 
+async def _unclaim_discord_member(member: discord.Member):
+    """Remove a member's TikTok link plus the roles that link justified.
+
+    Returns (ok: bool, message: str).
+    """
+    conn = get_db_connection()
+    try:
+        res = conn.execute(
+            "SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (str(member.id),)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not res:
+        return False, f"❌ {member.mention} has no linked TikTok account."
+
+    tt_user = res[0]
+    roles_ok, role_detail = await revoke_verification_roles_for_discord_id(member.id)
+
+    conn = get_db_connection()
+    try:
+        conn.execute("DELETE FROM user_mappings WHERE discord_id = ?", (str(member.id),))
+        conn.commit()
+    finally:
+        conn.close()
+    try:
+        delete_verification_status(member.id)
+    except Exception as e:
+        print(f"[Unclaim] Failed to delete verification status for {member.id}: {e}")
+
+    log_activity_event(
+        "verification",
+        f"[Unclaim] Link @{tt_user} removed from {member} (ID {member.id}) | roles: {role_detail}",
+        tt_user,
+    )
+    print(f"[Unclaim] {member} (ID {member.id}) unlinked from @{tt_user} | {role_detail}")
+
+    if roles_ok:
+        return True, (
+            f"✅ Removed the link to TikTok account `@{tt_user}` from {member.mention}.\n"
+            f"Discord roles: {role_detail}"
+        )
+    return True, (
+        f"⚠️ Removed the link to TikTok account `@{tt_user}` from {member.mention}, "
+        f"but the Discord roles could not be fully revoked.\n"
+        f"Details: {role_detail}"
+    )
+
+
 @bot.command(name="unclaim")
 @commands.check(is_admin)
 async def unclaim(ctx, member: discord.Member):
-    """Admin command: remove a member's linked TikTok account."""
-    conn = get_db_connection()
-    try:
-        res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (str(member.id),)).fetchone()
-        if not res:
-            await ctx.send(f"❌ {member.mention} has no linked TikTok account.")
-            return
-        tt_user = res[0]
-        conn.execute("DELETE FROM user_mappings WHERE discord_id = ?", (str(member.id),))
-        conn.commit()
-        await ctx.send(f"✅ Removed the link to TikTok account `@{tt_user}` from {member.mention}.")
-    finally:
-        conn.close()
+    """Admin command: remove a member's linked TikTok account and its roles."""
+    ok, message = await _unclaim_discord_member(member)
+    await ctx.send(message)
 
 @bot.command(name="mycoins", aliases=["check", "coins"])
 async def mycoins(ctx):
@@ -2120,18 +2339,8 @@ async def slash_unclaim(interaction: discord.Interaction, member: discord.Member
     if not is_admin_member(interaction.user):
         await interaction.followup.send("🛡️ This command is restricted to administrators.", ephemeral=True)
         return
-    conn = get_db_connection()
-    try:
-        res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (str(member.id),)).fetchone()
-        if not res:
-            await interaction.followup.send(f"❌ {member.mention} has no linked TikTok account.", ephemeral=True)
-            return
-        tt_user = res[0]
-        conn.execute("DELETE FROM user_mappings WHERE discord_id = ?", (str(member.id),))
-        conn.commit()
-        await interaction.followup.send(f"✅ Removed the link to TikTok account `@{tt_user}` from {member.mention}.", ephemeral=True)
-    finally:
-        conn.close()
+    ok, message = await _unclaim_discord_member(member)
+    await interaction.followup.send(message, ephemeral=True)
 
 
 async def main():

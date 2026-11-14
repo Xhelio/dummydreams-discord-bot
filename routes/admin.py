@@ -26,6 +26,7 @@ from db import (
     get_all_verification_status,
     save_verification_status,
     delete_verification_status,
+    log_activity_event,
     get_analytics_summary,
     get_analytics_sessions,
     get_analytics_session_breakdown,
@@ -2118,6 +2119,50 @@ def grant_verified_role(discord_id) -> dict:
         return {"status": "error", "error": f"Failed memberi role: {e}", "discord_id": did_str}
 
 
+def _get_bot_module():
+    """Return the module that owns the running bot instance (main or __main__)."""
+    import sys
+
+    for module_name in ("main", "__main__"):
+        module = sys.modules.get(module_name)
+        if module is not None and getattr(module, "bot", None) is not None:
+            return module
+    return None
+
+
+def revoke_verification_roles(discord_id) -> dict:
+    """Sync wrapper for Flask routes: strip verified + tier roles on the bot loop."""
+    try:
+        did_str = str(discord_id).strip()
+        if not did_str.isdigit():
+            raise ValueError("not digits")
+        did_int = int(did_str)
+    except (TypeError, ValueError):
+        return {"ok": False, "detail": "Invalid Discord ID."}
+
+    bot = _get_bot_instance()
+    if bot is None or not getattr(bot, "is_ready", lambda: False)():
+        return {"ok": False, "detail": "Discord bot is not running."}
+
+    module = _get_bot_module()
+    revoke_coro = getattr(module, "revoke_verification_roles_for_discord_id", None) if module else None
+    if revoke_coro is None:
+        return {"ok": False, "detail": "Revoke helper is unavailable."}
+
+    loop = getattr(bot, "loop", None)
+    if loop is None or not loop.is_running():
+        return {"ok": False, "detail": "Bot event loop is not running."}
+
+    try:
+        future = asyncio.run_coroutine_threadsafe(revoke_coro(did_int), loop)
+        ok, detail = future.result(timeout=20)
+        return {"ok": bool(ok), "detail": detail}
+    except TimeoutError:
+        return {"ok": False, "detail": "Discord did not respond within 20 seconds."}
+    except Exception as e:
+        return {"ok": False, "detail": f"Revoke failed: {e}"}
+
+
 def _save_grant_result(discord_id, result: dict):
     """Save status verifikasi berdasarkan hasil pemberian role."""
     discord_id = str(discord_id).strip()
@@ -2275,7 +2320,10 @@ def view_verifications():
                         <form action="/admin/grant-role/{{ u[0] }}" method="POST" style="display:inline;" onsubmit="return confirm('Beri role verifikasi ke Discord ID {{ u[0] }}?');">
                             <button type="submit" class="btn-action" style="background:#15803d; margin-left: 6px;">🛡️ Grant Role</button>
                         </form>
-                        <form action="/admin/unclaim-user/{{ u[0] }}" method="POST" onsubmit="return confirm('Remove the account link for Discord ID {{ u[0] }}?');" style="display:inline; margin-left: 6px;">
+                        <form action="/admin/revoke-role/{{ u[0] }}" method="POST" onsubmit="return confirm('Revoke the verified + tier roles for Discord ID {{ u[0] }}? The TikTok link is kept.');" style="display:inline; margin-left: 6px;">
+                            <button type="submit" class="btn-action btn-del">🚫 Revoke Role</button>
+                        </form>
+                        <form action="/admin/unclaim-user/{{ u[0] }}" method="POST" onsubmit="return confirm('Remove the account link and revoke the verified + tier roles for Discord ID {{ u[0] }}?');" style="display:inline; margin-left: 6px;">
                             <button type="submit" class="btn-action btn-del">Unclaim</button>
                         </form>
                     </td>
@@ -2479,6 +2527,8 @@ def reverify_all():
 @admin_bp.route('/unclaim-user/<discord_id>', methods=['POST'])
 def unclaim_user_admin(discord_id):
     discord_id = str(discord_id).strip()
+    revoke = revoke_verification_roles(discord_id)
+
     conn = get_db_connection()
     try:
         conn.execute("DELETE FROM user_mappings WHERE discord_id = ?", (discord_id,))
@@ -2486,7 +2536,59 @@ def unclaim_user_admin(discord_id):
     finally:
         conn.close()
     delete_verification_status(discord_id)
-    return redirect('/admin/verifications')
+
+    try:
+        log_activity_event(
+            "verification",
+            f"[Admin unclaim] Discord ID {discord_id} unlinked; roles: {revoke.get('detail', '')}",
+            "",
+        )
+    except Exception:
+        pass
+
+    if revoke.get("ok"):
+        msg = f"Unclaimed Discord ID {discord_id}. {revoke.get('detail', '')}".strip()
+        msg_type = "success"
+    else:
+        msg = (
+            f"Unclaimed Discord ID {discord_id}, but Discord roles were not revoked: "
+            f"{revoke.get('detail', 'unknown error')}"
+        )
+        msg_type = "warning"
+    return redirect('/admin/verifications?msg=' + quote_plus(msg) + '&msg_type=' + msg_type)
+
+@admin_bp.route('/revoke-role/<discord_id>', methods=['POST'])
+def revoke_role_admin(discord_id):
+    """Remove the verified + tier roles but keep the TikTok link (an "unrole")."""
+    discord_id = str(discord_id).strip()
+    revoke = revoke_verification_roles(discord_id)
+
+    if revoke.get("ok"):
+        try:
+            info = check_discord_verification(discord_id, use_api=False)
+            info["has_role"] = False
+            info["error"] = ""
+            save_verification_status(discord_id, **info)
+        except Exception as e:
+            print(f"[Verification] Failed to save revoke status for {discord_id}: {e}")
+        try:
+            log_activity_event(
+                "verification",
+                f"[Admin revoke] Roles removed for Discord ID {discord_id}; roles: {revoke.get('detail', '')}",
+                "",
+            )
+        except Exception:
+            pass
+        msg = f"Roles revoked for Discord ID {discord_id}. {revoke.get('detail', '')}".strip()
+        msg_type = "success"
+    else:
+        msg = (
+            f"Could not revoke roles for Discord ID {discord_id}: "
+            f"{revoke.get('detail', 'unknown error')}"
+        )
+        msg_type = "warning"
+    return redirect('/admin/verifications?msg=' + quote_plus(msg) + '&msg_type=' + msg_type)
+
 
 @admin_bp.route('/clear-activity-logs', methods=['POST'])
 def clear_activity():

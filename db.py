@@ -1373,6 +1373,10 @@ def init_db():
             "role_tier_last_reset": now_str,
             "non_priority_mode": "slow",  # slow | off (for non-prioritized active hosts)
             "non_priority_slow_seconds": "300",
+            # Coin-only verification: grant the verified role when a claimed
+            # TikTok account already has at least N coins (no proof required).
+            "coin_only_verification_enabled": "0",
+            "coin_only_min_coins": "100",
         }
         for key, value in defaults.items():
             conn.execute(
