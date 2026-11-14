@@ -42,7 +42,8 @@ from db import (
     mark_tier_reset_done,
     suspend_open_live_sessions,
     save_verification_status,
-    delete_verification_status
+    delete_verification_status,
+    record_verification_method
 )
 from utils import get_schedule_info, load_summary_config
 from server import keep_alive
@@ -1189,6 +1190,15 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
                 )
                 return
 
+            try:
+                record_verification_method(
+                    interaction.user.id,
+                    "coin_only",
+                    f"{int(total_coins or 0):,} coins (min {coin_cfg['min_coins']:,})"
+                )
+            except Exception as e:
+                print(f"[Verification] Failed to record coin-only method: {e}")
+
             log_activity_event(
                 "verification",
                 f"[Coin-only] {interaction.user} (ID {interaction.user.id}) linked @{u_clean} "
@@ -1429,6 +1439,10 @@ class BioVerificationView(discord.ui.View):
         if is_valid:
             bind_user_mapping(interaction.user.id, tiktok_user)
             cancel_pending_verification(interaction.user.id)
+            try:
+                record_verification_method(interaction.user.id, "bio", f"code: {code}")
+            except Exception as e:
+                print(f"[Verification] Failed to record bio method: {e}")
             _, total_coins, _ = is_tiktok_user_in_db(tiktok_user)
             log_activity_event(
                 "verification",
@@ -1740,6 +1754,18 @@ async def handle_live_comment_verification(tiktok_user: str, comment_text: str, 
     # Link the TikTok account to the Discord user
     bind_user_mapping(discord_id, u_clean)
     cancel_pending_verification(discord_id)
+
+    try:
+        if greeting_used:
+            record_verification_method(
+                discord_id, "live_greeting", f'message: "{comment_text}"'
+            )
+        else:
+            record_verification_method(
+                discord_id, "live_code", f"code: {(pending or {}).get('code') or ''}"
+            )
+    except Exception as e:
+        print(f"[Verification] Failed to record live method for {discord_id}: {e}")
 
     if greeting_used:
         log_activity_event(

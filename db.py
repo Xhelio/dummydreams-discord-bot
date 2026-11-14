@@ -962,7 +962,10 @@ def init_db():
                 has_role INTEGER,
                 role_name TEXT,
                 checked_at TEXT,
-                error TEXT
+                error TEXT,
+                method TEXT,
+                detail TEXT,
+                verified_at TEXT
             )
             """,
             """
@@ -1081,7 +1084,7 @@ def init_db():
              "INSERT OR REPLACE INTO user_mappings (discord_id, tiktok_user) "
              "SELECT CAST(discord_id AS TEXT), tiktok_user FROM user_mappings_old_did"),
             ("discord_verification_status",
-             "CREATE TABLE discord_verification_status (discord_id TEXT PRIMARY KEY, discord_name TEXT, discord_handle TEXT, guild_name TEXT, has_role INTEGER, role_name TEXT, checked_at TEXT, error TEXT)",
+             "CREATE TABLE discord_verification_status (discord_id TEXT PRIMARY KEY, discord_name TEXT, discord_handle TEXT, guild_name TEXT, has_role INTEGER, role_name TEXT, checked_at TEXT, error TEXT, method TEXT, detail TEXT, verified_at TEXT)",
              "INSERT OR REPLACE INTO discord_verification_status "
              "(discord_id, discord_name, discord_handle, guild_name, has_role, role_name, checked_at, error) "
              "SELECT CAST(discord_id AS TEXT), discord_name, discord_handle, guild_name, has_role, role_name, checked_at, error "
@@ -1177,6 +1180,22 @@ def init_db():
         ]:
             try:
                 conn.execute(f"ALTER TABLE live_sessions ADD COLUMN {col} {dtype}")
+                conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+
+        # Migrasi discord_verification_status: metode grant, detail (koin/kode/
+        # pesan yang terdeteksi), dan waktu role verified diberikan.
+        for col, dtype in [
+            ("method", "TEXT"),
+            ("detail", "TEXT"),
+            ("verified_at", "TEXT"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE discord_verification_status ADD COLUMN {col} {dtype}")
                 conn.commit()
             except Exception:
                 try:
@@ -2823,6 +2842,40 @@ def save_verification_status(discord_id, discord_name: str = "", discord_handle:
         conn.close()
 
 
+def record_verification_method(discord_id, method: str, detail: str = "",
+                               verified_at: str = None) -> bool:
+    """Catat bagaimana seorang member memperoleh role verified.
+
+    ``method``: coin_only | bio | live_code | live_greeting | manual
+    ``detail``: koin saat grant, kode bio, atau pesan live yang terdeteksi.
+    Baris lain (has_role, checked_at, dst.) tidak diubah.
+    """
+    did = _normalize_discord_id(discord_id)
+    if not did:
+        return False
+    if not verified_at:
+        wib = pytz.timezone('Asia/Jakarta')
+        verified_at = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
+    conn = get_db_connection()
+    try:
+        conn.execute("""
+            INSERT INTO discord_verification_status
+                (discord_id, method, detail, verified_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(discord_id) DO UPDATE SET
+                method = excluded.method,
+                detail = excluded.detail,
+                verified_at = excluded.verified_at
+        """, (did, method or "", detail or "", verified_at))
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"[DB Error] Failed to record verification method for {discord_id}: {e}")
+        return False
+    finally:
+        conn.close()
+
+
 def get_all_verification_status() -> dict:
     """Mengambil status verifikasi role terakhir, dipetakan per discord_id (string)."""
     conn = get_db_connection()
@@ -2830,7 +2883,7 @@ def get_all_verification_status() -> dict:
         cur = conn.cursor()
         rows = cur.execute("""
             SELECT discord_id, discord_name, discord_handle, guild_name,
-                   has_role, role_name, checked_at, error
+                   has_role, role_name, checked_at, error, method, detail, verified_at
             FROM discord_verification_status
         """).fetchall()
         out = {}

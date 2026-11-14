@@ -26,6 +26,7 @@ from db import (
     get_all_verification_status,
     save_verification_status,
     delete_verification_status,
+    record_verification_method,
     log_activity_event,
     get_analytics_summary,
     get_analytics_sessions,
@@ -2163,7 +2164,7 @@ def revoke_verification_roles(discord_id) -> dict:
         return {"ok": False, "detail": f"Revoke failed: {e}"}
 
 
-def _save_grant_result(discord_id, result: dict):
+def _save_grant_result(discord_id, result: dict, record_method: bool = False):
     """Save status verifikasi berdasarkan hasil pemberian role."""
     discord_id = str(discord_id).strip()
     status = result.get("status")
@@ -2179,6 +2180,11 @@ def _save_grant_result(discord_id, result: dict):
         save_verification_status(discord_id, **info)
     except Exception as e:
         print(f"[Verification] Failed to save grant status for {discord_id}: {e}")
+    if record_method and status == "granted":
+        try:
+            record_verification_method(discord_id, "manual", "granted from the admin panel")
+        except Exception as e:
+            print(f"[Verification] Failed to record manual method for {discord_id}: {e}")
     return info
 
 
@@ -2263,6 +2269,9 @@ def view_verifications():
             <p style="color: #94a3b8; font-size: 0.85rem; margin-bottom: 12px;">
                 Discord accounts successfully linked to a TikTok account. Each account can only be claimed by one user.
                 Kolom <strong>Role Status</strong> mengecek langsung ke Discord apakah member benar-benar masih punya role verifikasi.
+                Kolom <strong>Method</strong> menampilkan cara role diperoleh, <strong>Keterangan</strong> berisi detail
+                (jumlah koin saat coin-only, kode bio, atau pesan live yang terdeteksi), dan <strong>Verified At</strong>
+                adalah waktu role verified diberikan.
             </p>
             <form action="/admin/reverify-all" method="POST" onsubmit="return confirm('Verifikasi ulang role semua akun terverifikasi?');" style="margin-bottom: 12px; display:inline-block; margin-right:8px;">
                 <button type="submit" class="btn-save" style="background:#0e7490;">🔁 Re-verify All</button>
@@ -2272,12 +2281,16 @@ def view_verifications():
             </form>
             <div class="table-scroll">
             <table>
+                {% set method_labels = {'coin_only':'💰 Coin-only','bio':'📝 Bio','live_code':'🔴 Live Code','live_greeting':'💬 Live Greeting','manual':'🛡️ Manual'} %}
                 <tr>
                     <th>Discord ID</th>
                     <th>Discord Name</th>
                     <th>TikTok Username</th>
                     <th>Display Name</th>
                     <th>Total Coins</th>
+                    <th>Method</th>
+                    <th>Keterangan</th>
+                    <th>Verified At</th>
                     <th>Role Status</th>
                     <th>Action</th>
                 </tr>
@@ -2296,6 +2309,27 @@ def view_verifications():
                     <td><strong>@{{ u[1] }}</strong></td>
                     <td>{{ u[3] or '-' }}</td>
                     <td><span class="badge">{{ u[2] }} c</span></td>
+                    <td>
+                        {% if st and st[8] %}
+                        <span class="badge" style="background:#1d4ed8;">{{ method_labels.get(st[8], st[8]) }}</span>
+                        {% else %}
+                        <span class="muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td style="max-width: 260px;">
+                        {% if st and st[9] %}
+                        <span style="font-size: 0.8rem; word-break: break-word;">{{ st[9] }}</span>
+                        {% else %}
+                        <span class="muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td style="white-space: nowrap;">
+                        {% if st and st[10] %}
+                        <span style="font-size: 0.78rem;">{{ st[10] }} WIB</span>
+                        {% else %}
+                        <span class="muted">-</span>
+                        {% endif %}
+                    </td>
                     <td>
                         {% if not st %}
                         <span class="badge" style="background:#475569;">Not checked yet</span>
@@ -2329,7 +2363,7 @@ def view_verifications():
                     </td>
                 </tr>
                 {% else %}
-                <tr><td colspan="7" style="text-align:center; color:#64748b;">No verified accounts yet.</td></tr>
+                <tr><td colspan="10" style="text-align:center; color:#64748b;">No verified accounts yet.</td></tr>
                 {% endfor %}
             </table>
             </div>
@@ -2401,7 +2435,7 @@ def reverify_user(discord_id):
 def grant_role(discord_id):
     discord_id = str(discord_id).strip()
     result = grant_verified_role(discord_id)
-    _save_grant_result(discord_id, result)
+    _save_grant_result(discord_id, result, record_method=True)
     name = result.get("discord_name") or discord_id
     role_name = result.get("role_name") or "verifikasi"
     status = result.get("status")
