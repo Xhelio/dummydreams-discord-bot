@@ -2,6 +2,7 @@ import os
 import json
 import re
 import time
+import threading
 try:
     import libsql_experimental as libsql
     HAS_LIBSQL = True
@@ -22,6 +23,19 @@ from datetime import datetime, timedelta
 import pytz
 
 _DB_HEALTH_CACHE = {"ok": True, "at": 0.0}
+
+# Short-lived cache for bot_settings. Hot paths (gift/comment handlers) read
+# several flags per event; without this each read opened a new Turso connection
+# and blocked the Discord event loop long enough to time out interactions.
+_SETTINGS_CACHE = {}
+_SETTINGS_CACHE_TTL = 15.0
+_SETTINGS_CACHE_LOCK = threading.Lock()
+
+
+def invalidate_settings_cache():
+    """Drop every cached setting (used after bulk admin saves)."""
+    with _SETTINGS_CACHE_LOCK:
+        _SETTINGS_CACHE.clear()
 
 
 def get_database_backend() -> str:
@@ -2579,14 +2593,28 @@ def get_discord_id_from_tiktok(tiktok_user: str):
 import random
 
 def get_setting(key: str, default: str = None) -> str:
-    """Mengambil nilai setting dari tabel bot_settings."""
+    """Mengambil nilai setting dari tabel bot_settings.
+
+    Nilai di-cache sebentar (15 detik) supaya jalur panas seperti event gift
+    tidak membuka koneksi Turso berkali-kali hanya untuk membaca feature flag.
+    """
+    now = time.time()
+    with _SETTINGS_CACHE_LOCK:
+        cached = _SETTINGS_CACHE.get(key)
+        if cached is not None and cached[1] > now:
+            return cached[0] if cached[0] is not None else default
+
     conn = get_db_connection()
     try:
         cur = conn.cursor()
         row = cur.execute("SELECT value FROM bot_settings WHERE key = ?", (key,)).fetchone()
-        return row[0] if row else default
+        value = row[0] if row else None
     finally:
         conn.close()
+
+    with _SETTINGS_CACHE_LOCK:
+        _SETTINGS_CACHE[key] = (value, now + _SETTINGS_CACHE_TTL)
+    return value if value is not None else default
 
 def set_setting(key: str, value: str):
     """Menyimpan atau memperbarui nilai setting ke tabel bot_settings."""
@@ -2599,6 +2627,8 @@ def set_setting(key: str, value: str):
         conn.commit()
     finally:
         conn.close()
+    with _SETTINGS_CACHE_LOCK:
+        _SETTINGS_CACHE.pop(key, None)
 
 
 def get_bool_setting(key: str, default: bool = True) -> bool:
@@ -3011,6 +3041,30 @@ def get_pending_verification(discord_id) -> dict:
         return None
     finally:
         conn.close()
+
+
+def get_pending_live_usernames() -> list:
+    """Return ``(tiktok_user, expires_at)`` pairs for live pending requests.
+
+    Used at startup so the in-memory guard in ``main.py`` still knows about
+    requests that survived a restart/redeploy.
+    """
+    wib = pytz.timezone('Asia/Jakarta')
+    now_str = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        rows = cur.execute(
+            """
+            SELECT LOWER(tiktok_user), expires_at FROM pending_verifications
+            WHERE method IN ('live_greeting', 'live_code') AND expires_at >= ?
+            """,
+            (now_str,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [(row[0], row[1]) for row in rows if row and row[0]]
+
 
 def find_pending_live_verification(tiktok_user: str, comment_text: str) -> dict:
     """

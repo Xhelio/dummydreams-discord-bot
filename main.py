@@ -1,8 +1,13 @@
 import asyncio
+import concurrent.futures
 import os
 import json
 import re
 import sys
+import time
+from datetime import datetime
+
+import pytz
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -29,6 +34,7 @@ from db import (
     get_pending_verification,
     find_pending_live_verification,
     find_pending_live_greeting,
+    get_pending_live_usernames,
     cancel_pending_verification,
     log_activity_event,
     get_bool_setting,
@@ -360,11 +366,11 @@ async def auto_assign_role(tiktok_user: str, total_coins: int):
     if not is_feature_enabled("role_tiers"):
         return
 
-    discord_id = get_discord_id_from_tiktok(tiktok_user)
+    discord_id = await asyncio.to_thread(get_discord_id_from_tiktok, tiktok_user)
     if not discord_id:
         return
 
-    tier_cfg = get_tier_settings()
+    tier_cfg = await asyncio.to_thread(get_tier_settings)
     groups = []
     if tier_cfg["enabled"]:
         groups.append("reset")
@@ -374,6 +380,12 @@ async def auto_assign_role(tiktok_user: str, total_coins: int):
         return
 
     stacked = str(tier_cfg.get("mode", "replace")).lower() == "stacked"
+
+    # Fetch each tier list once instead of per guild (each read opens a new
+    # Turso connection; this runs after every gift event).
+    tiers_by_group = {}
+    for group_key in groups:
+        tiers_by_group[group_key] = await asyncio.to_thread(get_role_tiers, group_key)
 
     for guild in bot.guilds:
         try:
@@ -386,7 +398,7 @@ async def auto_assign_role(tiktok_user: str, total_coins: int):
         added_tiers = []
 
         for group_key in groups:
-            tiers = get_role_tiers(group_key)
+            tiers = tiers_by_group.get(group_key, [])
             resolved = []
             for tier in tiers:
                 try:
@@ -1003,6 +1015,44 @@ def build_coin_only_success_embed(tiktok_user: str, total_coins: int, min_coins:
     )
 
 
+# In-memory guard: usernames that currently have a pending live verification.
+# Without it every live-chat comment opened a Turso connection just to discover
+# that nobody was verifying, which could starve the event loop.
+_LIVE_PENDING_CACHE = {}  # tiktok username -> expiry epoch seconds
+_LIVE_PENDING_TTL = 15 * 60
+
+
+def _cache_live_pending(tiktok_user: str, expires_at: str = None):
+    u = str(tiktok_user or "").lower().lstrip("@")
+    if not u:
+        return
+    expires_epoch = time.time() + _LIVE_PENDING_TTL
+    if expires_at:
+        try:
+            wib = pytz.timezone("Asia/Jakarta")
+            expires_epoch = datetime.strptime(
+                str(expires_at), "%Y-%m-%d %H:%M:%S"
+            ).replace(tzinfo=wib).timestamp()
+        except Exception:
+            pass
+    _LIVE_PENDING_CACHE[u] = expires_epoch
+
+
+def _drop_live_pending(tiktok_user: str):
+    _LIVE_PENDING_CACHE.pop(str(tiktok_user or "").lower().lstrip("@"), None)
+
+
+def _has_live_pending(tiktok_user: str) -> bool:
+    u = str(tiktok_user or "").lower().lstrip("@")
+    expires = _LIVE_PENDING_CACHE.get(u)
+    if not expires:
+        return False
+    if expires < time.time():
+        _LIVE_PENDING_CACHE.pop(u, None)
+        return False
+    return True
+
+
 WELCOME_GREETINGS = {
     "hi", "hii", "hiii", "hiiii", "hey", "heyy", "hello", "helo", "hallo",
     "yo", "greetings", "welcome",
@@ -1168,9 +1218,10 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
         )
 
         # 1. Discord user already linked?
-        existing_tiktok = get_user_mapping(interaction.user.id)
+        existing_tiktok = await asyncio.to_thread(get_user_mapping, interaction.user.id)
         if existing_tiktok:
-            log_activity_event(
+            await asyncio.to_thread(
+                log_activity_event,
                 "verification",
                 f"[VERIFY ATTEMPT] {actor} blocked: Discord account already linked to @{existing_tiktok}.",
                 u_clean
@@ -1183,9 +1234,10 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
             return
 
         # 2. TikTok account claimed by someone else?
-        is_claimed, claimed_discord_id = is_user_already_claimed(u_clean)
+        is_claimed, claimed_discord_id = await asyncio.to_thread(is_user_already_claimed, u_clean)
         if is_claimed:
-            log_activity_event(
+            await asyncio.to_thread(
+                log_activity_event,
                 "verification",
                 f"[VERIFY ATTEMPT] {actor} blocked: @{u_clean} is already claimed by Discord ID {claimed_discord_id}.",
                 u_clean
@@ -1199,13 +1251,14 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
             return
 
         # 3. Look up the account (may not exist yet / may have less than 10 coins)
-        exists, total_coins, display_name = is_tiktok_user_in_db(u_clean)
+        exists, total_coins, display_name = await asyncio.to_thread(is_tiktok_user_in_db, u_clean)
 
         # 3b. Coin-only mode: grant access without ownership proof once the
         # claimed account has reached the admin-configured coin threshold.
         coin_cfg = get_coin_only_verification_config()
         if coin_cfg["enabled"] and int(total_coins or 0) >= coin_cfg["min_coins"]:
-            if not bind_user_mapping(interaction.user.id, u_clean):
+            linked = await asyncio.to_thread(bind_user_mapping, interaction.user.id, u_clean)
+            if not linked:
                 await interaction.followup.send(
                     "❌ I could not link your account right now. Please try again.",
                     ephemeral=True
@@ -1213,7 +1266,8 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
                 return
 
             try:
-                record_verification_method(
+                await asyncio.to_thread(
+                    record_verification_method,
                     interaction.user.id,
                     "coin_only",
                     f"{int(total_coins or 0):,} coins (min {coin_cfg['min_coins']:,})"
@@ -1221,7 +1275,8 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
             except Exception as e:
                 print(f"[Verification] Failed to record coin-only method: {e}")
 
-            log_activity_event(
+            await asyncio.to_thread(
+                log_activity_event,
                 "verification",
                 f"[Coin-only] {interaction.user} (ID {interaction.user.id}) linked @{u_clean} "
                 f"with {total_coins} coins (no proof, threshold {coin_cfg['min_coins']}).",
@@ -1231,7 +1286,8 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
                 interaction.user.id, u_clean, total_coins
             )
             try:
-                save_verification_status(
+                await asyncio.to_thread(
+                    save_verification_status,
                     interaction.user.id,
                     discord_name=str(interaction.user),
                     discord_handle=getattr(interaction.user, "name", "") or "",
@@ -1277,7 +1333,8 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
             u_clean
         )
 
-        embed, view = build_verification_start(
+        embed, view = await asyncio.to_thread(
+            build_verification_start,
             interaction.user.id, u_clean, total_coins, display_name
         )
         try:
@@ -1321,6 +1378,7 @@ class VerificationMethodChoiceView(discord.ui.View):
     async def via_live(self, interaction: discord.Interaction, button: discord.ui.Button):
         # Live verification uses a normal welcome message, not a secret code.
         create_pending_verification(interaction.user.id, self.tiktok_user, method='live_greeting')
+        _cache_live_pending(self.tiktok_user)
         log_activity_event(
             "verification",
             f"[VERIFY METHOD] {interaction.user} (ID {interaction.user.id}) chose live greeting for @{self.tiktok_user}.",
@@ -1349,6 +1407,7 @@ class VerificationMethodChoiceView(discord.ui.View):
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         cancel_pending_verification(interaction.user.id)
+        _drop_live_pending(self.tiktok_user)
         await interaction.response.edit_message(content="❌ Verification cancelled.", embed=None, view=None)
 
 class LowActivityVerificationView(discord.ui.View):
@@ -1379,6 +1438,7 @@ class LowActivityVerificationView(discord.ui.View):
             return
 
         create_pending_verification(interaction.user.id, self.tiktok_user, method='live_greeting')
+        _cache_live_pending(self.tiktok_user)
         await interaction.response.edit_message(
             embed=build_live_greeting_embed(self.tiktok_user, live_hosts),
             view=LiveGreetingVerificationView(self.tiktok_user, self.total_coins)
@@ -1400,6 +1460,7 @@ class LowActivityVerificationView(discord.ui.View):
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         cancel_pending_verification(interaction.user.id)
+        _drop_live_pending(self.tiktok_user)
         await interaction.response.edit_message(content="❌ Verification cancelled.", embed=None, view=None)
 
 def build_live_greeting_embed(tiktok_user: str, live_hosts: list) -> discord.Embed:
@@ -1470,7 +1531,7 @@ class BioVerificationView(discord.ui.View):
             )
             return
 
-        tiktok_user, code = self._resolve_pending(interaction.user.id)
+        tiktok_user, code = await asyncio.to_thread(self._resolve_pending, interaction.user.id)
         if not tiktok_user:
             await interaction.edit_original_response(
                 content="⌛ Your verification session expired. Open the verification panel and start again.",
@@ -1482,17 +1543,21 @@ class BioVerificationView(discord.ui.View):
         is_valid, current_bio = await async_verify_tiktok_bio(tiktok_user, code)
 
         if is_valid:
-            bind_user_mapping(interaction.user.id, tiktok_user)
-            cancel_pending_verification(interaction.user.id)
+            await asyncio.to_thread(bind_user_mapping, interaction.user.id, tiktok_user)
+            await asyncio.to_thread(cancel_pending_verification, interaction.user.id)
+            _drop_live_pending(tiktok_user)
             try:
-                record_verification_method(interaction.user.id, "bio", f"code: {code}")
+                await asyncio.to_thread(
+                    record_verification_method, interaction.user.id, "bio", f"code: {code}"
+                )
             except Exception as e:
                 print(f"[Verification] Failed to record bio method: {e}")
-            _, total_coins, _ = is_tiktok_user_in_db(tiktok_user)
-            log_activity_event(
+            _, total_coins, _ = await asyncio.to_thread(is_tiktok_user_in_db, tiktok_user)
+            await asyncio.to_thread(
+                log_activity_event,
                 "verification",
                 f"[BIO] {interaction.user} (ID {interaction.user.id}) verified @{tiktok_user} via TikTok bio.",
-                tiktok_user
+                tiktok_user,
             )
 
             # Grant verified/tier roles across all guilds (works in DM and in-server).
@@ -1517,11 +1582,12 @@ class BioVerificationView(discord.ui.View):
             )
             await interaction.edit_original_response(embed=embed, view=None)
         else:
-            log_activity_event(
+            await asyncio.to_thread(
+                log_activity_event,
                 "verification",
                 f"[BIO] {interaction.user} (ID {interaction.user.id}) failed bio verification for "
                 f"@{tiktok_user}: code `{code}` not found in the profile bio.",
-                tiktok_user
+                tiktok_user,
             )
             wib = pytz.timezone("Asia/Jakarta")
             checked_at = datetime.now(wib).strftime("%H:%M:%S WIB")
@@ -1649,6 +1715,7 @@ class BioVerificationView(discord.ui.View):
         except Exception:
             return
         cancel_pending_verification(interaction.user.id)
+        _drop_live_pending(self.tiktok_user)
         await interaction.edit_original_response(content="❌ Verification cancelled.", embed=None, view=None)
 
 class LiveVerificationView(discord.ui.View):
@@ -1709,6 +1776,7 @@ class LiveVerificationView(discord.ui.View):
     @discord.ui.button(label="Switch to Bio", style=discord.ButtonStyle.secondary, emoji="📝")
     async def switch_to_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.code = create_pending_verification(interaction.user.id, self.tiktok_user, method='bio')
+        _drop_live_pending(self.tiktok_user)
         await interaction.response.edit_message(
             embed=build_bio_verification_embed(self.tiktok_user, self.code),
             view=BioVerificationView(self.tiktok_user, self.code, self.total_coins)
@@ -1717,6 +1785,7 @@ class LiveVerificationView(discord.ui.View):
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         cancel_pending_verification(interaction.user.id)
+        _drop_live_pending(self.tiktok_user)
         await interaction.response.edit_message(content="❌ Verification cancelled.", embed=None, view=None)
 
 class LiveGreetingVerificationView(discord.ui.View):
@@ -1777,6 +1846,7 @@ class LiveGreetingVerificationView(discord.ui.View):
     @discord.ui.button(label="Switch to Bio", style=discord.ButtonStyle.secondary, emoji="📝")
     async def switch_to_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
         code = create_pending_verification(interaction.user.id, self.tiktok_user, method='bio')
+        _drop_live_pending(self.tiktok_user)
         await interaction.response.edit_message(
             embed=build_bio_verification_embed(self.tiktok_user, code),
             view=BioVerificationView(self.tiktok_user, code, self.total_coins, low_activity=True)
@@ -1785,6 +1855,7 @@ class LiveGreetingVerificationView(discord.ui.View):
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         cancel_pending_verification(interaction.user.id)
+        _drop_live_pending(self.tiktok_user)
         await interaction.response.edit_message(content="❌ Verification cancelled.", embed=None, view=None)
 
 async def handle_live_comment_verification(tiktok_user: str, comment_text: str, target_host: str):
@@ -1793,57 +1864,75 @@ async def handle_live_comment_verification(tiktok_user: str, comment_text: str, 
     Greeting messages (``hello``, ``hiii``, ...) are the normal path for both the
     standard and the low-activity flows. Matching a legacy verification code is
     still supported so old pending requests finish normally.
+
+    All database work runs in a worker thread: this callback fires for every
+    live-chat comment, and blocking Turso reads here used to freeze the Discord
+    event loop (interactions then failed with "did not respond").
     """
+    u_clean = tiktok_user.lower().lstrip("@")
+
+    # Fast path: comments are frequent, so skip the database entirely unless
+    # this account actually has a live verification request in flight.
+    if not _has_live_pending(u_clean):
+        return
+
     if not is_feature_enabled("verification"):
         return
-    pending = find_pending_live_verification(tiktok_user, comment_text)
+
+    pending = await asyncio.to_thread(
+        find_pending_live_verification, tiktok_user, comment_text
+    )
     greeting_used = False
 
     if not pending and is_welcome_message(comment_text):
-        pending = find_pending_live_greeting(tiktok_user)
+        pending = await asyncio.to_thread(find_pending_live_greeting, tiktok_user)
         greeting_used = bool(pending)
 
     if not pending:
         return
 
     discord_id = pending['discord_id']
-    u_clean = tiktok_user.lower()
 
     # Link the TikTok account to the Discord user
-    bind_user_mapping(discord_id, u_clean)
-    cancel_pending_verification(discord_id)
+    await asyncio.to_thread(bind_user_mapping, discord_id, u_clean)
+    await asyncio.to_thread(cancel_pending_verification, discord_id)
+    _drop_live_pending(u_clean)
 
     try:
         if greeting_used:
-            record_verification_method(
+            await asyncio.to_thread(
+                record_verification_method,
                 discord_id, "live_greeting", f'message: "{comment_text}"'
             )
         else:
-            record_verification_method(
+            await asyncio.to_thread(
+                record_verification_method,
                 discord_id, "live_code", f"code: {(pending or {}).get('code') or ''}"
             )
     except Exception as e:
         print(f"[Verification] Failed to record live method for {discord_id}: {e}")
 
     if greeting_used:
-        log_activity_event(
+        await asyncio.to_thread(
+            log_activity_event,
             "verification",
             f"[LIVE GREETING] Discord ID {discord_id} verified @{u_clean} via welcome message "
             f"\"{comment_text}\" in @{target_host}'s live.",
-            target_host
+            target_host,
         )
         print(f"[Verification] Live greeting verified for @{u_clean} (Discord ID: {discord_id})")
     else:
-        log_activity_event(
+        await asyncio.to_thread(
+            log_activity_event,
             "verification",
             f"[LIVE CODE] Discord ID {discord_id} verified @{u_clean} via live chat code "
             f"in @{target_host}'s live.",
-            target_host
+            target_host,
         )
         print(f"[Verification] Live comment verified for @{u_clean} (Discord ID: {discord_id})")
 
     # Get the coin balance
-    _, total_coins, _ = is_tiktok_user_in_db(u_clean)
+    _, total_coins, _ = await asyncio.to_thread(is_tiktok_user_in_db, u_clean)
 
     # Grant the verified role in every guild the member belongs to (fetch if not cached)
     try:
@@ -2298,35 +2387,50 @@ async def help_command(ctx):
 
 @bot.tree.command(name="help", description="Show all available bot commands")
 async def slash_help(interaction: discord.Interaction):
-    await interaction.response.send_message(embed=build_help_embed(interaction.user), ephemeral=True)
+    # Defer first: build_help_embed reads settings (Turso round-trips) and must
+    # not eat into Discord's 3-second acknowledgement window.
+    await interaction.response.defer(ephemeral=True)
+    embed = await asyncio.to_thread(build_help_embed, interaction.user)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="mycoins", description="Show the coin balance of your linked TikTok account")
 async def slash_mycoins(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    conn = get_db_connection()
-    try:
-        res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (str(interaction.user.id),))
-        mapping = res.fetchone()
-        if not mapping:
-            await interaction.followup.send("❌ Your account is not verified yet. Use the button in the verification channel.", ephemeral=True)
-            return
-        tt_user = mapping[0]
-        res = conn.execute("SELECT display_name, total_coins FROM tiktok_gifts WHERE LOWER(tiktok_user) = ?", (tt_user.lower(),))
-        row = res.fetchone()
-        if not row:
-            await interaction.followup.send(f"ℹ️ TikTok account **@{tt_user}** is linked, but no coin data was found yet.", ephemeral=True)
-            return
-        display_name, total_coins = row
-        msg = (
-            f"👤 **Account Info**\n"
-            f"• Discord: {interaction.user.mention}\n"
-            f"• TikTok: **@{tt_user}** ({display_name or 'No name'})\n"
-            f"• **Total Coins: {int(total_coins or 0):,} c**"
-        )
-        await interaction.followup.send(msg, ephemeral=True)
-    finally:
-        conn.close()
+
+    def _fetch_mycoins():
+        conn = get_db_connection()
+        try:
+            mapping = conn.execute(
+                "SELECT tiktok_user FROM user_mappings WHERE discord_id = ?",
+                (str(interaction.user.id),)
+            ).fetchone()
+            if not mapping:
+                return None, None, None
+            tt_user = mapping[0]
+            row = conn.execute(
+                "SELECT display_name, total_coins FROM tiktok_gifts WHERE LOWER(tiktok_user) = ?",
+                (tt_user.lower(),)
+            ).fetchone()
+            return tt_user, row, None
+        finally:
+            conn.close()
+
+    tt_user, row, _ = await asyncio.to_thread(_fetch_mycoins)
+    if not tt_user:
+        await interaction.followup.send("❌ Your account is not verified yet. Use the button in the verification channel.", ephemeral=True)
+        return
+    if not row:
+        await interaction.followup.send(f"ℹ️ TikTok account **@{tt_user}** is linked, but no coin data was found yet.", ephemeral=True)
+        return
+    display_name, total_coins = row
+    msg = (
+        f"👤 **Account Info**\n"
+        f"• Discord: {interaction.user.mention}\n"
+        f"• TikTok: **@{tt_user}** ({display_name or 'No name'})\n"
+        f"• **Total Coins: {int(total_coins or 0):,} c**"
+    )
+    await interaction.followup.send(msg, ephemeral=True)
 
 
 @bot.tree.command(name="coins", description="Show a member's coins and their last recorded gift")
@@ -2340,48 +2444,61 @@ async def slash_coins(interaction: discord.Interaction, member: discord.Member =
     if target.id != interaction.user.id and not is_admin_member(interaction.user):
         await interaction.followup.send("🛡️ Only administrators can check another member's coins.", ephemeral=True)
         return
-    await interaction.followup.send(embed=build_member_coin_embed(target), ephemeral=True)
+    embed = await asyncio.to_thread(build_member_coin_embed, target)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="myhistory", description="Show your 5 most recent gift transactions")
 async def slash_myhistory(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    conn = get_db_connection()
-    try:
-        res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (str(interaction.user.id),))
-        mapping = res.fetchone()
-        if not mapping:
-            await interaction.followup.send("❌ Your account is not verified yet. Use the button in the verification channel.", ephemeral=True)
-            return
-        tt_user = mapping[0]
-        res = conn.execute("""
-            SELECT target_username, gift_name, gift_count, coins, log_datetime
-            FROM gift_logs
-            WHERE LOWER(viewer_username) = ?
-            ORDER BY log_id DESC LIMIT 5
-        """, (tt_user.lower(),))
-        rows = res.fetchall()
-        if not rows:
-            await interaction.followup.send(f"❌ No gift history found for **@{tt_user}** yet.", ephemeral=True)
-            return
-        msg = f"📜 **Last 5 Gift Transactions (@{tt_user})**\n\n"
-        for target, gift, count, coins, dt in rows:
-            msg += f"• `{dt}`: **{gift}** x{count} ({coins} c) on @{target}\n"
-        await interaction.followup.send(msg, ephemeral=True)
-    finally:
-        conn.close()
+
+    def _fetch_history():
+        conn = get_db_connection()
+        try:
+            mapping = conn.execute(
+                "SELECT tiktok_user FROM user_mappings WHERE discord_id = ?",
+                (str(interaction.user.id),)
+            ).fetchone()
+            if not mapping:
+                return None, None
+            tt_user = mapping[0]
+            rows = conn.execute("""
+                SELECT target_username, gift_name, gift_count, coins, log_datetime
+                FROM gift_logs
+                WHERE LOWER(viewer_username) = ?
+                ORDER BY log_id DESC LIMIT 5
+            """, (tt_user.lower(),)).fetchall()
+            return tt_user, rows
+        finally:
+            conn.close()
+
+    tt_user, rows = await asyncio.to_thread(_fetch_history)
+    if not tt_user:
+        await interaction.followup.send("❌ Your account is not verified yet. Use the button in the verification channel.", ephemeral=True)
+        return
+    if not rows:
+        await interaction.followup.send(f"❌ No gift history found for **@{tt_user}** yet.", ephemeral=True)
+        return
+    msg = f"📜 **Last 5 Gift Transactions (@{tt_user})**\n\n"
+    for target, gift, count, coins, dt in rows:
+        msg += f"• `{dt}`: **{gift}** x{count} ({coins} c) on @{target}\n"
+    await interaction.followup.send(msg, ephemeral=True)
 
 
 @bot.tree.command(name="topsupporter", description="Show the all-time top supporters leaderboard")
 async def slash_topsupporter(interaction: discord.Interaction):
     await interaction.response.defer()
-    conn = get_db_connection()
-    try:
-        rows = conn.execute(
-            "SELECT tiktok_user, display_name, total_coins FROM tiktok_gifts ORDER BY total_coins DESC LIMIT 10"
-        ).fetchall()
-    finally:
-        conn.close()
+
+    def _fetch_top():
+        conn = get_db_connection()
+        try:
+            return conn.execute(
+                "SELECT tiktok_user, display_name, total_coins FROM tiktok_gifts ORDER BY total_coins DESC LIMIT 10"
+            ).fetchall()
+        finally:
+            conn.close()
+
+    rows = await asyncio.to_thread(_fetch_top)
     if not rows:
         await interaction.followup.send("❌ No gift data recorded yet.")
         return
@@ -2391,7 +2508,7 @@ async def slash_topsupporter(interaction: discord.Interaction):
 @bot.tree.command(name="dailyrank", description="Show today's coin ranking")
 async def slash_dailyrank(interaction: discord.Interaction):
     await interaction.response.defer()
-    rows = get_daily_top_supporters()
+    rows = await asyncio.to_thread(get_daily_top_supporters)
     if not rows:
         await interaction.followup.send("❌ No coin data recorded for today yet.")
         return
@@ -2511,7 +2628,31 @@ async def slash_unclaim(interaction: discord.Interaction, member: discord.Member
 
 
 async def main():
+    # Turso/libSQL calls run in worker threads via asyncio.to_thread. The default
+    # executor only has ~5 workers on small instances, so a burst of gift events
+    # could starve interaction handlers. These tasks are network-bound, so extra
+    # threads are cheap and keep slash commands responsive during busy lives.
+    try:
+        asyncio.get_running_loop().set_default_executor(
+            concurrent.futures.ThreadPoolExecutor(max_workers=16, thread_name_prefix="db")
+        )
+    except Exception as e:
+        print(f"[Startup] Could not enlarge default executor: {e}")
+
     init_db()
+
+    # Rebuild the in-memory live-verification guard so pending requests created
+    # before this start still match comments without hitting the database for
+    # every other live-chat message.
+    try:
+        pending_live = await asyncio.to_thread(get_pending_live_usernames)
+        for pending_user, expires_at in pending_live:
+            _cache_live_pending(pending_user, expires_at)
+        if pending_live:
+            print(f"[Verification] Restored {len(pending_live)} pending live request(s) into memory cache.")
+    except Exception as e:
+        print(f"[Verification] Could not rebuild live pending cache: {e}")
+
     suspend_open_live_sessions()
     set_verification_refresh_handler(schedule_verification_panel_refresh)
     set_presence_refresh_handler(schedule_presence_refresh)

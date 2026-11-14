@@ -404,6 +404,55 @@ def _rate_limit_cooldown_seconds(username: str, err_text: str) -> int:
     return cooldown
 
 
+def _record_gift_event_db(session_id, username_clean, user, display_name, gift_name,
+                          repeat, coins, msg_id, diamond, current_host):
+    """Semua pekerjaan database untuk satu GiftEvent (dijalankan di worker thread).
+
+    Turso/libSQL butuh round-trip jaringan per query. Menjalankannya langsung di
+    event loop Discord memblokir ACK interaksi (3 detik) sehingga muncul
+    "The application did not respond".
+    """
+    log_status = log_gift_transaction(
+        session_id=session_id,
+        target_user=username_clean,
+        viewer_user=user,
+        viewer_display=display_name,
+        gift_name=gift_name,
+        gift_count=repeat,
+        coins=coins,
+        msg_id=msg_id,
+        host_name=current_host,
+    )
+    if log_status is False:
+        return {"status": "duplicate"}
+
+    total_coins = save_gift_data(user, display_name, coins)
+    save_daily_gift_data(user, display_name, coins)
+
+    wib = pytz.timezone('Asia/Jakarta')
+    now_wib = datetime.now(wib)
+    full_datetime = now_wib.strftime('%Y-%m-%d %H:%M:%S')
+    today_str = now_wib.strftime('%Y-%m-%d')
+
+    channel_spent = get_user_channel_spent(user, username_clean)
+    today_spent = get_user_today_spent(user, today_str)
+    total_all = get_user_total_spent(user)
+    channel_name = get_channel_display_name(username_clean)
+
+    gift_msg = (
+        f"[{full_datetime}] [{channel_name} (@{username_clean})] "
+        f"Host: {current_host} | "
+        f"User: @{user} - {gift_name} x{repeat} ({diamond} diamonds) = {coins} coins [{coins}c] - "
+        f"[channel {channel_spent} c] - [today {today_spent} c] - [current total: {total_all} c]"
+    )
+    log_activity_event("gift", gift_msg, username_clean)
+    return {
+        "status": "ok" if log_status else "log_failed",
+        "total_coins": total_coins,
+        "message": gift_msg,
+    }
+
+
 async def start_single_observer(tiktok_username: str, announcement_callback, role_callback, comment_callback=None):
     username_clean = tiktok_username.lower().lstrip("@")
     current_session_id = None
@@ -898,7 +947,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 comment_text = event.comment
                 runtime_status.touch_live(username_clean)
                 if current_session_id:
-                    touch_live_session(current_session_id)
+                    await asyncio.to_thread(touch_live_session, current_session_id)
                 
                 # 1. Cek verifikasi live chat akun Discord
                 if comment_callback:
@@ -1051,58 +1100,31 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 if coins > 0:
                     nonlocal current_session_id
                     if not current_session_id:
-                        current_session_id = start_live_session(username_clean, initial_host=current_host)
-                    touch_live_session(current_session_id)
+                        current_session_id = await asyncio.to_thread(
+                            start_live_session, username_clean, initial_host=current_host
+                        )
+                    await asyncio.to_thread(touch_live_session, current_session_id)
                     start_session_heartbeat()
 
-                    # Insert the detailed log first: if this message id was
-                    # already stored, skip aggregate updates entirely.
-                    log_status = log_gift_transaction(
-                        session_id=current_session_id,
-                        target_user=username_clean,
-                        viewer_user=user,
-                        viewer_display=display_name,
-                        gift_name=gift_name,
-                        gift_count=repeat,
-                        coins=coins,
-                        msg_id=msg_id,
-                        host_name=current_host,
+                    result = await asyncio.to_thread(
+                        _record_gift_event_db,
+                        current_session_id, username_clean, user, display_name,
+                        gift_name, repeat, coins, msg_id, diamond, current_host,
                     )
-                    if log_status is False:
+                    if result["status"] == "duplicate":
                         print(
                             f"[{username_clean}] Duplicate gift message ignored "
                             f"(msg_id={msg_id or 'n/a'}, @{user}, {gift_name}, {coins}c)."
                         )
                         return
-                    if log_status is None:
+                    if result["status"] == "log_failed":
                         print(
                             f"[{username_clean}] WARNING: gift log write failed for @{user} "
                             f"({gift_name}, {coins}c); coin totals will still be updated."
                         )
 
-                    total_coins = save_gift_data(user, display_name, coins)
-                    save_daily_gift_data(user, display_name, coins)
-
-                    # Format Waktu WIB
-                    wib = pytz.timezone('Asia/Jakarta')
-                    now_wib = datetime.now(wib)
-                    full_datetime = now_wib.strftime('%Y-%m-%d %H:%M:%S')
-                    today_str = now_wib.strftime('%Y-%m-%d')
-
-                    channel_spent = get_user_channel_spent(user, username_clean)
-                    today_spent = get_user_today_spent(user, today_str)
-                    total_all = get_user_total_spent(user)
-                    channel_name = get_channel_display_name(username_clean)
-
-                    # Log activity gift lengkap: tanggal, nama akun, user, nama gift, jumlah koin, total koin saat ini
-                    gift_msg = (
-                        f"[{full_datetime}] [{channel_name} (@{username_clean})] "
-                        f"Host: {current_host} | "
-                        f"User: @{user} - {gift_name} x{repeat} ({diamond} diamonds) = {coins} coins [{coins}c] - "
-                        f"[channel {channel_spent} c] - [today {today_spent} c] - [current total: {total_all} c]"
-                    )
-                    log_activity_event("gift", gift_msg, username_clean)
-                    print(f"[Activity] {gift_msg}")
+                    total_coins = result["total_coins"]
+                    print(f"[Activity] {result['message']}")
 
                     if role_callback:
                         if asyncio.iscoroutinefunction(role_callback):
