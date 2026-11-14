@@ -158,6 +158,42 @@ def get_recent_gift_activities(limit: int = 100, channel_filter: str = "") -> li
     finally:
         conn.close()
 
+
+def get_last_gift_for_tiktok(tiktok_user: str):
+    """Gift terakhir yang tercatat untuk sebuah username TikTok (viewer).
+
+    Mengembalikan dict atau None. Dipakai oleh command admin !coins @user.
+    """
+    u_clean = str(tiktok_user or "").lower().lstrip("@")
+    if not u_clean:
+        return None
+    conn = get_db_connection()
+    try:
+        row = conn.execute("""
+            SELECT g.gift_name, g.gift_count, g.coins, g.log_datetime,
+                   g.log_date, g.log_time, g.target_username, g.host_name,
+                   g.scheduled_host, g.viewer_display_name
+            FROM gift_logs g
+            WHERE LOWER(g.viewer_username) = ?
+            ORDER BY g.log_id DESC
+            LIMIT 1
+        """, (u_clean,)).fetchone()
+        if not row:
+            return None
+        return {
+            "gift_name": row[0] or "",
+            "gift_count": int(row[1] or 1),
+            "coins": int(row[2] or 0),
+            "log_datetime": row[3] or "",
+            "log_date": row[4] or "",
+            "log_time": row[5] or "",
+            "target_username": row[6] or "",
+            "host_name": row[7] or row[8] or row[6] or "",
+            "viewer_display_name": row[9] or "",
+        }
+    finally:
+        conn.close()
+
 # ----------------------------- Analytics -----------------------------
 
 _ANALYTICS_HOST_KEY = (

@@ -43,7 +43,8 @@ from db import (
     suspend_open_live_sessions,
     save_verification_status,
     delete_verification_status,
-    record_verification_method
+    record_verification_method,
+    get_last_gift_for_tiktok
 )
 from utils import get_schedule_info, load_summary_config
 from server import keep_alive
@@ -2051,9 +2052,75 @@ async def unclaim(ctx, member: discord.Member):
     ok, message = await _unclaim_discord_member(member)
     await ctx.send(message)
 
-@bot.command(name="mycoins", aliases=["check", "coins"])
-async def mycoins(ctx):
-    """Show the coin balance of your linked TikTok account."""
+def build_member_coin_embed(member: discord.Member) -> discord.Embed:
+    """Detailed coin report for one Discord member (admin lookup)."""
+    tiktok_user = get_user_mapping(member.id)
+    if not tiktok_user:
+        return discord.Embed(
+            title="❌ Not Linked",
+            description=(
+                f"{member.mention} (`{member.id}`) has not verified a TikTok account yet, "
+                f"so there are no coins to show."
+            ),
+            color=discord.Color.red()
+        )
+
+    _, total_coins, display_name = is_tiktok_user_in_db(tiktok_user)
+    last = get_last_gift_for_tiktok(tiktok_user)
+
+    embed = discord.Embed(
+        title=f"🪙 Coin Report — {member.display_name}",
+        color=discord.Color.gold()
+    )
+    try:
+        embed.set_thumbnail(url=member.display_avatar.url)
+    except Exception:
+        pass
+    embed.add_field(name="Discord", value=f"{member.mention}\n`{member.id}`", inline=True)
+    tiktok_value = f"**@{tiktok_user}**"
+    if display_name and display_name.lower() != tiktok_user.lower():
+        tiktok_value += f"\n{display_name}"
+    embed.add_field(name="TikTok", value=tiktok_value, inline=True)
+    embed.add_field(name="Total Coins", value=f"**{int(total_coins or 0):,} c**", inline=True)
+
+    if last:
+        gift_line = f"**{last['gift_name']}**"
+        if last["gift_count"] > 1:
+            gift_line += f" × {last['gift_count']}"
+        gift_line += f" — **{last['coins']:,} c**"
+        embed.add_field(name="Last Gift", value=gift_line, inline=False)
+
+        when = last["log_datetime"] or f"{last['log_date']} {last['log_time']}".strip()
+        where = f"to **@{last['target_username']}**" if last["target_username"] else ""
+        host = (last["host_name"] or "").strip()
+        if host and host.lower() != (last["target_username"] or "").lower():
+            where += f" (host: {host})"
+        embed.add_field(
+            name="Last Gift Date",
+            value=(f"`{when} WIB`\n{where}" if where else f"`{when} WIB`"),
+            inline=False
+        )
+    else:
+        embed.add_field(name="Last Gift", value="⚠️ No gift recorded yet.", inline=False)
+
+    embed.set_footer(text="!coins @user • /coins member")
+    return embed
+
+
+@bot.command(name="mycoins", aliases=["check", "coins", "coin"])
+async def mycoins(ctx, member: discord.Member = None):
+    """Show the coin balance of your linked TikTok account.
+
+    Admins can pass @member to get that member's coins plus the date and type of
+    their most recent recorded gift.
+    """
+    if member is not None and member.id != ctx.author.id:
+        if not is_admin_member(ctx.author):
+            await ctx.send("🛡️ Only administrators can check another member's coins.")
+            return
+        await ctx.send(embed=build_member_coin_embed(member))
+        return
+
     conn = get_db_connection()
     try:
         res = conn.execute("SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (str(ctx.author.id),))
@@ -2182,7 +2249,7 @@ def build_help_embed(user) -> discord.Embed:
         name="🔑 Verification & Account",
         value=(
             "Use the **Verify TikTok Account** button in the verification channel.\n"
-            "`!mycoins` or `/mycoins` — show your total coins\n"
+            "`!mycoins` / `!coins` or `/mycoins` / `/coins` — show your total coins\n"
             "`!myhistory` or `/myhistory` — your 5 most recent gift transactions"
         ),
         inline=False
@@ -2202,6 +2269,7 @@ def build_help_embed(user) -> discord.Embed:
         embed.add_field(
             name="🛡️ Admin",
             value=(
+                "`!coins @user` or `/coins member` — coins, last gift date and gift type\n"
                 "`!setup_verification` or `/setup_verification` — send the verification panel\n"
                 "`!set_verified_role` or `/set_verified_role` — set the verified role\n"
                 "`!unclaim` or `/unclaim` — remove a member's linked TikTok account\n"
@@ -2259,6 +2327,20 @@ async def slash_mycoins(interaction: discord.Interaction):
         await interaction.followup.send(msg, ephemeral=True)
     finally:
         conn.close()
+
+
+@bot.tree.command(name="coins", description="Show a member's coins and their last recorded gift")
+@app_commands.describe(member="Member to check (administrators can check other members)")
+async def slash_coins(interaction: discord.Interaction, member: discord.Member = None):
+    await interaction.response.defer(ephemeral=True)
+    target = member or interaction.user
+    if not isinstance(target, discord.Member):
+        await interaction.followup.send("This command only works inside the server.", ephemeral=True)
+        return
+    if target.id != interaction.user.id and not is_admin_member(interaction.user):
+        await interaction.followup.send("🛡️ Only administrators can check another member's coins.", ephemeral=True)
+        return
+    await interaction.followup.send(embed=build_member_coin_embed(target), ephemeral=True)
 
 
 @bot.tree.command(name="myhistory", description="Show your 5 most recent gift transactions")
