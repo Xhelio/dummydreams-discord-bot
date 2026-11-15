@@ -2192,7 +2192,7 @@ def build_member_coin_embed(member: discord.Member) -> discord.Embed:
     else:
         embed.add_field(name="Last Gift", value="⚠️ No gift recorded yet.", inline=False)
 
-    embed.set_footer(text="!coins @user • /coins member")
+    embed.set_footer(text="!coin/!coins @user • /coin/coins member")
     return embed
 
 
@@ -2358,7 +2358,7 @@ def build_help_embed(user) -> discord.Embed:
         embed.add_field(
             name="🛡️ Admin",
             value=(
-                "`!coins @user` or `/coins member` — coins, last gift date and gift type\n"
+                "`!coin @user` / `!coins @user` or `/coin member` / `/coins member` — coins, last gift date and gift type\n"
                 "`!setup_verification` or `/setup_verification` — send the verification panel\n"
                 "`!set_verified_role` or `/set_verified_role` — set the verified role\n"
                 "`!unclaim` or `/unclaim` — remove a member's linked TikTok account\n"
@@ -2433,9 +2433,7 @@ async def slash_mycoins(interaction: discord.Interaction):
     await interaction.followup.send(msg, ephemeral=True)
 
 
-@bot.tree.command(name="coins", description="Show a member's coins and their last recorded gift")
-@app_commands.describe(member="Member to check (administrators can check other members)")
-async def slash_coins(interaction: discord.Interaction, member: discord.Member = None):
+async def _send_coin_report(interaction: discord.Interaction, member: discord.Member = None):
     await interaction.response.defer(ephemeral=True)
     target = member or interaction.user
     if not isinstance(target, discord.Member):
@@ -2446,6 +2444,18 @@ async def slash_coins(interaction: discord.Interaction, member: discord.Member =
         return
     embed = await asyncio.to_thread(build_member_coin_embed, target)
     await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="coins", description="Show a member's coins and their last recorded gift")
+@app_commands.describe(member="Member to check (administrators can check other members)")
+async def slash_coins(interaction: discord.Interaction, member: discord.Member = None):
+    await _send_coin_report(interaction, member)
+
+
+@bot.tree.command(name="coin", description="Show a member's coins and their last recorded gift")
+@app_commands.describe(member="Member to check (administrators can check other members)")
+async def slash_coin(interaction: discord.Interaction, member: discord.Member = None):
+    await _send_coin_report(interaction, member)
 
 
 @bot.tree.command(name="myhistory", description="Show your 5 most recent gift transactions")

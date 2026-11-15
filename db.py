@@ -38,6 +38,72 @@ def invalidate_settings_cache():
         _SETTINGS_CACHE.clear()
 
 
+# SQLite/Turso has a single writer. Now that gift/comment handlers run in worker
+# threads, concurrent write transactions can be rolled back by Turso with
+# SQLITE_BUSY ("stream was idle for too long"). Serialise writes in this process
+# and retry the transient failures with a fresh connection.
+_DB_WRITE_LOCK = threading.Lock()
+_TRANSIENT_DB_TOKENS = (
+    "sqlite_busy",
+    "database is locked",
+    "database table is locked",
+    "stream error",
+    "stream was idle",
+    "transaction was rolled back",
+    "retry the transaction",
+    "hrana",
+    "connection reset",
+    "connection closed",
+    "connection refused",
+    "bad gateway",
+    "service unavailable",
+    "timed out",
+    "timeout",
+)
+
+
+def is_transient_db_error(exc) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(token in text for token in _TRANSIENT_DB_TOKENS)
+
+
+def write_transaction(operation, attempts: int = 4, base_delay: float = 0.35):
+    """Run ``operation(conn)`` under the process-wide write lock, with retries.
+
+    The callback may issue several statements on ``conn``; the transaction is
+    committed when it returns. Transient Turso/SQLite failures are retried with
+    exponential backoff on a fresh connection.
+    """
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        with _DB_WRITE_LOCK:
+            conn = get_db_connection()
+            try:
+                result = operation(conn)
+                conn.commit()
+                return result
+            except Exception as e:
+                last_error = e
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            finally:
+                conn.close()
+
+        if attempt >= attempts or not is_transient_db_error(last_error):
+            raise last_error
+
+        delay = base_delay * (2 ** (attempt - 1))
+        print(
+            f"[DB] Transient write error (attempt {attempt}/{attempts}), retrying in "
+            f"{delay:.1f}s: {type(last_error).__name__}: {last_error}"
+        )
+        time.sleep(delay)
+
+    raise last_error
+
+
 def get_database_backend() -> str:
     if HAS_LIBSQL and TURSO_URL:
         return "Turso/libSQL"
@@ -1816,23 +1882,41 @@ def update_live_session_host(session_id: int, host_name: str):
         conn.close()
 
 
+_TOUCH_LIVE_CACHE = {}
+_TOUCH_LIVE_LOCK = threading.Lock()
+_TOUCH_LIVE_MIN_INTERVAL = 60.0
+
+
 def touch_live_session(session_id: int, when: str = None):
     """Catat bahwa sesi live masih aktif (heartbeat/event) untuk resume setelah restart."""
     if not session_id:
         return
+
+    # Heartbeats arrive on every gift and comment. ``last_seen_at`` only matters
+    # for the restart grace period, so update Turso at most once a minute per
+    # session instead of writing on every live-chat message.
     if not when:
+        now_ts = time.time()
+        with _TOUCH_LIVE_LOCK:
+            if now_ts - _TOUCH_LIVE_CACHE.get(session_id, 0.0) < _TOUCH_LIVE_MIN_INTERVAL:
+                return
+            if len(_TOUCH_LIVE_CACHE) > 500:
+                _TOUCH_LIVE_CACHE.clear()
+            _TOUCH_LIVE_CACHE[session_id] = now_ts
         wib = pytz.timezone('Asia/Jakarta')
         when = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
-    conn = get_db_connection()
-    try:
+
+    def _store(conn):
         conn.execute(
             "UPDATE live_sessions SET last_seen_at = ? "
             "WHERE session_id = ? AND end_time IS NULL",
             (str(when)[:19], session_id),
         )
-        conn.commit()
-    finally:
-        conn.close()
+
+    try:
+        write_transaction(_store)
+    except Exception as e:
+        print(f"[DB] Failed to touch live session {session_id}: {type(e).__name__}: {e}")
 
 
 def add_live_session_paused_seconds(session_id: int, seconds: int) -> int:
@@ -2162,8 +2246,7 @@ def log_gift_transaction(session_id: int, target_user: str, viewer_user: str, vi
         "host_name": host_clean,
     }
 
-    conn = get_db_connection()
-    try:
+    def _store(conn):
         cur = conn.cursor()
         columns = _get_table_columns(cur, "gift_logs")
         msg_id_clean = data["msg_id"]
@@ -2184,17 +2267,11 @@ def log_gift_transaction(session_id: int, target_user: str, viewer_user: str, vi
         _insert_gift_log_row(cur, data, or_ignore=True)
         if session_id:
             cur.execute("UPDATE live_sessions SET total_coins = total_coins + ? WHERE session_id = ?", (coins, session_id))
-        conn.commit()
-        try:
-            set_setting("gift_log_last_ok", log_datetime)
-        except Exception:
-            pass
         return True
+
+    try:
+        stored = write_transaction(_store)
     except Exception as e:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
         error_text = f"{type(e).__name__}: {e}"
         print(f"[GiftLog] FAILED to store gift log for @{viewer_user} ({gift_name}, {coins}c): {error_text}")
         try:
@@ -2210,8 +2287,15 @@ def log_gift_transaction(session_id: int, target_user: str, viewer_user: str, vi
         except Exception:
             pass
         return None
-    finally:
-        conn.close()
+
+    if stored is False:
+        return False
+
+    try:
+        set_setting("gift_log_last_ok", log_datetime)
+    except Exception:
+        pass
+    return True
 
 def test_gift_log_write() -> dict:
     """Uji tulis/hapus gift_logs untuk mendiagnosis kegagalan insert di produksi."""
@@ -2382,8 +2466,7 @@ def backfill_gift_logs_from_daily() -> dict:
 
 
 def save_gift_data(username: str, display_name: str, coins: int) -> int:
-    conn = get_db_connection()
-    try:
+    def _store(conn):
         conn.execute("""
             INSERT INTO tiktok_gifts (tiktok_user, display_name, total_coins)
             VALUES (?, ?, ?)
@@ -2391,18 +2474,18 @@ def save_gift_data(username: str, display_name: str, coins: int) -> int:
             total_coins = total_coins + excluded.total_coins,
             display_name = excluded.display_name
         """, (username.lower(), display_name, coins))
-        conn.commit()
-        res = conn.execute("SELECT total_coins FROM tiktok_gifts WHERE tiktok_user = ?", (username.lower(),))
-        row = res.fetchone()
+        row = conn.execute(
+            "SELECT total_coins FROM tiktok_gifts WHERE tiktok_user = ?", (username.lower(),)
+        ).fetchone()
         return row[0] if row else 0
-    finally:
-        conn.close()
+
+    return write_transaction(_store)
 
 def save_daily_gift_data(username: str, display_name: str, coins: int):
     wib = pytz.timezone('Asia/Jakarta')
     today_str = datetime.now(wib).strftime('%Y-%m-%d')
-    conn = get_db_connection()
-    try:
+
+    def _store(conn):
         conn.execute("""
             INSERT INTO daily_tiktok_gifts (tiktok_user, display_name, coins, date)
             VALUES (?, ?, ?, ?)
@@ -2410,9 +2493,8 @@ def save_daily_gift_data(username: str, display_name: str, coins: int):
             coins = coins + excluded.coins,
             display_name = excluded.display_name
         """, (username.lower(), display_name, coins, today_str))
-        conn.commit()
-    finally:
-        conn.close()
+
+    write_transaction(_store)
 
 def recalculate_coin_totals() -> dict:
     """Rebuild all coin totals from the authoritative gift_logs table.
