@@ -1211,7 +1211,8 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
         u_clean = self.username_input.value.strip().lstrip('@').lower()
         actor = f"{interaction.user} (ID {interaction.user.id})"
 
-        log_activity_event(
+        await asyncio.to_thread(
+            log_activity_event,
             "verification",
             f"[VERIFY ATTEMPT] {actor} requested verification for @{u_clean}.",
             u_clean
@@ -1326,7 +1327,8 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
             if int(total_coins or 0) < MIN_COINS_FOR_STANDARD_VERIFICATION
             else "standard"
         )
-        log_activity_event(
+        await asyncio.to_thread(
+            log_activity_event,
             "verification",
             f"[VERIFY ATTEMPT] {actor} started {flow_name} verification for @{u_clean} "
             f"({int(total_coins or 0):,} c).",
