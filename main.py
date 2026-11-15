@@ -1363,23 +1363,31 @@ class VerificationMethodChoiceView(discord.ui.View):
 
     @discord.ui.button(label="Verify via Bio", style=discord.ButtonStyle.primary, emoji="📝")
     async def via_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
-        log_activity_event(
+        await interaction.response.defer()
+        await asyncio.to_thread(
+            log_activity_event,
             "verification",
             f"[VERIFY METHOD] {interaction.user} (ID {interaction.user.id}) chose bio for @{self.tiktok_user}.",
             self.tiktok_user
         )
-        self.code = create_pending_verification(interaction.user.id, self.tiktok_user, method='bio')
-        await interaction.response.edit_message(
+        self.code = await asyncio.to_thread(
+            create_pending_verification, interaction.user.id, self.tiktok_user, 'bio'
+        )
+        await interaction.edit_original_response(
             embed=build_bio_verification_embed(self.tiktok_user, self.code),
             view=BioVerificationView(self.tiktok_user, self.code, self.total_coins)
         )
 
     @discord.ui.button(label="Verify via Live Greeting", style=discord.ButtonStyle.danger, emoji="🔴")
     async def via_live(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
         # Live verification uses a normal welcome message, not a secret code.
-        create_pending_verification(interaction.user.id, self.tiktok_user, method='live_greeting')
+        await asyncio.to_thread(
+            create_pending_verification, interaction.user.id, self.tiktok_user, 'live_greeting'
+        )
         _cache_live_pending(self.tiktok_user)
-        log_activity_event(
+        await asyncio.to_thread(
+            log_activity_event,
             "verification",
             f"[VERIFY METHOD] {interaction.user} (ID {interaction.user.id}) chose live greeting for @{self.tiktok_user}.",
             self.tiktok_user
@@ -1399,16 +1407,17 @@ class VerificationMethodChoiceView(discord.ui.View):
                 ),
                 color=discord.Color.yellow()
             )
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             embed=embed,
             view=LiveGreetingVerificationView(self.tiktok_user, self.total_coins)
         )
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cancel_pending_verification(interaction.user.id)
+        await interaction.response.defer()
+        await asyncio.to_thread(cancel_pending_verification, interaction.user.id)
         _drop_live_pending(self.tiktok_user)
-        await interaction.response.edit_message(content="❌ Verification cancelled.", embed=None, view=None)
+        await interaction.edit_original_response(content="❌ Verification cancelled.", embed=None, view=None)
 
 class LowActivityVerificationView(discord.ui.View):
     """Verification for accounts with fewer than 10 coins (or no transactions)."""
@@ -1419,49 +1428,60 @@ class LowActivityVerificationView(discord.ui.View):
 
     @discord.ui.button(label="Verify via Live Greeting", style=discord.ButtonStyle.danger, emoji="🔴")
     async def via_live_greeting(self, interaction: discord.Interaction, button: discord.ui.Button):
-        log_activity_event(
+        await interaction.response.defer()
+        await asyncio.to_thread(
+            log_activity_event,
             "verification",
             f"[VERIFY METHOD] {interaction.user} (ID {interaction.user.id}) chose live greeting for @{self.tiktok_user}.",
             self.tiktok_user
         )
         live_hosts = get_current_live_hosts()
         if not live_hosts:
-            code = create_pending_verification(interaction.user.id, self.tiktok_user, method='bio')
+            code = await asyncio.to_thread(
+                create_pending_verification, interaction.user.id, self.tiktok_user, 'bio'
+            )
             embed = build_bio_verification_embed(self.tiktok_user, code)
             embed.description = (
                 f"⚪ **No host is live right now.**\n\n" + embed.description
             )
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 embed=embed,
                 view=BioVerificationView(self.tiktok_user, code, self.total_coins, low_activity=True)
             )
             return
 
-        create_pending_verification(interaction.user.id, self.tiktok_user, method='live_greeting')
+        await asyncio.to_thread(
+            create_pending_verification, interaction.user.id, self.tiktok_user, 'live_greeting'
+        )
         _cache_live_pending(self.tiktok_user)
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             embed=build_live_greeting_embed(self.tiktok_user, live_hosts),
             view=LiveGreetingVerificationView(self.tiktok_user, self.total_coins)
         )
 
     @discord.ui.button(label="Verify via Bio", style=discord.ButtonStyle.success, emoji="📝")
     async def via_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
-        log_activity_event(
+        await interaction.response.defer()
+        await asyncio.to_thread(
+            log_activity_event,
             "verification",
             f"[VERIFY METHOD] {interaction.user} (ID {interaction.user.id}) chose bio for @{self.tiktok_user}.",
             self.tiktok_user
         )
-        code = create_pending_verification(interaction.user.id, self.tiktok_user, method='bio')
-        await interaction.response.edit_message(
+        code = await asyncio.to_thread(
+            create_pending_verification, interaction.user.id, self.tiktok_user, 'bio'
+        )
+        await interaction.edit_original_response(
             embed=build_bio_verification_embed(self.tiktok_user, code),
             view=BioVerificationView(self.tiktok_user, code, self.total_coins, low_activity=True)
         )
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cancel_pending_verification(interaction.user.id)
+        await interaction.response.defer()
+        await asyncio.to_thread(cancel_pending_verification, interaction.user.id)
         _drop_live_pending(self.tiktok_user)
-        await interaction.response.edit_message(content="❌ Verification cancelled.", embed=None, view=None)
+        await interaction.edit_original_response(content="❌ Verification cancelled.", embed=None, view=None)
 
 def build_live_greeting_embed(tiktok_user: str, live_hosts: list) -> discord.Embed:
     host_lines = "\n".join(
@@ -1714,7 +1734,7 @@ class BioVerificationView(discord.ui.View):
             pass
         except Exception:
             return
-        cancel_pending_verification(interaction.user.id)
+        await asyncio.to_thread(cancel_pending_verification, interaction.user.id)
         _drop_live_pending(self.tiktok_user)
         await interaction.edit_original_response(content="❌ Verification cancelled.", embed=None, view=None)
 
@@ -1728,7 +1748,8 @@ class LiveVerificationView(discord.ui.View):
 
     @discord.ui.button(label="Check Verification Status", style=discord.ButtonStyle.primary, emoji="🔄")
     async def check_status(self, interaction: discord.Interaction, button: discord.ui.Button):
-        current_mapped = get_user_mapping(interaction.user.id)
+        await interaction.response.defer()
+        current_mapped = await asyncio.to_thread(get_user_mapping, interaction.user.id)
         if current_mapped and current_mapped.lower() == self.tiktok_user.lower():
             if isinstance(interaction.user, discord.Member):
                 _, role_info = await grant_verified_access(
@@ -1749,7 +1770,7 @@ class LiveVerificationView(discord.ui.View):
                 ),
                 color=discord.Color.green()
             )
-            await interaction.response.edit_message(embed=embed, view=None)
+            await interaction.edit_original_response(embed=embed, view=None)
             return
 
         live_hosts = get_current_live_hosts()
@@ -1771,22 +1792,26 @@ class LiveVerificationView(discord.ui.View):
             ),
             color=discord.Color.yellow()
         )
-        await interaction.response.edit_message(embed=embed, view=self)
+        await interaction.edit_original_response(embed=embed, view=self)
 
     @discord.ui.button(label="Switch to Bio", style=discord.ButtonStyle.secondary, emoji="📝")
     async def switch_to_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.code = create_pending_verification(interaction.user.id, self.tiktok_user, method='bio')
+        await interaction.response.defer()
+        self.code = await asyncio.to_thread(
+            create_pending_verification, interaction.user.id, self.tiktok_user, 'bio'
+        )
         _drop_live_pending(self.tiktok_user)
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             embed=build_bio_verification_embed(self.tiktok_user, self.code),
             view=BioVerificationView(self.tiktok_user, self.code, self.total_coins)
         )
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cancel_pending_verification(interaction.user.id)
+        await interaction.response.defer()
+        await asyncio.to_thread(cancel_pending_verification, interaction.user.id)
         _drop_live_pending(self.tiktok_user)
-        await interaction.response.edit_message(content="❌ Verification cancelled.", embed=None, view=None)
+        await interaction.edit_original_response(content="❌ Verification cancelled.", embed=None, view=None)
 
 class LiveGreetingVerificationView(discord.ui.View):
     """Live greeting verification for accounts with fewer than 10 coins."""
@@ -1797,7 +1822,8 @@ class LiveGreetingVerificationView(discord.ui.View):
 
     @discord.ui.button(label="Check Verification Status", style=discord.ButtonStyle.primary, emoji="🔄")
     async def check_status(self, interaction: discord.Interaction, button: discord.ui.Button):
-        current_mapped = get_user_mapping(interaction.user.id)
+        await interaction.response.defer()
+        current_mapped = await asyncio.to_thread(get_user_mapping, interaction.user.id)
         if current_mapped and current_mapped.lower() == self.tiktok_user.lower():
             if isinstance(interaction.user, discord.Member):
                 _, role_info = await grant_verified_access(
@@ -1818,10 +1844,11 @@ class LiveGreetingVerificationView(discord.ui.View):
                 ),
                 color=discord.Color.green()
             )
-            await interaction.response.edit_message(embed=embed, view=None)
+            await interaction.edit_original_response(embed=embed, view=None)
             return
 
-        log_activity_event(
+        await asyncio.to_thread(
+            log_activity_event,
             "verification",
             f"[VERIFY CHECK] {interaction.user} (ID {interaction.user.id}) checked status for "
             f"@{self.tiktok_user}: not verified yet.",
@@ -1841,22 +1868,26 @@ class LiveGreetingVerificationView(discord.ui.View):
                 ),
                 color=discord.Color.yellow()
             )
-        await interaction.response.edit_message(embed=embed, view=self)
+        await interaction.edit_original_response(embed=embed, view=self)
 
     @discord.ui.button(label="Switch to Bio", style=discord.ButtonStyle.secondary, emoji="📝")
     async def switch_to_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
-        code = create_pending_verification(interaction.user.id, self.tiktok_user, method='bio')
+        await interaction.response.defer()
+        code = await asyncio.to_thread(
+            create_pending_verification, interaction.user.id, self.tiktok_user, 'bio'
+        )
         _drop_live_pending(self.tiktok_user)
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             embed=build_bio_verification_embed(self.tiktok_user, code),
             view=BioVerificationView(self.tiktok_user, code, self.total_coins, low_activity=True)
         )
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cancel_pending_verification(interaction.user.id)
+        await interaction.response.defer()
+        await asyncio.to_thread(cancel_pending_verification, interaction.user.id)
         _drop_live_pending(self.tiktok_user)
-        await interaction.response.edit_message(content="❌ Verification cancelled.", embed=None, view=None)
+        await interaction.edit_original_response(content="❌ Verification cancelled.", embed=None, view=None)
 
 async def handle_live_comment_verification(tiktok_user: str, comment_text: str, target_host: str):
     """Verify a pending request when the matching TikTok account comments in a live stream.
