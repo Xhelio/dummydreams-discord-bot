@@ -111,6 +111,20 @@ def _protect_admin_routes():
     return None
 
 
+@app.before_request
+def _fast_head_probe():
+    """Answer HEAD probes to the panel without rendering the dashboard.
+
+    Uptime monitors that point at ``/`` follow the redirect to ``/admin/data``
+    and previously made the bot render the full admin page (1.7-2.4s of DB
+    work) on every check. HEAD needs no body, so acknowledge it immediately.
+    Monitors should use ``/health`` instead.
+    """
+    if request.method == "HEAD" and (request.path or "") in ("/", "/admin", "/admin/data"):
+        return Response("", 200)
+    return None
+
+
 # Register Blueprints
 app.register_blueprint(admin_bp)
 app.register_blueprint(api_bp)

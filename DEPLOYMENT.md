@@ -517,8 +517,16 @@ remain in Discord permanently.
    process: bot offline/sleeping, wrong token/app, or an **Interactions Endpoint URL** is
    set in the Developer Portal (the bot logs `[Discord] CRITICAL` for this on startup).
 3. If `[Gateway] ... lag=1.5s+`, the event loop was busy; check the surrounding lines for
-   synchronous DB work, huge leaderboard queries, or Discord HTTP retries.
-4. If `[Gateway]` shows a legacy 32-hex `custom_id`, the click came from a DM created
+   synchronous DB work, huge leaderboard queries, or Discord HTTP retries. `[EventLoop]
+   blocked ~Xs` lines show the size of the stall (≥2.5 s is posted to the error channel,
+   smaller stalls stay in the file at INFO). Any synchronous Turso write on the event
+   loop is a bug: DB calls must run through `asyncio.to_thread` or `queue_setting`.
+4. When a verification button is clicked, `[Verify] <method>: acknowledged in X.XXs`
+   confirms the handler ran and when the ACK was sent. If that line is missing, the
+   callback never ran (view not registered or `custom_id` unknown). If X.XX is near 3 s,
+   the ACK was too late and Discord shows "didn't respond in time" even though the
+   handler continues.
+5. If `[Gateway]` shows a legacy 32-hex `custom_id`, the click came from a DM created
    before the persistent-view update; the fallback re-sends a fresh verification menu.
-5. Check the error channel for the matching ERROR/traceback. Send the `/log` file back
+6. Check the error channel for the matching ERROR/traceback. Send the `/log` file back
    for analysis rather than only a screenshot.

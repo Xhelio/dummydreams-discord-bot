@@ -34,6 +34,7 @@ _SETTINGS_CACHE = {}
 _SETTINGS_CACHE_TTL = 15.0
 _SETTINGS_CACHE_LOCK = threading.Lock()
 _SETTINGS_REFRESHING = set()
+_SETTINGS_WARMED = False
 
 
 def invalidate_settings_cache():
@@ -64,9 +65,11 @@ def warm_settings_cache():
     finally:
         conn.close()
     now = time.time()
+    global _SETTINGS_WARMED
     with _SETTINGS_CACHE_LOCK:
         for key, value in rows:
             _SETTINGS_CACHE[key] = (value, now + _SETTINGS_CACHE_TTL)
+        _SETTINGS_WARMED = True
 
 
 def _schedule_setting_refresh(key: str):
@@ -2792,27 +2795,98 @@ def get_setting(key: str, default: str = None) -> str:
             _schedule_setting_refresh(key)
         return value if value is not None else default
 
-    # Cold miss (key belum pernah dibaca). Warm-up startup membuat ini jarang.
+    # Cold miss (key belum pernah dibaca). Setelah warm-up startup, key yang
+    # tidak ada di cache berarti key tersebut memang tidak ada di DB, jadi
+    # kembalikan default dan refresh di thread latar. Dengan begitu pembacaan
+    # dari event loop Discord tidak pernah menunggu Turso.
+    if _SETTINGS_WARMED:
+        _schedule_setting_refresh(key)
+        with _SETTINGS_CACHE_LOCK:
+            _SETTINGS_CACHE.setdefault(key, (None, time.time() + 2.0))
+        return default
+
     value = _fetch_setting_value(key)
     with _SETTINGS_CACHE_LOCK:
         _SETTINGS_CACHE[key] = (value, time.time() + _SETTINGS_CACHE_TTL)
     return value if value is not None else default
 
-def set_setting(key: str, value: str):
-    """Menyimpan atau memperbarui nilai setting ke tabel bot_settings."""
-    conn = get_db_connection()
-    try:
+
+def _write_setting_row(key: str, value: str) -> None:
+    """Upsert satu setting lewat write_transaction (serial + retry SQLITE_BUSY)."""
+    def _op(conn):
         conn.execute("""
             INSERT INTO bot_settings (key, value) VALUES (?, ?)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
         """, (key, str(value)))
-        conn.commit()
-    finally:
-        conn.close()
-    # Update the cache in place so the next read cannot cause a sync DB hit.
+
+    write_transaction(_op)
+
+
+def _cache_setting_value(key: str, value: str) -> None:
     with _SETTINGS_CACHE_LOCK:
         _SETTINGS_CACHE[key] = (str(value), time.time() + _SETTINGS_CACHE_TTL)
         _SETTINGS_REFRESHING.discard(key)
+
+
+def set_setting(key: str, value: str):
+    """Menyimpan setting secara sinkron (dipakai dari thread non-event-loop).
+
+    Penulisan memakai ``write_transaction`` sehingga kegagalan Turso sementara
+    (SQLITE_BUSY / "stream was idle") di-retry alih-alih langsung gagal.
+    """
+    _write_setting_row(key, value)
+    # Update the cache in place so the next read cannot cause a sync DB hit.
+    _cache_setting_value(key, value)
+
+
+# Queue penulisan setting untuk dipanggil dari event loop Discord. Callback
+# TikTok/observer berjalan di event loop; menulis ke Turso di sana memblokir
+# ACK interaksi sampai Discord menampilkan "didn't respond in time".
+_SETTING_WRITE_QUEUE = queue.Queue(maxsize=2000)
+_SETTING_WRITER_STARTED = False
+_SETTING_WRITER_LOCK = threading.Lock()
+
+
+def _ensure_setting_writer() -> None:
+    global _SETTING_WRITER_STARTED
+    with _SETTING_WRITER_LOCK:
+        if _SETTING_WRITER_STARTED:
+            return
+        _SETTING_WRITER_STARTED = True
+
+    def _run():
+        while True:
+            item = _SETTING_WRITE_QUEUE.get()
+            try:
+                if item is None:
+                    return
+                key, value = item
+                _write_setting_row(key, value)
+            except Exception as e:
+                print(
+                    f"[DB] Deferred setting write failed: "
+                    f"{type(e).__name__}: {e}"
+                )
+            finally:
+                _SETTING_WRITE_QUEUE.task_done()
+
+    threading.Thread(target=_run, name="settings-writer", daemon=True).start()
+
+
+def queue_setting(key: str, value: str) -> bool:
+    """Simpan setting tanpa memblokir pemanggil (aman dari event loop).
+
+    Nilai langsung masuk cache sehingga pembacaan berikutnya sudah melihat nilai
+    baru; penulisan ke Turso dilakukan satu thread penulis di latar belakang.
+    """
+    _cache_setting_value(key, value)
+    _ensure_setting_writer()
+    try:
+        _SETTING_WRITE_QUEUE.put_nowait((key, str(value)))
+        return True
+    except queue.Full:
+        print(f"[DB] Setting write queue full; dropping update for {key!r}.")
+        return False
 
 
 def get_bool_setting(key: str, default: bool = True) -> bool:

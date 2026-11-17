@@ -61,7 +61,8 @@ from db import (
     get_host_connect_mode,
     is_feature_enabled,
     get_setting,
-    set_setting
+    set_setting,
+    queue_setting
 )
 import runtime_status
 
@@ -219,9 +220,10 @@ def _cache_live_intro_text(username: str, text: str):
     if not username or not text:
         return
     _LAST_INTRO_TEXT[username] = text
+    # Non-blocking: jalan di event loop Discord, jadi jangan menunggu Turso.
     try:
-        set_setting(f"last_live_intro_{username}", text)
-        set_setting(f"last_live_intro_at_{username}", str(time.time()))
+        queue_setting(f"last_live_intro_{username}", text)
+        queue_setting(f"last_live_intro_at_{username}", str(time.time()))
     except Exception as e:
         print(f"[{username}] Failed to persist last Live Intro text: {e}")
 
@@ -372,8 +374,8 @@ def _clear_rate_limit_state(username: str) -> None:
     try:
         if str(get_setting(f"rl_strikes:{username}", "0") or "0") == "0":
             return
-        set_setting(f"rl_strikes:{username}", "0")
-        set_setting(f"rl_until:{username}", "0")
+        queue_setting(f"rl_strikes:{username}", "0")
+        queue_setting(f"rl_until:{username}", "0")
     except Exception:
         pass
 
@@ -386,7 +388,7 @@ def _rate_limit_cooldown_seconds(username: str, err_text: str) -> int:
     except Exception:
         strikes = 1
     try:
-        set_setting(key, str(strikes))
+        queue_setting(key, str(strikes))
     except Exception:
         pass
     cooldown = {1: 1800, 2: 3600, 3: 7200}.get(strikes, 10800)
@@ -398,7 +400,7 @@ def _rate_limit_cooldown_seconds(username: str, err_text: str) -> int:
         until_reset = max(1800, int((next_reset - now).total_seconds()))
         cooldown = max(cooldown, min(until_reset, 6 * 3600))
     try:
-        set_setting(f"rl_until:{username}", str(int(time.time()) + cooldown))
+        queue_setting(f"rl_until:{username}", str(int(time.time()) + cooldown))
     except Exception:
         pass
     return cooldown
@@ -681,7 +683,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             session_heartbeat_task.cancel()
         session_heartbeat_task = None
 
-    def resolve_grace_reconnect() -> bool:
+    async def resolve_grace_reconnect() -> bool:
         """Batalkan grace timer dan catat jeda offline sebagai paused time.
 
         Jeda saat live pending/terputus tidak boleh dihitung sebagai durasi
@@ -705,7 +707,8 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 )
                 gap = max(0, int((datetime.now(wib) - disc_dt).total_seconds()))
                 if gap > 0:
-                    add_live_session_paused_seconds(session_id, gap)
+                    # DB write: keep it off the Discord event loop.
+                    await asyncio.to_thread(add_live_session_paused_seconds, session_id, gap)
                     print(
                         f"[{username_clean}] Grace gap {gap}s excluded from live duration "
                         f"(session {session_id})."
@@ -715,7 +718,10 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         return True
 
     while True:
-        connect_mode = (get_host_connect_mode(username_clean) or "normal").lower()
+        try:
+            connect_mode = (await asyncio.to_thread(get_host_connect_mode, username_clean) or "normal").lower()
+        except Exception:
+            connect_mode = "normal"
         if connect_mode == "off":
             runtime_status.update_observer_diag(username_clean, status="non_priority_off", connect_mode="off")
             await asyncio.sleep(60)
@@ -827,7 +833,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         async def on_connect(event: ConnectEvent):
             nonlocal current_session_id, is_connected, disconnect_timer_task, current_host, connected_this_cycle, consecutive_failures, probed_live
             try:
-                reconnected_in_grace = resolve_grace_reconnect()
+                reconnected_in_grace = await resolve_grace_reconnect()
                 if reconnected_in_grace:
                     print(f"[{username_clean}] Reconnected within grace period. Live status maintained.")
 
@@ -1281,7 +1287,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             )
             if probe_result is True:
                 if grace_pending:
-                    if resolve_grace_reconnect():
+                    if await resolve_grace_reconnect():
                         print(f"[{username_clean}] Probe confirms live during grace period; keeping live status.")
                 if not probed_live and username_clean not in get_current_live_hosts():
                     probed_live = True
@@ -1451,7 +1457,7 @@ async def run_all_observers(announcement_callback, role_callback, comment_callba
     else:
         print("[Observer System] LiveIntroEvent support enabled; host detection source is Live Intro only.")
     try:
-        aliases = get_host_aliases()
+        aliases = await asyncio.to_thread(get_host_aliases)
         alias_preview = ", ".join(f"{a}->{h}" for a, h in aliases[:40])
         print(f"[Observer System] Host aliases loaded ({len(aliases)}): {alias_preview}")
         try:
@@ -1463,9 +1469,15 @@ async def run_all_observers(announcement_callback, role_callback, comment_callba
 
     while True:
         try:
-            observable = get_observable_hosts() or []
+            # DB reads must stay off the event loop: this loop runs every 60s and
+            # a Turso round-trip here freezes interaction ACKs.
+            observable = await asyncio.to_thread(get_observable_hosts) or []
         except Exception:
-            observable = [{"username": u, "mode": "normal"} for u in (get_active_hosts() or [])]
+            try:
+                active = await asyncio.to_thread(get_active_hosts) or []
+            except Exception:
+                active = []
+            observable = [{"username": u, "mode": "normal"} for u in active]
         target_users = [u["username"].lower().lstrip("@") for u in observable if u.get("username")]
         target_set = set(target_users)
         target_modes = {u["username"].lower().lstrip("@"): (u.get("mode") or "normal") for u in observable if u.get("username")}

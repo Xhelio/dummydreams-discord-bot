@@ -135,6 +135,67 @@ def _note_interaction_lag(interaction: discord.Interaction, label: str):
         )
 
 
+async def _safe_defer(interaction: discord.Interaction, label: str, *,
+                      ephemeral: bool = False, thinking: bool = False) -> bool:
+    """Acknowledge an interaction as early as possible, with clear logging.
+
+    Discord shows "didn't respond in time" when the interaction is not
+    acknowledged within ~3 seconds. This helper records how long the ACK took
+    (so a blocked event loop is visible in the log) and tolerates a response
+    that was already acknowledged elsewhere.
+    """
+    started = time.perf_counter()
+    try:
+        if interaction.response.is_done():
+            log.info(
+                "[Verify] %s: already acknowledged by another handler "
+                "(custom_id=%s user=%s)",
+                label,
+                str((interaction.data or {}).get("custom_id") or "-"),
+                getattr(interaction.user, "id", "?"),
+            )
+            return True
+        await interaction.response.defer(ephemeral=ephemeral, thinking=thinking)
+        log.info(
+            "[Verify] %s: acknowledged in %.2fs (custom_id=%s user=%s)",
+            label,
+            time.perf_counter() - started,
+            str((interaction.data or {}).get("custom_id") or "-"),
+            getattr(interaction.user, "id", "?"),
+        )
+        return True
+    except discord.InteractionResponded:
+        return True
+    except discord.HTTPException as e:
+        # 10062 = Unknown interaction (already expired), 40060 = already
+        # acknowledged. These mean Discord's 3s window was missed, which is
+        # expected during a freeze; log it without paging the error channel.
+        if getattr(e, "code", None) in (10062, 40060):
+            log.info(
+                "[Verify] %s: interaction expired before ACK (code=%s, custom_id=%s user=%s)",
+                label,
+                getattr(e, "code", None),
+                str((interaction.data or {}).get("custom_id") or "-"),
+                getattr(interaction.user, "id", "?"),
+            )
+        else:
+            log.warning(
+                "[Verify] %s: could not acknowledge interaction: %s: %s",
+                label,
+                type(e).__name__,
+                e,
+            )
+        return False
+    except Exception as e:
+        log.warning(
+            "[Verify] %s: could not acknowledge interaction: %s: %s",
+            label,
+            type(e).__name__,
+            e,
+        )
+        return False
+
+
 def get_verified_role(guild: discord.Guild) -> discord.Role:
     """Mengambil object Role verifikasi dari setting, env, roles.json, atau nama role."""
     if not guild:
@@ -781,8 +842,8 @@ async def update_leaderboard_message():
             pass
 
     msg = await channel.send(embed=embed)
-    set_setting("leaderboard_message_id", str(msg.id))
-    set_setting("leaderboard_message_channel_id", str(channel.id))
+    await asyncio.to_thread(set_setting, "leaderboard_message_id", str(msg.id))
+    await asyncio.to_thread(set_setting, "leaderboard_message_channel_id", str(channel.id))
 
 
 async def leaderboard_loop():
@@ -804,7 +865,7 @@ async def reset_tier_roles():
         except (TypeError, ValueError):
             continue
     if not role_ids:
-        mark_tier_reset_done()
+        await asyncio.to_thread(mark_tier_reset_done)
         return
 
     removed = 0
@@ -1425,7 +1486,8 @@ class VerificationMethodChoiceView(discord.ui.View):
     @discord.ui.button(label="Verify via Bio", style=discord.ButtonStyle.primary, emoji="📝", custom_id="verify_choice_bio")
     async def via_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
         _note_interaction_lag(interaction, "verification method: bio")
-        await interaction.response.defer()
+        if not await _safe_defer(interaction, "verification method: bio"):
+            return
         tiktok_user, total_coins = await self._resolve(interaction)
         if not tiktok_user:
             await interaction.edit_original_response(content="❌ This verification request expired. Please start again from the verification panel.", embed=None, view=None)
@@ -1447,7 +1509,8 @@ class VerificationMethodChoiceView(discord.ui.View):
     @discord.ui.button(label="Verify via Live Greeting", style=discord.ButtonStyle.danger, emoji="🔴", custom_id="verify_choice_live_greeting")
     async def via_live(self, interaction: discord.Interaction, button: discord.ui.Button):
         _note_interaction_lag(interaction, "verification method: live greeting")
-        await interaction.response.defer()
+        if not await _safe_defer(interaction, "verification method: live greeting"):
+            return
         tiktok_user, total_coins = await self._resolve(interaction)
         if not tiktok_user:
             await interaction.edit_original_response(content="❌ This verification request expired. Please start again from the verification panel.", embed=None, view=None)
@@ -1511,7 +1574,8 @@ class LowActivityVerificationView(discord.ui.View):
     @discord.ui.button(label="Verify via Live Greeting", style=discord.ButtonStyle.danger, emoji="🔴", custom_id="verify_low_live_greeting")
     async def via_live_greeting(self, interaction: discord.Interaction, button: discord.ui.Button):
         _note_interaction_lag(interaction, "low-activity method: live greeting")
-        await interaction.response.defer()
+        if not await _safe_defer(interaction, "low-activity method: live greeting"):
+            return
         tiktok_user, total_coins = await self._resolve(interaction)
         if not tiktok_user:
             await interaction.edit_original_response(content="❌ This verification request expired. Please start again from the verification panel.", embed=None, view=None)
@@ -1549,7 +1613,8 @@ class LowActivityVerificationView(discord.ui.View):
     @discord.ui.button(label="Verify via Bio", style=discord.ButtonStyle.success, emoji="📝", custom_id="verify_low_bio")
     async def via_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
         _note_interaction_lag(interaction, "low-activity method: bio")
-        await interaction.response.defer()
+        if not await _safe_defer(interaction, "low-activity method: bio"):
+            return
         tiktok_user, total_coins = await self._resolve(interaction)
         if not tiktok_user:
             await interaction.edit_original_response(content="❌ This verification request expired. Please start again from the verification panel.", embed=None, view=None)
@@ -1857,7 +1922,8 @@ class LiveVerificationView(discord.ui.View):
     @discord.ui.button(label="Check Verification Status", style=discord.ButtonStyle.primary, emoji="🔄", custom_id="verify_live_code_check")
     async def check_status(self, interaction: discord.Interaction, button: discord.ui.Button):
         _note_interaction_lag(interaction, "live code check")
-        await interaction.response.defer()
+        if not await _safe_defer(interaction, "live code check"):
+            return
         tiktok_user, code, total_coins = await self._resolve(interaction)
         if not tiktok_user:
             await interaction.edit_original_response(content="❌ This verification request expired. Please start again from the verification panel.", embed=None, view=None)
@@ -1940,7 +2006,8 @@ class LiveGreetingVerificationView(discord.ui.View):
     @discord.ui.button(label="Check Verification Status", style=discord.ButtonStyle.primary, emoji="🔄", custom_id="verify_live_greeting_check")
     async def check_status(self, interaction: discord.Interaction, button: discord.ui.Button):
         _note_interaction_lag(interaction, "live greeting check")
-        await interaction.response.defer()
+        if not await _safe_defer(interaction, "live greeting check"):
+            return
         tiktok_user, total_coins = await self._resolve(interaction)
         if not tiktok_user:
             await interaction.edit_original_response(content="❌ This verification request expired. Please start again from the verification panel.", embed=None, view=None)
@@ -2239,7 +2306,11 @@ async def _loop_lag_monitor() -> None:
             current = asyncio.current_task()
             tasks = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
             names = sorted({getattr(t.get_coro(), "__qualname__", "?") for t in tasks})[:12]
-            log.warning(
+            # Only lag near Discord's 3s ACK deadline is page-worthy; smaller
+            # stalls stay at INFO so the error channel is not flooded.
+            level = logging.WARNING if lag >= 2.5 else logging.INFO
+            log.log(
+                level,
                 "[EventLoop] blocked ~%.2fs; active_tasks=%d names=%s",
                 lag,
                 len(tasks),
@@ -2555,7 +2626,7 @@ async def setup_verification(ctx):
             await old_msg.delete()
         except Exception:
             pass
-    set_setting("verification_channel_id", str(ctx.channel.id))
+    await asyncio.to_thread(set_setting, "verification_channel_id", str(ctx.channel.id))
     await send_verification_panel(ctx.channel)
     try:
         await ctx.message.delete()
@@ -2566,7 +2637,7 @@ async def setup_verification(ctx):
 @commands.check(is_admin)
 async def set_verified_role_cmd(ctx, role: discord.Role):
     """Admin command: set the role granted after successful verification."""
-    set_setting("verified_role_id", str(role.id))
+    await asyncio.to_thread(set_setting, "verified_role_id", str(role.id))
     await ctx.send(f"✅ Verified role set to: **{role.name}** (`{role.id}`)")
 
 async def _unclaim_discord_member(member: discord.Member):
@@ -2574,29 +2645,35 @@ async def _unclaim_discord_member(member: discord.Member):
 
     Returns (ok: bool, message: str).
     """
-    conn = get_db_connection()
-    try:
-        res = conn.execute(
-            "SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (str(member.id),)
-        ).fetchone()
-    finally:
-        conn.close()
+    def _lookup_link():
+        conn = get_db_connection()
+        try:
+            return conn.execute(
+                "SELECT tiktok_user FROM user_mappings WHERE discord_id = ?", (str(member.id),)
+            ).fetchone()
+        finally:
+            conn.close()
+
+    res = await asyncio.to_thread(_lookup_link)
     if not res:
         return False, f"❌ {member.mention} has no linked TikTok account."
 
     tt_user = res[0]
     roles_ok, role_detail = await revoke_verification_roles_for_discord_id(member.id)
 
-    conn = get_db_connection()
-    try:
-        conn.execute("DELETE FROM user_mappings WHERE discord_id = ?", (str(member.id),))
-        conn.commit()
-    finally:
-        conn.close()
-    try:
-        delete_verification_status(member.id)
-    except Exception as e:
-        print(f"[Unclaim] Failed to delete verification status for {member.id}: {e}")
+    def _delete_link():
+        conn = get_db_connection()
+        try:
+            conn.execute("DELETE FROM user_mappings WHERE discord_id = ?", (str(member.id),))
+            conn.commit()
+        finally:
+            conn.close()
+        try:
+            delete_verification_status(member.id)
+        except Exception as e:
+            print(f"[Unclaim] Failed to delete verification status for {member.id}: {e}")
+
+    await asyncio.to_thread(_delete_link)
 
     log_activity_event(
         "verification",
@@ -3062,7 +3139,7 @@ async def slash_setup_verification(interaction: discord.Interaction):
             await old_msg.delete()
         except Exception:
             pass
-    set_setting("verification_channel_id", str(interaction.channel.id))
+    await asyncio.to_thread(set_setting, "verification_channel_id", str(interaction.channel.id))
     await send_verification_panel(interaction.channel)
     await interaction.followup.send("✅ Verification panel sent to this channel.", ephemeral=True)
 
@@ -3074,7 +3151,7 @@ async def slash_set_verified_role(interaction: discord.Interaction, role: discor
     if not is_admin_member(interaction.user):
         await interaction.followup.send("🛡️ This command is restricted to administrators.", ephemeral=True)
         return
-    set_setting("verified_role_id", str(role.id))
+    await asyncio.to_thread(set_setting, "verified_role_id", str(role.id))
     await interaction.followup.send(f"✅ Verified role set to: **{role.name}** (`{role.id}`)", ephemeral=True)
 
 
