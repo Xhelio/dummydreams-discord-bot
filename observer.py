@@ -461,7 +461,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
     # Menyimpan sesi & waktu disconnect terakhir selama grace period, supaya
     # observer yang dihentikan saat grace tetap menutup sesi di waktu disconnect.
     disconnect_meta = {"session_id": None, "at": None}
-    current_host = get_current_host_for_account(username_clean) or "Host"
+    current_host = await asyncio.to_thread(get_current_host_for_account, username_clean) or "Host"
 
     async def check_and_update_host_from_text(text: str, sender_username: str = None, source: str = "message", origin: str = "event"):
         """Detect host from Live Intro data only (event or strict intro fallback)."""
@@ -522,8 +522,8 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             current_host = detected
             runtime_status.set_live(username_clean, detected, source=source)
             if current_session_id:
-                update_live_session_host(current_session_id, detected)
-            set_current_host_for_account(username_clean, detected)
+                await asyncio.to_thread(update_live_session_host, current_session_id, detected)
+            await asyncio.to_thread(set_current_host_for_account, username_clean, detected)
             log_activity_event(
                 "host_detected",
                 f"Alias match in database: '{matched_alias}' -> {detected}. Host changed {old_host} -> {detected} on @{username_clean} from {origin}: \"{msg_preview}\"",
@@ -621,7 +621,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             runtime_status.clear_live(username_clean)
             probed_live = False
             if session_to_close:
-                end_live_session(session_to_close, end_time=disconnected_at)
+                await asyncio.to_thread(end_live_session, session_to_close, end_time=disconnected_at)
             # Saat offline, bot Discord akan MENGHAPUS pesan pengumuman lewat sesi tersimpan.
             # JANGAN hapus sesi DB lebih dulu, karena message_id dibutuhkan untuk menghapus pesan Discord.
             if announcement_callback:
@@ -666,7 +666,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             sid = current_session_id
             if sid:
                 try:
-                    touch_live_session(sid)
+                    await asyncio.to_thread(touch_live_session, sid)
                 except Exception:
                     pass
 
@@ -846,7 +846,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 if force_reconfirm_host:
                     print(f"[{username_clean}] Reconfirming host on reconnect (clearing stale host state).")
                     try:
-                        set_setting(f"current_host_{username_clean}", "")
+                        await asyncio.to_thread(set_setting, f"current_host_{username_clean}", "")
                     except Exception:
                         pass
                     # Use neutral placeholder until a real host is detected from LiveIntroEvent.
@@ -854,18 +854,20 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     _LAST_INTRO_ANALYZED.pop(username_clean, None)
                 else:
                     # Refresh host/session context on (re)connect so host detection can continue/update.
-                    stored_host = get_current_host_for_account(username_clean)
+                    stored_host = await asyncio.to_thread(get_current_host_for_account, username_clean)
                     if stored_host and stored_host != "Host":
                         current_host = stored_host
 
                 if not current_session_id:
-                    current_session_id = start_live_session(username_clean, initial_host=current_host)
+                    current_session_id = await asyncio.to_thread(
+                        start_live_session, username_clean, initial_host=current_host
+                    )
                 elif force_reconfirm_host:
                     try:
-                        update_live_session_host(current_session_id, "Host")
+                        await asyncio.to_thread(update_live_session_host, current_session_id, "Host")
                     except Exception:
                         pass
-                touch_live_session(current_session_id)
+                await asyncio.to_thread(touch_live_session, current_session_id)
                 start_session_heartbeat()
 
                 runtime_status.set_live(username_clean, current_host, source="event")
@@ -1163,12 +1165,12 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 grace_at = disconnect_meta.get("at")
                 if grace_session_id:
                     try:
-                        end_live_session(grace_session_id, end_time=grace_at)
+                        await asyncio.to_thread(end_live_session, grace_session_id, end_time=grace_at)
                     except Exception:
                         pass
             if is_connected and current_session_id:
                 try:
-                    end_live_session(current_session_id)
+                    await asyncio.to_thread(end_live_session, current_session_id)
                 except Exception:
                     pass
             runtime_status.clear_live(username_clean)
@@ -1285,8 +1287,10 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     probed_live = True
                     runtime_status.set_live(username_clean, current_host, source="probe")
                     if not current_session_id:
-                        current_session_id = start_live_session(username_clean, initial_host=current_host)
-                    touch_live_session(current_session_id)
+                        current_session_id = await asyncio.to_thread(
+                            start_live_session, username_clean, initial_host=current_host
+                        )
+                    await asyncio.to_thread(touch_live_session, current_session_id)
                     start_session_heartbeat()
                     await _trigger_announcement(announcement_callback, username_clean, True, host_name=current_host)
                     ws_err = str(cycle_error) if cycle_error else "none"

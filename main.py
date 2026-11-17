@@ -525,7 +525,7 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
             if not bot.is_ready():
                 await bot.wait_until_ready()
 
-            sessions = get_active_live_announcements_for_account(user_key)
+            sessions = await asyncio.to_thread(get_active_live_announcements_for_account, user_key)
 
             # --- OFFLINE: remove all stored announcement messages ---
             if not is_live:
@@ -548,7 +548,7 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
                     except Exception as e:
                         print(f"[Discord] Error while cleaning announcement for @{user_key} in {session.get('channel_id')}: {e}")
                     finally:
-                        delete_active_live_announcement(user_key, session.get("channel_id"))
+                        await asyncio.to_thread(delete_active_live_announcement, user_key, session.get("channel_id"))
                 if sessions:
                     print(f"[Discord] Announcement sessions cleared for @{user_key}.")
                 else:
@@ -558,7 +558,7 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
             if not is_feature_enabled("announcements"):
                 return
 
-            configured_channels = get_announcement_channel_ids()
+            configured_channels = await asyncio.to_thread(get_announcement_channel_ids)
             if not configured_channels:
                 print("[Discord] Notification failed: no announcement channel configured.")
                 return
@@ -602,10 +602,10 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
                     # Only drop the session record when we are sure it's gone or deleted.
                     # If fetch failed transiently, keep the record to avoid duplicates later.
                     if old_msg or missing:
-                        delete_active_live_announcement(user_key, session.get("channel_id"))
+                        await asyncio.to_thread(delete_active_live_announcement, user_key, session.get("channel_id"))
 
             for channel_id in configured_channels:
-                session = get_active_live_announcement(user_key, channel_id)
+                session = await asyncio.to_thread(get_active_live_announcement, user_key, channel_id)
                 channel = await _resolve_announcement_channel({"channel_id": channel_id})
                 if not channel:
                     continue
@@ -634,7 +634,9 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
                     continue
 
                 try:
-                    saved = save_active_live_announcement(user_key, channel.id, new_msg.id, final_host_name)
+                    saved = await asyncio.to_thread(
+                        save_active_live_announcement, user_key, channel.id, new_msg.id, final_host_name
+                    )
                     if not saved:
                         print(f"[Discord] Announcement sent but session was not saved for @{user_key} in {channel.id} (Msg ID: {new_msg.id}); deleting message to avoid duplicate.")
                         try:
@@ -651,7 +653,7 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
                     except Exception:
                         pass
 
-            update_active_live_announcement_host(user_key, final_host_name)
+            await asyncio.to_thread(update_active_live_announcement_host, user_key, final_host_name)
     except Exception as e:
         print(f"[Discord] process_live_announcement error for @{user_key} (is_live={is_live}): {e}")
 
@@ -662,7 +664,7 @@ async def reconcile_announcement_sessions(delay_seconds: int = 180):
     """
     await asyncio.sleep(delay_seconds)
     try:
-        sessions = get_all_active_live_announcements()
+        sessions = await asyncio.to_thread(get_all_active_live_announcements)
         if not sessions:
             return
         live_now = set(get_current_live_hosts())
@@ -900,8 +902,8 @@ def build_rules_welcome_embed() -> discord.Embed:
 
 async def send_verification_panel(channel):
     msg = await channel.send(embed=build_verification_panel_embed(), view=VerificationChannelView())
-    set_setting("verification_panel_channel_id", str(channel.id))
-    set_setting("verification_panel_message_id", str(msg.id))
+    await asyncio.to_thread(set_setting, "verification_panel_channel_id", str(channel.id))
+    await asyncio.to_thread(set_setting, "verification_panel_message_id", str(msg.id))
 
 
 async def move_verification_panel(old_channel_id, new_channel_id):
@@ -1223,7 +1225,8 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
             await interaction.response.defer(ephemeral=True, thinking=True)
         except discord.InteractionResponded:
             pass
-        except Exception:
+        except Exception as e:
+            print(f"[Verification] Could not ACK modal submit: {type(e).__name__}: {e}")
             return
 
         if not is_feature_enabled("verification"):
@@ -2132,6 +2135,17 @@ async def on_ready():
     print(f"[Discord] Bot logged in as {bot.user} (env={bot_env}, version={get_push_code()})")
     if bot_env == "test":
         print("[Discord] TEST environment active: use a separate bot token, database, and server from stable.")
+    try:
+        endpoint = getattr(bot.application, "interactions_endpoint_url", None)
+        if endpoint:
+            print(
+                "[Discord] CRITICAL: this application has an Interactions Endpoint URL set "
+                f"({endpoint}). Discord will NOT deliver slash commands, buttons, or modals to "
+                "this gateway bot. Remove the Interactions Endpoint URL in the Discord Developer "
+                "Portal > General Information, then restart."
+            )
+    except Exception as e:
+        print(f"[Discord] Could not check interactions endpoint URL: {e}")
     if chatbot.is_chatbot_enabled():
         cfg = chatbot.get_chatbot_config()
         print(f"[Chatbot] enabled (model={cfg.get('model')}, base_url={cfg.get('base_url')})")
@@ -2171,6 +2185,88 @@ async def on_ready():
         asyncio.create_task(reconcile_announcement_sessions())
         asyncio.create_task(leaderboard_loop())
         asyncio.create_task(tier_reset_loop())
+
+
+@bot.event
+async def on_connect():
+    print("[Gateway] Connected to Discord gateway.")
+
+
+@bot.event
+async def on_disconnect():
+    print("[Gateway] Disconnected from Discord; reconnecting...")
+
+
+@bot.event
+async def on_resumed():
+    print("[Gateway] Resumed Discord session.")
+
+
+@bot.event
+async def on_interaction(interaction: discord.Interaction):
+    """Log receipt and provide a fallback for outdated components/modals.
+
+    Older verification DMs used random custom_ids that cannot be registered
+    persistently. Instead of letting Discord show "didn't respond in time",
+    answer with a clear instruction if nothing acknowledged the interaction.
+    """
+    if interaction.type not in (
+        discord.InteractionType.component,
+        discord.InteractionType.modal_submit,
+    ):
+        return
+    custom_id = str((interaction.data or {}).get("custom_id") or "")
+    try:
+        lag = time.time() - interaction.created_at.timestamp()
+    except Exception:
+        lag = -1
+    print(
+        f"[Gateway] {interaction.type.name} received "
+        f"custom_id={custom_id or '-'} lag={lag:.2f}s user={interaction.user.id}"
+    )
+    if not re.fullmatch(r"[0-9a-f]{32}", custom_id):
+        return
+
+    async def _fallback():
+        await asyncio.sleep(1.8)
+        if interaction.response.is_done():
+            return
+        print(
+            f"[Interaction Fallback] Unhandled legacy component "
+            f"custom_id={custom_id} type={interaction.type.name} user={interaction.user.id}"
+        )
+        try:
+            await interaction.response.send_message(
+                "⚠️ This verification message is outdated, so I sent you a fresh menu.",
+                ephemeral=True,
+            )
+        except Exception as e:
+            print(f"[Interaction Fallback] Could not reply: {e}")
+            return
+
+        # Rebuild the current step from the pending verification and DM it, so
+        # users clicking an old message do not have to start from the panel.
+        if interaction.type is not discord.InteractionType.component:
+            return
+        try:
+            pending = await asyncio.to_thread(get_pending_verification, interaction.user.id)
+            tiktok_user = (pending or {}).get("tiktok_user")
+            if not tiktok_user:
+                return
+            _, total_coins, display_name = await asyncio.to_thread(is_tiktok_user_in_db, tiktok_user)
+            embed, view = await asyncio.to_thread(
+                build_verification_start,
+                interaction.user.id,
+                tiktok_user,
+                total_coins,
+                display_name,
+            )
+            await interaction.user.send(embed=embed, view=view)
+            print(f"[Interaction Fallback] Re-sent verification menu to {interaction.user.id} for @{tiktok_user}.")
+        except Exception as e:
+            print(f"[Interaction Fallback] Could not resend verification menu: {e}")
+
+    asyncio.create_task(_fallback())
 
 
 @bot.event

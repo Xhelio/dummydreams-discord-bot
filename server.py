@@ -81,12 +81,19 @@ def health():
         env = "stable"
     elif env in ("testing", "staging", "dev", "development"):
         env = "test"
+    version = (
+        os.environ.get("PUSH_CODE")
+        or os.environ.get("BOT_VERSION")
+        or (os.environ.get("RENDER_GIT_COMMIT") or "")[:7]
+        or "unknown"
+    )
     return jsonify({
         "ok": db_ok,
         "db": db_ok,
         "bot_ready": bot_ready,
         "bot_user": bot_user,
         "env": env or "stable",
+        "version": version,
         "live_tracked": live_count,
     }), (200 if db_ok else 503)
 

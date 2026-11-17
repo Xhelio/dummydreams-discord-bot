@@ -1,5 +1,6 @@
 import os
 import json
+import queue
 import re
 import time
 import threading
@@ -1624,7 +1625,12 @@ def init_db():
         conn.close()
 
 def log_activity_event(event_type: str, message: str, tiktok_username: str = ""):
-    """Mencatat aktivitas ke tabel activity_logs (dan selalu ke console)."""
+    """Mencatat aktivitas ke tabel activity_logs (dan selalu ke console).
+
+    Penulisan DB dilakukan oleh satu thread penulis di belakang queue. Dengan
+    begitu pemanggilan dari event loop Discord tidak pernah menunggu Turso,
+    termasuk saat live ramai dan banyak event gift/komentar masuk.
+    """
     event_type = str(event_type or "info")
     message = str(message or "")
     user_clean = (tiktok_username or "").lower().lstrip("@")
@@ -1636,22 +1642,51 @@ def log_activity_event(event_type: str, message: str, tiktok_username: str = "")
     # Always emit to console so logs remain visible in Render even if DB insert fails.
     print(f"[ActivityLog] [{event_type}] @{user_clean or '-'} {message}")
 
-    conn = None
+    _ensure_activity_log_writer()
     try:
-        conn = get_db_connection()
-        conn.execute("""
-            INSERT INTO activity_logs (event_type, tiktok_username, message, created_at)
-            VALUES (?, ?, ?, ?)
-        """, (event_type, user_clean, message, now_str))
-        conn.commit()
-    except Exception as e:
-        print(f"[ActivityLog Error] Failed to persist event ({event_type} @{user_clean}): {e}")
-    finally:
+        _ACTIVITY_LOG_QUEUE.put_nowait((event_type, message, user_clean, now_str))
+    except queue.Full:
+        print("[ActivityLog] Queue penuh; event dibuang agar event loop tidak terblokir.")
+
+
+_ACTIVITY_LOG_QUEUE = queue.Queue(maxsize=5000)
+_ACTIVITY_LOG_WRITER_STARTED = False
+_ACTIVITY_LOG_WRITER_LOCK = threading.Lock()
+
+
+def _ensure_activity_log_writer():
+    global _ACTIVITY_LOG_WRITER_STARTED
+    if _ACTIVITY_LOG_WRITER_STARTED:
+        return
+    with _ACTIVITY_LOG_WRITER_LOCK:
+        if _ACTIVITY_LOG_WRITER_STARTED:
+            return
+        _ACTIVITY_LOG_WRITER_STARTED = True
+        threading.Thread(
+            target=_activity_log_writer_loop,
+            name="activity-log-writer",
+            daemon=True,
+        ).start()
+
+
+def _activity_log_writer_loop():
+    while True:
+        item = _ACTIVITY_LOG_QUEUE.get()
+        if item is None:
+            _ACTIVITY_LOG_QUEUE.task_done()
+            return
+        event_type, message, user_clean, now_str = item
         try:
-            if conn:
-                conn.close()
-        except Exception:
-            pass
+            write_transaction(
+                lambda conn: conn.execute("""
+                    INSERT INTO activity_logs (event_type, tiktok_username, message, created_at)
+                    VALUES (?, ?, ?, ?)
+                """, (event_type, user_clean, message, now_str))
+            )
+        except Exception as e:
+            print(f"[ActivityLog Error] Failed to persist event ({event_type} @{user_clean}): {e}")
+        finally:
+            _ACTIVITY_LOG_QUEUE.task_done()
 
 def get_user_channel_spent(viewer_user: str, target_user: str) -> int:
     """Menghitung total koin yang sudah di-spent oleh viewer di target channel ini."""
