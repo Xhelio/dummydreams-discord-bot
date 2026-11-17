@@ -61,6 +61,7 @@ _version = (
 _setup_done = False
 _writer: Optional["_LogFileWriter"] = None
 _console_stream = None
+_console_writer: Optional["_ConsoleWriter"] = None
 _crash_reported = False
 _notify_queue: "queue.Queue[dict]" = queue.Queue(maxsize=500)
 _recent: dict[str, list] = {}
@@ -253,6 +254,40 @@ class _Tee:
             raise OSError("no fileno")
 
 
+class _ConsoleWriter:
+    """Background console writer so stdout backpressure cannot block asyncio."""
+
+    def __init__(self, stream):
+        self._stream = stream
+        self._queue: "queue.Queue[Optional[str]]" = queue.Queue(maxsize=10000)
+        threading.Thread(target=self._run, name="log-console-writer", daemon=True).start()
+
+    def write(self, text: str) -> None:
+        if not text:
+            return
+        try:
+            self._queue.put_nowait(text)
+        except queue.Full:
+            pass
+
+    def close(self) -> None:
+        try:
+            self._queue.put_nowait(None)
+        except queue.Full:
+            pass
+
+    def _run(self) -> None:
+        while True:
+            text = self._queue.get()
+            if text is None:
+                return
+            try:
+                self._stream.write(text)
+                self._stream.flush()
+            except Exception:
+                pass
+
+
 class _ConsoleAndFileHandler(logging.Handler):
     def __init__(self, writer: _LogFileWriter, level=logging.DEBUG):
         super().__init__(level)
@@ -267,10 +302,11 @@ class _ConsoleAndFileHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             message = redact(self.format(record))
-            try:
-                _ORIGINAL_STDOUT.write(message + "\n")
-            except Exception:
-                pass
+            # Console output is synchronous on Render; keep DEBUG (Discord GETs,
+            # probe internals) in the file only so slow stdout cannot stall the
+            # Discord event loop. The file writer is fully asynchronous.
+            if record.levelno >= logging.INFO and _console_writer is not None:
+                _console_writer.write(message + "\n")
             self._writer.write(message + "\n")
         except Exception:
             self.handleError(record)
@@ -319,13 +355,14 @@ class _NotifyFilter(logging.Filter):
 
 
 def setup_logging() -> None:
-    global _setup_done, _writer, _console_stream
+    global _setup_done, _writer, _console_stream, _console_writer
     if _setup_done:
         return
     _setup_done = True
 
     os.makedirs(LOG_DIR, exist_ok=True)
     _writer = _LogFileWriter(LOG_PATH, LOG_MAX_BYTES, LOG_BACKUPS)
+    _console_writer = _ConsoleWriter(_ORIGINAL_STDOUT)
     _console_stream = _Tee(_ORIGINAL_STDOUT, _writer, "stdout")
     sys.stdout = _console_stream
     sys.stderr = _Tee(_ORIGINAL_STDERR, _writer, "stderr")
@@ -350,6 +387,13 @@ def setup_logging() -> None:
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
     logging.getLogger("waitress").setLevel(logging.INFO)
+    # TikTokLive uses httpx/httpcore. Their DEBUG output dumps entire TLS
+    # response headers (multi-KB CSP blobs) for every probe on every host,
+    # which floods the log and burns event-loop time formatting strings.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("hpack").setLevel(logging.WARNING)
+    logging.getLogger("h2").setLevel(logging.WARNING)
 
     sys.excepthook = _excepthook
     threading.excepthook = _thread_excepthook
@@ -363,6 +407,7 @@ def setup_logging() -> None:
     logger.info("=" * 78)
 
     atexit.register(_writer.close)
+    atexit.register(_console_writer.close)
 
 
 def _excepthook(exc_type, exc_value, exc_tb) -> None:

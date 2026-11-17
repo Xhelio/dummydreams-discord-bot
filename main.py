@@ -2223,20 +2223,49 @@ async def on_resumed():
     print("[Gateway] Resumed Discord session.")
 
 
+async def _loop_lag_monitor() -> None:
+    """Detect synchronous work blocking the Discord event loop.
+
+    A healthy loop wakes every ~1s. Overshoot means some coroutine performed
+    blocking I/O or heavy CPU work without yielding -- the usual reason an
+    interaction is not acknowledged within Discord's 3-second window.
+    """
+    interval = 1.0
+    while True:
+        started = time.perf_counter()
+        await asyncio.sleep(interval)
+        lag = (time.perf_counter() - started) - interval
+        if lag >= 1.0:
+            current = asyncio.current_task()
+            tasks = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
+            names = sorted({getattr(t.get_coro(), "__qualname__", "?") for t in tasks})[:12]
+            log.warning(
+                "[EventLoop] blocked ~%.2fs; active_tasks=%d names=%s",
+                lag,
+                len(tasks),
+                ", ".join(names),
+            )
+
+
 async def _watch_unacknowledged_interaction(interaction: discord.Interaction) -> None:
     """Warn when an interaction is still not acknowledged near Discord's 3s limit."""
     try:
         await asyncio.sleep(2.5)
         if interaction.response.is_done():
             return
+        try:
+            received_lag = time.time() - interaction.created_at.timestamp()
+        except Exception:
+            received_lag = -1
         log.warning(
             "[Interaction Timeout Risk] type=%s command=%s custom_id=%s user=%s guild=%s "
-            "was not acknowledged after 2.5s (Discord will show 'didn't respond in time' at ~3s).",
+            "was not acknowledged after 2.5s (gateway_lag=%.2fs; Discord shows 'didn't respond in time' at ~3s).",
             interaction.type.name,
             str((interaction.data or {}).get("name") or "-"),
             str((interaction.data or {}).get("custom_id") or "-"),
             getattr(interaction.user, "id", "?"),
             getattr(getattr(interaction, "guild", None), "id", "-"),
+            received_lag,
         )
     except asyncio.CancelledError:
         raise
@@ -3260,6 +3289,7 @@ async def main():
 
     # Deliver queued warnings/errors to the Discord error channel.
     asyncio.create_task(log_setup.notify_loop(bot))
+    asyncio.create_task(_loop_lag_monitor())
     log.info(
         "[Startup] Error notifications -> channel %s (queue=%s).",
         log_setup.LOG_ERROR_CHANNEL_ID,
