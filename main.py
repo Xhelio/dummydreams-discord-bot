@@ -3136,7 +3136,11 @@ async def slash_log(
         await interaction.followup.send(f"{header}\n```\n{text}\n```", ephemeral=True)
         return
 
-    filename = f"bot-log-{info['env']}-{info['version']}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
+    safe_version = re.sub(r"[^A-Za-z0-9._-]+", "_", str(info["version"]))[:24]
+    filename = (
+        f"bot-log-{info['env']}-{safe_version}-"
+        f"{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
+    )
     payload = io.BytesIO(text.encode("utf-8", "replace"))
     await interaction.followup.send(
         header + "\nDownload the attached file (it is visible only to you).",
