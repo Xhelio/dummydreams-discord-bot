@@ -30,12 +30,66 @@ _DB_HEALTH_CACHE = {"ok": True, "at": 0.0}
 _SETTINGS_CACHE = {}
 _SETTINGS_CACHE_TTL = 15.0
 _SETTINGS_CACHE_LOCK = threading.Lock()
+_SETTINGS_REFRESHING = set()
 
 
 def invalidate_settings_cache():
     """Drop every cached setting (used after bulk admin saves)."""
     with _SETTINGS_CACHE_LOCK:
         _SETTINGS_CACHE.clear()
+
+
+def _fetch_setting_value(key: str):
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        row = cur.execute("SELECT value FROM bot_settings WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def warm_settings_cache():
+    """Load every setting into memory (call once, off the event loop).
+
+    After this, ``get_setting`` hits memory even for keys that have never been
+    read, so a cache miss can never block the Discord event loop.
+    """
+    conn = get_db_connection()
+    try:
+        rows = conn.execute("SELECT key, value FROM bot_settings").fetchall()
+    finally:
+        conn.close()
+    now = time.time()
+    with _SETTINGS_CACHE_LOCK:
+        for key, value in rows:
+            _SETTINGS_CACHE[key] = (value, now + _SETTINGS_CACHE_TTL)
+
+
+def _schedule_setting_refresh(key: str):
+    """Refresh one stale setting in a daemon thread (stale-while-revalidate)."""
+    with _SETTINGS_CACHE_LOCK:
+        if key in _SETTINGS_REFRESHING:
+            return
+        _SETTINGS_REFRESHING.add(key)
+
+    def _run():
+        try:
+            value = _fetch_setting_value(key)
+            with _SETTINGS_CACHE_LOCK:
+                _SETTINGS_CACHE[key] = (value, time.time() + _SETTINGS_CACHE_TTL)
+        except Exception as e:
+            print(f"[DB] Settings refresh failed for {key!r}: {type(e).__name__}: {e}")
+            # Keep serving the stale value and retry soon instead of hammering.
+            with _SETTINGS_CACHE_LOCK:
+                cached = _SETTINGS_CACHE.get(key)
+                if cached is not None:
+                    _SETTINGS_CACHE[key] = (cached[0], time.time() + 5.0)
+        finally:
+            with _SETTINGS_CACHE_LOCK:
+                _SETTINGS_REFRESHING.discard(key)
+
+    threading.Thread(target=_run, name=f"settings-refresh:{key}", daemon=True).start()
 
 
 # SQLite/Turso has a single writer. Now that gift/comment handlers run in worker
@@ -2677,25 +2731,23 @@ import random
 def get_setting(key: str, default: str = None) -> str:
     """Mengambil nilai setting dari tabel bot_settings.
 
-    Nilai di-cache sebentar (15 detik) supaya jalur panas seperti event gift
-    tidak membuka koneksi Turso berkali-kali hanya untuk membaca feature flag.
+    Cache + stale-while-revalidate: setelah warm-up, pembacaan tidak pernah
+    menyentuh Turso secara sinkron di event loop. Nilai basi dikembalikan
+    langsung sementara refresh berjalan di thread latar.
     """
     now = time.time()
     with _SETTINGS_CACHE_LOCK:
         cached = _SETTINGS_CACHE.get(key)
-        if cached is not None and cached[1] > now:
-            return cached[0] if cached[0] is not None else default
+    if cached is not None:
+        value, expires = cached
+        if expires <= now:
+            _schedule_setting_refresh(key)
+        return value if value is not None else default
 
-    conn = get_db_connection()
-    try:
-        cur = conn.cursor()
-        row = cur.execute("SELECT value FROM bot_settings WHERE key = ?", (key,)).fetchone()
-        value = row[0] if row else None
-    finally:
-        conn.close()
-
+    # Cold miss (key belum pernah dibaca). Warm-up startup membuat ini jarang.
+    value = _fetch_setting_value(key)
     with _SETTINGS_CACHE_LOCK:
-        _SETTINGS_CACHE[key] = (value, now + _SETTINGS_CACHE_TTL)
+        _SETTINGS_CACHE[key] = (value, time.time() + _SETTINGS_CACHE_TTL)
     return value if value is not None else default
 
 def set_setting(key: str, value: str):
@@ -2709,8 +2761,10 @@ def set_setting(key: str, value: str):
         conn.commit()
     finally:
         conn.close()
+    # Update the cache in place so the next read cannot cause a sync DB hit.
     with _SETTINGS_CACHE_LOCK:
-        _SETTINGS_CACHE.pop(key, None)
+        _SETTINGS_CACHE[key] = (str(value), time.time() + _SETTINGS_CACHE_TTL)
+        _SETTINGS_REFRESHING.discard(key)
 
 
 def get_bool_setting(key: str, default: bool = True) -> bool:

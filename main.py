@@ -14,6 +14,7 @@ from discord.ext import commands
 
 from db import (
     init_db,
+    warm_settings_cache,
     get_discord_id_from_tiktok,
     get_db_connection,
     get_daily_top_supporters,
@@ -105,6 +106,24 @@ async def global_bot_check(ctx):
                 raise commands.CheckFailure("channel_not_allowed")
     return True
 
+def _note_interaction_lag(interaction: discord.Interaction, label: str):
+    """Log gateway -> handler delay.
+
+    Discord invalidates an interaction when the handler has not acknowledged it
+    within ~3 seconds. If this prints >= 1.5s the event loop was blocked before
+    the callback ran, which is the cause of "didn't respond in time".
+    """
+    try:
+        lag = time.time() - interaction.created_at.timestamp()
+    except Exception:
+        return
+    if lag >= 1.5:
+        print(
+            f"[Interaction Lag] {label}: handled after {lag:.2f}s "
+            f"(user={getattr(interaction.user, 'id', '?')})"
+        )
+
+
 def get_verified_role(guild: discord.Guild) -> discord.Role:
     """Mengambil object Role verifikasi dari setting, env, roles.json, atau nama role."""
     if not guild:
@@ -173,7 +192,8 @@ async def grant_verified_access(member: discord.Member, tiktok_user: str, total_
         problem_text = "; ".join(problems)
         print(f"[Role Error] Failed to add verified role for @{tiktok_user}: {problem_text}")
         try:
-            log_activity_event(
+            await asyncio.to_thread(
+                log_activity_event,
                 "system",
                 f"[Verify] Failed to grant verified role to {member} for @{tiktok_user}: {problem_text}.",
                 tiktok_user,
@@ -705,17 +725,20 @@ async def update_leaderboard_message():
         except Exception:
             return
 
-    conn = get_db_connection()
-    try:
-        all_time = conn.execute("""
-            SELECT tiktok_user, display_name, total_coins
-            FROM tiktok_gifts ORDER BY total_coins DESC LIMIT 10
-        """).fetchall()
-    finally:
-        conn.close()
+    def _load_leaderboard_rows():
+        conn = get_db_connection()
+        try:
+            all_time = conn.execute("""
+                SELECT tiktok_user, display_name, total_coins
+                FROM tiktok_gifts ORDER BY total_coins DESC LIMIT 10
+            """).fetchall()
+        finally:
+            conn.close()
+        return all_time, get_daily_top_supporters()
+
+    all_time, daily = await asyncio.to_thread(_load_leaderboard_rows)
 
     embed = build_leaderboard_embed("🏆 All-Time Top Supporters", all_time)
-    daily = get_daily_top_supporters()
     if daily:
         medals = {1: "🥇", 2: "🥈", 3: "🥉"}
         daily_lines = []
@@ -1194,6 +1217,7 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        _note_interaction_lag(interaction, "verification modal submit")
         # Defer before DB lookups to avoid Discord "didn't respond in time".
         try:
             await interaction.response.defer(ephemeral=True, thinking=True)
@@ -1211,16 +1235,29 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
         u_clean = self.username_input.value.strip().lstrip('@').lower()
         actor = f"{interaction.user} (ID {interaction.user.id})"
 
-        await asyncio.to_thread(
-            log_activity_event,
-            "verification",
-            f"[VERIFY ATTEMPT] {actor} requested verification for @{u_clean}.",
-            u_clean
-        )
+        # Run the log + three pre-checks in a single worker task. Separate
+        # asyncio.to_thread calls queue separately behind the shared DB
+        # executor; during a busy live that can add seconds before the user
+        # gets any feedback.
+        def _precheck():
+            log_activity_event(
+                "verification",
+                f"[VERIFY ATTEMPT] {actor} requested verification for @{u_clean}.",
+                u_clean
+            )
+            existing = get_user_mapping(interaction.user.id)
+            if existing:
+                return "linked", existing
+            claimed, claimed_id = is_user_already_claimed(u_clean)
+            if claimed:
+                return "claimed", claimed_id
+            return "ok", is_tiktok_user_in_db(u_clean)
+
+        precheck_status, precheck_payload = await asyncio.to_thread(_precheck)
 
         # 1. Discord user already linked?
-        existing_tiktok = await asyncio.to_thread(get_user_mapping, interaction.user.id)
-        if existing_tiktok:
+        if precheck_status == "linked":
+            existing_tiktok = precheck_payload
             await asyncio.to_thread(
                 log_activity_event,
                 "verification",
@@ -1235,8 +1272,8 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
             return
 
         # 2. TikTok account claimed by someone else?
-        is_claimed, claimed_discord_id = await asyncio.to_thread(is_user_already_claimed, u_clean)
-        if is_claimed:
+        if precheck_status == "claimed":
+            claimed_discord_id = precheck_payload
             await asyncio.to_thread(
                 log_activity_event,
                 "verification",
@@ -1251,8 +1288,8 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
             )
             return
 
-        # 3. Look up the account (may not exist yet / may have less than 10 coins)
-        exists, total_coins, display_name = await asyncio.to_thread(is_tiktok_user_in_db, u_clean)
+        # 3. Account lookup completed inside the same worker task above.
+        exists, total_coins, display_name = precheck_payload
 
         # 3b. Coin-only mode: grant access without ownership proof once the
         # claimed account has reached the admin-configured coin threshold.
@@ -1373,6 +1410,7 @@ class VerificationMethodChoiceView(discord.ui.View):
 
     @discord.ui.button(label="Verify via Bio", style=discord.ButtonStyle.primary, emoji="📝", custom_id="verify_choice_bio")
     async def via_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
+        _note_interaction_lag(interaction, "verification method: bio")
         await interaction.response.defer()
         tiktok_user, total_coins = await self._resolve(interaction)
         if not tiktok_user:
@@ -1394,6 +1432,7 @@ class VerificationMethodChoiceView(discord.ui.View):
 
     @discord.ui.button(label="Verify via Live Greeting", style=discord.ButtonStyle.danger, emoji="🔴", custom_id="verify_choice_live_greeting")
     async def via_live(self, interaction: discord.Interaction, button: discord.ui.Button):
+        _note_interaction_lag(interaction, "verification method: live greeting")
         await interaction.response.defer()
         tiktok_user, total_coins = await self._resolve(interaction)
         if not tiktok_user:
@@ -1457,6 +1496,7 @@ class LowActivityVerificationView(discord.ui.View):
 
     @discord.ui.button(label="Verify via Live Greeting", style=discord.ButtonStyle.danger, emoji="🔴", custom_id="verify_low_live_greeting")
     async def via_live_greeting(self, interaction: discord.Interaction, button: discord.ui.Button):
+        _note_interaction_lag(interaction, "low-activity method: live greeting")
         await interaction.response.defer()
         tiktok_user, total_coins = await self._resolve(interaction)
         if not tiktok_user:
@@ -1494,6 +1534,7 @@ class LowActivityVerificationView(discord.ui.View):
 
     @discord.ui.button(label="Verify via Bio", style=discord.ButtonStyle.success, emoji="📝", custom_id="verify_low_bio")
     async def via_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
+        _note_interaction_lag(interaction, "low-activity method: bio")
         await interaction.response.defer()
         tiktok_user, total_coins = await self._resolve(interaction)
         if not tiktok_user:
@@ -1573,6 +1614,7 @@ class BioVerificationView(discord.ui.View):
         custom_id="bio_verify_persistent"
     )
     async def check_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
+        _note_interaction_lag(interaction, "bio verify")
         # Defer immediately: DB/Turso calls and TikTok fetch can exceed Discord's
         # 3-second interaction response deadline. Defer on the message so we can
         # update the verification panel in place (not an ephemeral-only response).
@@ -1800,6 +1842,7 @@ class LiveVerificationView(discord.ui.View):
 
     @discord.ui.button(label="Check Verification Status", style=discord.ButtonStyle.primary, emoji="🔄", custom_id="verify_live_code_check")
     async def check_status(self, interaction: discord.Interaction, button: discord.ui.Button):
+        _note_interaction_lag(interaction, "live code check")
         await interaction.response.defer()
         tiktok_user, code, total_coins = await self._resolve(interaction)
         if not tiktok_user:
@@ -1882,6 +1925,7 @@ class LiveGreetingVerificationView(discord.ui.View):
 
     @discord.ui.button(label="Check Verification Status", style=discord.ButtonStyle.primary, emoji="🔄", custom_id="verify_live_greeting_check")
     async def check_status(self, interaction: discord.Interaction, button: discord.ui.Button):
+        _note_interaction_lag(interaction, "live greeting check")
         await interaction.response.defer()
         tiktok_user, total_coins = await self._resolve(interaction)
         if not tiktok_user:
@@ -2155,9 +2199,15 @@ async def on_command_error(ctx, error):
 @bot.event
 async def on_member_join(member: discord.Member):
     # Restore roles if the member has verified before
-    tt_user = get_user_mapping(member.id)
-    if tt_user:
+    def _lookup():
+        tt_user = get_user_mapping(member.id)
+        if not tt_user:
+            return None, 0
         _, total_coins, _ = is_tiktok_user_in_db(tt_user)
+        return tt_user, total_coins
+
+    tt_user, total_coins = await asyncio.to_thread(_lookup)
+    if tt_user:
         await grant_verified_access(member, tt_user, total_coins)
 
 @bot.command(name="setup_verification")
@@ -2752,6 +2802,15 @@ async def main():
 
     init_db()
 
+    # Load bot_settings into memory before any interaction arrives. With the
+    # stale-while-revalidate cache this means a settings read can never block
+    # the Discord event loop, even on a cold cache.
+    try:
+        await asyncio.to_thread(warm_settings_cache)
+        print("[Startup] Settings cache warmed.")
+    except Exception as e:
+        print(f"[Startup] Could not warm settings cache: {e}")
+
     # Rebuild the in-memory live-verification guard so pending requests created
     # before this start still match comments without hitting the database for
     # every other live-chat message.
@@ -2764,7 +2823,7 @@ async def main():
     except Exception as e:
         print(f"[Verification] Could not rebuild live pending cache: {e}")
 
-    suspend_open_live_sessions()
+    await asyncio.to_thread(suspend_open_live_sessions)
     set_verification_refresh_handler(schedule_verification_panel_refresh)
     set_presence_refresh_handler(schedule_presence_refresh)
     keep_alive(handle_api_announcement)
