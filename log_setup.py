@@ -464,6 +464,15 @@ def _format_notification(item: dict, repeats: int = 0) -> str:
     return text
 
 
+def _dedupe_key(item: dict) -> str:
+    raw = str(item.get("message") or "")[:160]
+    raw = re.sub(r"\d+(?:\.\d+)?ms\b", "#ms", raw)
+    raw = re.sub(r"\d+(?:\.\d+)?s\b", "#s", raw)
+    raw = re.sub(r"(?i)failures?[=:]\s*\d+", "failures=#", raw)
+    raw = re.sub(r"\b[0-9a-f]{8,}\b", "#", raw)
+    return f"{item.get('logger')}|{raw}"
+
+
 async def notify_loop(bot) -> None:
     """Deliver queued warnings/errors to the Discord error channel."""
     logger = logging.getLogger("bot.notify")
@@ -489,7 +498,7 @@ async def notify_loop(bot) -> None:
             skipped = 0
             while len(batch) < 3 and not _notify_queue.empty():
                 item = _notify_queue.get_nowait()
-                key = f"{item['logger']}|{item['message'][:120]}"
+                key = _dedupe_key(item)
                 now = time.monotonic()
                 with _recent_lock:
                     last, count = _recent.get(key, [0.0, 0])

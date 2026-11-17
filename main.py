@@ -2325,6 +2325,14 @@ async def on_interaction(interaction: discord.Interaction):
 
 @bot.event
 async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        log.debug(
+            "[Command] unknown !%s user=%s guild=%s",
+            getattr(ctx, "invoked_with", "?"),
+            getattr(ctx.author, "id", "?"),
+            getattr(getattr(ctx, "guild", None), "id", "-"),
+        )
+        return
     if isinstance(error, commands.CheckFailure):
         key = str(error)
         log.info(
@@ -2355,6 +2363,18 @@ async def on_command_error(ctx, error):
         )
         try:
             await ctx.send(f"❌ Missing argument: `{error.param.name}`.", delete_after=10)
+        except Exception:
+            pass
+        return
+    if isinstance(error, commands.UserInputError):
+        log.info(
+            "[Command] bad input !%s user=%s: %s",
+            getattr(ctx.command, "qualified_name", ctx.command),
+            getattr(ctx.author, "id", "?"),
+            error,
+        )
+        try:
+            await ctx.send(f"❌ Invalid input: {error}", delete_after=10)
         except Exception:
             pass
         return
