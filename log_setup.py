@@ -14,6 +14,7 @@ from __future__ import annotations
 import atexit
 import asyncio
 import contextvars
+import json
 import logging
 import os
 import platform
@@ -23,6 +24,7 @@ import sys
 import threading
 import time
 import traceback
+import urllib.request
 from datetime import datetime
 from typing import Optional
 
@@ -59,6 +61,7 @@ _version = (
 _setup_done = False
 _writer: Optional["_LogFileWriter"] = None
 _console_stream = None
+_crash_reported = False
 _notify_queue: "queue.Queue[dict]" = queue.Queue(maxsize=500)
 _recent: dict[str, list] = {}
 _recent_lock = threading.Lock()
@@ -363,9 +366,48 @@ def setup_logging() -> None:
 
 
 def _excepthook(exc_type, exc_value, exc_tb) -> None:
+    if issubclass(exc_type, KeyboardInterrupt):
+        return
     logging.getLogger("bot.crash").critical(
         "Uncaught exception", exc_info=(exc_type, exc_value, exc_tb)
     )
+    # The process may exit before the async notifier can run, so report fatal
+    # crashes directly over HTTP as a last resort.
+    _send_crash_report_sync(
+        "Uncaught exception",
+        "".join(traceback.format_exception(exc_type, exc_value, exc_tb)),
+    )
+
+
+def _send_crash_report_sync(title: str, detail: str) -> None:
+    global _crash_reported
+    if _crash_reported:
+        return
+    _crash_reported = True
+    token = (os.environ.get("DISCORD_TOKEN") or "").strip()
+    if not token or not LOG_ERROR_CHANNEL_ID:
+        return
+    info = get_build_info()
+    text = (
+        f"💥 **CRASH** · `{info['env']}` · `{info['version']}`\n"
+        f"**{title}**\n```{redact(detail)[-1700:]}```"
+    )
+    payload = json.dumps({"content": text[:1990]}).encode("utf-8")
+    request = urllib.request.Request(
+        f"https://discord.com/api/v10/channels/{LOG_ERROR_CHANNEL_ID}/messages",
+        data=payload,
+        headers={
+            "Authorization": f"Bot {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "DummyDreamsBot (crash-report, 1.0)",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            response.read()
+    except Exception as exc:
+        _ORIGINAL_STDERR.write(f"[CrashReport] direct send failed: {type(exc).__name__}: {exc}\n")
 
 
 def _thread_excepthook(args) -> None:
