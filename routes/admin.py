@@ -1229,6 +1229,46 @@ def view_activity():
     """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
     return render_template_string(html, logs=logs, gift_activities=gift_activities, all_hosts=all_hosts, current_filter=channel_filter)
 
+
+@admin_bp.route('/logs', methods=['GET'])
+def view_logs():
+    """JSON tail of the bot log file (admin-only via global auth hook).
+
+    Query params:
+      lines  - how many recent lines to include (1-3000, default 300)
+      level  - all | info | warning | error | (any substring filter)
+      search - only lines containing this text
+    """
+    from flask import jsonify, request
+    from log_setup import tail_log, get_build_info
+
+    try:
+        line_count = int(request.args.get('lines', 300))
+    except (TypeError, ValueError):
+        line_count = 300
+    line_count = max(1, min(line_count, 3000))
+    level = (request.args.get('level') or 'all').strip()
+    search = (request.args.get('search') or '').strip() or None
+
+    text, matched = tail_log(line_count, level, search)
+    payload_lines = [ln for ln in (text or '').splitlines() if ln.strip()]
+
+    try:
+        info = get_build_info() or {}
+    except Exception:
+        info = {}
+
+    return jsonify({
+        'ok': True,
+        'matched': int(matched or 0),
+        'returned': len(payload_lines),
+        'level': level,
+        'search': search,
+        'env': info.get('env'),
+        'version': info.get('version'),
+        'lines': payload_lines,
+    })
+
 def _fmt_duration(seconds) -> str:
     seconds = int(seconds or 0)
     if seconds <= 0:
