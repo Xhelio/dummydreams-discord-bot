@@ -37,6 +37,18 @@ def _log_request_start():
     g.log_request_id = uuid.uuid4().hex[:12]
     g.log_request_started = time.perf_counter()
     try:
+        auth = request.authorization
+        web_user = f"admin:{auth.username}" if auth and getattr(auth, "username", None) else None
+        log_setup.replace_log_context(
+            method=request.method,
+            path=log_setup.redact(request.path),
+            ip=request.remote_addr or "-",
+            web_user=web_user,
+            request_id=g.log_request_id,
+        )
+    except Exception:
+        pass
+    try:
         log.info(
             "HTTP -> %s %s ip=%s ua=%r",
             request.method,

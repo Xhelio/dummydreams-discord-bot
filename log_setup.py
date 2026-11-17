@@ -68,6 +68,125 @@ _recent: dict[str, list] = {}
 _recent_lock = threading.Lock()
 _SUPPRESS_NOTIFY = contextvars.ContextVar("log_suppress_notify", default=False)
 
+# Structured context attached to log records for the Discord error channel.
+# Bound per task/request so a notification can say WHO did WHAT and WHERE
+# without the reader having to parse the message text.
+_LOG_CONTEXT = contextvars.ContextVar("log_context", default=None)
+
+_CTX_ORDER = (
+    "actor",
+    "user_id",
+    "tiktok",
+    "host",
+    "guild",
+    "channel",
+    "command",
+    "custom_id",
+    "method",
+    "path",
+    "ip",
+    "web_user",
+    "session",
+    "event",
+    "request_id",
+)
+
+_CTX_LABELS = {
+    "actor": "Who",
+    "user_id": "User ID",
+    "tiktok": "TikTok",
+    "host": "Host",
+    "guild": "Guild",
+    "channel": "Channel",
+    "command": "Command",
+    "custom_id": "Button",
+    "method": "Method",
+    "path": "Path",
+    "ip": "IP",
+    "web_user": "Admin user",
+    "session": "Session",
+    "event": "Event",
+    "request_id": "Request",
+}
+
+
+def bind_log_context(**fields) -> dict:
+    """Merge context fields into the current task/thread (for notifications)."""
+    ctx = dict(_LOG_CONTEXT.get() or {})
+    for key, value in fields.items():
+        if value is None or value == "":
+            continue
+        ctx[str(key)] = value
+    _LOG_CONTEXT.set(ctx)
+    return ctx
+
+
+def replace_log_context(**fields) -> dict:
+    """Replace the current context (used at the start of an HTTP request)."""
+    ctx = {str(k): v for k, v in fields.items() if v is not None and v != ""}
+    _LOG_CONTEXT.set(ctx)
+    return ctx
+
+
+def clear_log_context() -> None:
+    _LOG_CONTEXT.set(None)
+
+
+def get_log_context() -> dict:
+    return dict(_LOG_CONTEXT.get() or {})
+
+
+def _format_context_lines(ctx: dict) -> list:
+    """Render context fields as short, readable lines for Discord."""
+    if not ctx:
+        return []
+    lines = []
+    seen = set()
+    for key in _CTX_ORDER:
+        if key not in ctx:
+            continue
+        seen.add(key)
+        value = redact(str(ctx[key])).strip()
+        if not value or value == "-":
+            continue
+        if len(value) > 150:
+            value = value[:147] + "…"
+        lines.append(f"**{_CTX_LABELS.get(key, key.title())}:** {value}")
+    for key, raw in ctx.items():
+        if key in seen:
+            continue
+        value = redact(str(raw)).strip()
+        if not value or value == "-":
+            continue
+        if len(value) > 120:
+            value = value[:117] + "…"
+        lines.append(f"**{str(key).replace('_', ' ').title()}:** {value}")
+    return lines[:10]
+
+
+_SOURCE_LABELS = {
+    "bot.main": "Discord bot",
+    "bot.web": "Admin panel (HTTP)",
+    "bot.activity": "Activity log",
+    "bot.observer": "TikTok observer",
+    "bot.crash": "Crash",
+    "bot.thread": "Thread",
+    "bot.asyncio": "Async task",
+    "bot.notify": "Log notifier",
+    "bot.startup": "Startup",
+    "discord": "Discord library",
+    "discord.http": "Discord API",
+    "waitress": "Waitress",
+}
+
+
+def _source_label(name: str) -> str:
+    label = _SOURCE_LABELS.get(str(name or ""))
+    if label:
+        return f"{label} (`{name}`)"
+    return f"`{name}`"
+
+
 _REDACT_PATTERNS = (
     (re.compile(r"(?i)(authorization\s*[:=]\s*)(\S+)"), r"\1***"),
     (
@@ -325,12 +444,20 @@ class _NotifyHandler(logging.Handler):
             tb = ""
             if record.exc_info:
                 tb = redact("".join(traceback.format_exception(*record.exc_info)))
+            ctx = get_log_context()
+            activity_type = getattr(record, "activity_type", None)
+            if activity_type and "event" not in ctx:
+                ctx["event"] = activity_type
+            tiktok_user = getattr(record, "tiktok_user", None)
+            if tiktok_user and "tiktok" not in ctx:
+                ctx["tiktok"] = f"@{tiktok_user}"
             payload = {
                 "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "level": record.levelname,
                 "logger": record.name,
                 "message": message[:1500],
                 "traceback": tb[-2500:],
+                "context": ctx,
             }
             _notify_queue.put_nowait(payload)
         except Exception:
@@ -541,7 +668,13 @@ def _format_notification(item: dict, repeats: int = 0) -> str:
     head = f"🚨 **{item['level']}** · `{info['env']}` · `{info['version']}`"
     if repeats > 1:
         head += f" · repeated {repeats}×"
-    lines = [head, f"**Source:** `{item['logger']}`", f"**Time:** {item['time']}", ""]
+    lines = [
+        head,
+        f"**Source:** {_source_label(item['logger'])} · **Time:** {item['time']}",
+    ]
+    # Structured context: who did it, where, and what was being handled.
+    lines.extend(_format_context_lines(item.get("context") or {}))
+    lines.append("")
     lines.append(f"```{item['message']}```")
     if item.get("traceback"):
         lines.append(f"```{item['traceback']}```")
@@ -598,18 +731,19 @@ async def notify_loop(bot) -> None:
                 batch.append(_format_notification(item, repeats))
             if not batch:
                 continue
-            text = "\n\n".join(batch)
-            if len(text) > 1950:
-                text = text[:1940] + "\n… truncated"
             token = _SUPPRESS_NOTIFY.set(True)
             try:
                 channel = bot.get_channel(LOG_ERROR_CHANNEL_ID)
                 if channel is None:
                     channel = await bot.fetch_channel(LOG_ERROR_CHANNEL_ID)
-                await channel.send(content=text)
+                # One message per notification: keeps Who/Where/Command context
+                # readable instead of truncating a 3-item combined block.
+                for text in batch:
+                    await channel.send(content=text)
+                    sent_in_window += 1
+                    await asyncio_sleep(0.6)
             finally:
                 _SUPPRESS_NOTIFY.reset(token)
-            sent_in_window += len(batch)
             logger.info("Sent %d notification(s) to error channel (skipped %d duplicates).", len(batch), skipped)
             await asyncio_sleep(1.5)
         except Exception as exc:

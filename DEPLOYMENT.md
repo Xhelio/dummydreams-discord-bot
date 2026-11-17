@@ -490,9 +490,31 @@ What is recorded:
 
 WARNING and ERROR records are queued and posted by the bot to
 `LOG_ERROR_CHANNEL_ID` (default `1572123726839947305`) with source, time, message and
-traceback. Identical messages are collapsed for 180 s and the channel is capped at
-12 messages/minute so an error storm cannot flood it. Notifications resume
-automatically once the bot is connected; messages raised while offline stay queued.
+traceback. Each message also carries the context of the task that logged it, so it is
+readable without digging through the bot log:
+
+````text
+🚨 **WARNING** · `stable` · `9e3e601`
+**Source:** Discord bot (`bot.main`) · **Time:** 2026-11-17 07:21:54
+**Who:** budi#1234 (Budi)
+**User ID:** 987654321012345678
+**TikTok:** @clarissadreams
+**Guild:** Dummy Dreams
+**Channel:** verification
+**Button:** verify_low_bio
+
+```
+[Interaction Timeout Risk] ... was not acknowledged after 2.5s
+```
+````
+
+Context fields are bound automatically: interactions/commands add Who, User ID, Guild,
+Channel and Command/Button; verification flows add TikTok; live observers add Host;
+admin panel requests add Method, Path, IP, Admin user and Request ID. Identical messages are
+collapsed for 180 s and the channel is capped at 12 messages/minute so an error storm cannot
+flood it. Each notification is a separate message (never a truncated combined block).
+Notifications resume automatically once the bot is connected; messages raised while offline
+stay queued.
 
 ### `/log`
 

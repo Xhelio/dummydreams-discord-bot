@@ -1654,7 +1654,14 @@ def log_activity_event(event_type: str, message: str, tiktok_username: str = "")
         level = logging.WARNING
     else:
         level = logging.INFO
-    _ACTIVITY_LOGGER.log(level, "[ActivityLog] [%s] @%s %s", event_type, user_clean or "-", message)
+    _ACTIVITY_LOGGER.log(
+        level,
+        "[ActivityLog] [%s] @%s %s",
+        event_type,
+        user_clean or "-",
+        message,
+        extra={"activity_type": event_type, "tiktok_user": user_clean or None},
+    )
 
     _ensure_activity_log_writer()
     try:

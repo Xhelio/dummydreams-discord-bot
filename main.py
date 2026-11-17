@@ -72,10 +72,65 @@ NOTIFICATION_LOCK = asyncio.Lock()
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+
+
+def _describe_user(user) -> str:
+    """Readable 'name (display name)' label for notification context."""
+    try:
+        base = str(user)
+        display = getattr(user, "display_name", None)
+        handle = getattr(user, "name", None)
+        if display and display != handle and display not in base:
+            return f"{base} ({display})"
+        return base
+    except Exception:
+        return "unknown"
+
+
+def _bind_interaction_context(interaction, command: str = None, custom_id: str = None) -> None:
+    """Attach who/where/what to every log record (and notification) of a task."""
+    try:
+        data = interaction.data or {}
+        user = interaction.user
+        guild = getattr(interaction, "guild", None)
+        channel = getattr(interaction, "channel", None)
+        if command is None and interaction.type is discord.InteractionType.application_command:
+            command = str(data.get("name") or "")
+        if custom_id is None:
+            custom_id = str(data.get("custom_id") or "")
+        if channel is None:
+            channel_label = None
+        elif getattr(channel, "name", None):
+            channel_label = f"#{channel.name}" if guild is not None else "DM"
+        elif getattr(channel, "guild", None) is None:
+            channel_label = "DM"
+        else:
+            channel_label = str(getattr(channel, "id", None) or "-")
+        log_setup.bind_log_context(
+            actor=_describe_user(user),
+            user_id=getattr(user, "id", None),
+            guild=getattr(guild, "name", None) or "DM",
+            channel=channel_label,
+            command=(f"/{command}" if command else None),
+            custom_id=custom_id or None,
+        )
+    except Exception:
+        pass
+
+
+class _LoggingCommandTree(app_commands.CommandTree):
+    """Command tree that records slash-command context for notifications."""
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        _bind_interaction_context(interaction)
+        return True
+
+
 bot = commands.Bot(
     command_prefix="!",
     intents=intents,
     help_command=None,
+    tree_cls=_LoggingCommandTree,
     http_trace=log_setup.build_http_trace(),
 )
 runtime_status.register_bot(bot)
@@ -145,23 +200,27 @@ async def _safe_defer(interaction: discord.Interaction, label: str, *,
     that was already acknowledged elsewhere.
     """
     started = time.perf_counter()
+    _bind_interaction_context(interaction)
+    actor = _describe_user(interaction.user)
     try:
         if interaction.response.is_done():
             log.info(
                 "[Verify] %s: already acknowledged by another handler "
-                "(custom_id=%s user=%s)",
+                "(custom_id=%s user=%s (%s))",
                 label,
                 str((interaction.data or {}).get("custom_id") or "-"),
                 getattr(interaction.user, "id", "?"),
+                actor,
             )
             return True
         await interaction.response.defer(ephemeral=ephemeral, thinking=thinking)
         log.info(
-            "[Verify] %s: acknowledged in %.2fs (custom_id=%s user=%s)",
+            "[Verify] %s: acknowledged in %.2fs (custom_id=%s user=%s (%s))",
             label,
             time.perf_counter() - started,
             str((interaction.data or {}).get("custom_id") or "-"),
             getattr(interaction.user, "id", "?"),
+            actor,
         )
         return True
     except discord.InteractionResponded:
@@ -1291,6 +1350,7 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        _bind_interaction_context(interaction, custom_id="modal_tiktok_username")
         _note_interaction_lag(interaction, "verification modal submit")
         # Defer before DB lookups to avoid Discord "didn't respond in time".
         try:
@@ -1308,6 +1368,7 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
             )
             return
         u_clean = self.username_input.value.strip().lstrip('@').lower()
+        log_setup.bind_log_context(tiktok=f"@{u_clean}")
         actor = f"{interaction.user} (ID {interaction.user.id})"
 
         # Run the log + three pre-checks in a single worker task. Separate
@@ -1480,6 +1541,7 @@ class VerificationMethodChoiceView(discord.ui.View):
         tiktok_user = (pending or {}).get("tiktok_user") or self.tiktok_user
         if not tiktok_user:
             return None, 0
+        log_setup.bind_log_context(tiktok=f"@{tiktok_user}")
         _, total_coins, _ = await asyncio.to_thread(is_tiktok_user_in_db, tiktok_user)
         return tiktok_user, int(total_coins or 0)
 
@@ -1568,6 +1630,7 @@ class LowActivityVerificationView(discord.ui.View):
         tiktok_user = (pending or {}).get("tiktok_user") or self.tiktok_user
         if not tiktok_user:
             return None, 0
+        log_setup.bind_log_context(tiktok=f"@{tiktok_user}")
         _, total_coins, _ = await asyncio.to_thread(is_tiktok_user_in_db, tiktok_user)
         return tiktok_user, int(total_coins or 0)
 
@@ -1916,6 +1979,7 @@ class LiveVerificationView(discord.ui.View):
             tiktok_user = mapped
         if not tiktok_user:
             return None, code, 0
+        log_setup.bind_log_context(tiktok=f"@{tiktok_user}")
         _, total_coins, _ = await asyncio.to_thread(is_tiktok_user_in_db, tiktok_user)
         return tiktok_user, code, int(total_coins or 0)
 
@@ -2000,6 +2064,7 @@ class LiveGreetingVerificationView(discord.ui.View):
             tiktok_user = await asyncio.to_thread(get_user_mapping, interaction.user.id)
         if not tiktok_user:
             return None, 0
+        log_setup.bind_log_context(tiktok=f"@{tiktok_user}")
         _, total_coins, _ = await asyncio.to_thread(is_tiktok_user_in_db, tiktok_user)
         return tiktok_user, int(total_coins or 0)
 
@@ -2092,6 +2157,7 @@ async def handle_live_comment_verification(tiktok_user: str, comment_text: str, 
     event loop (interactions then failed with "did not respond").
     """
     u_clean = tiktok_user.lower().lstrip("@")
+    log_setup.bind_log_context(tiktok=f"@{u_clean}", host=f"@{target_host}")
 
     # Fast path: comments are frequent, so skip the database entirely unless
     # this account actually has a live verification request in flight.
@@ -2114,6 +2180,16 @@ async def handle_live_comment_verification(tiktok_user: str, comment_text: str, 
         return
 
     discord_id = pending['discord_id']
+    try:
+        discord_user = bot.get_user(int(discord_id))
+    except Exception:
+        discord_user = None
+    actor_label = (
+        f"{_describe_user(discord_user)} (ID {discord_id})"
+        if discord_user else f"Discord ID {discord_id}"
+    )
+    if discord_user:
+        log_setup.bind_log_context(actor=_describe_user(discord_user), user_id=discord_id)
 
     # Link the TikTok account to the Discord user
     await asyncio.to_thread(bind_user_mapping, discord_id, u_clean)
@@ -2138,7 +2214,7 @@ async def handle_live_comment_verification(tiktok_user: str, comment_text: str, 
         await asyncio.to_thread(
             log_activity_event,
             "verification",
-            f"[LIVE GREETING] Discord ID {discord_id} verified @{u_clean} via welcome message "
+            f"[LIVE GREETING] {actor_label} verified @{u_clean} via welcome message "
             f"\"{comment_text}\" in @{target_host}'s live.",
             target_host,
         )
@@ -2147,7 +2223,7 @@ async def handle_live_comment_verification(tiktok_user: str, comment_text: str, 
         await asyncio.to_thread(
             log_activity_event,
             "verification",
-            f"[LIVE CODE] Discord ID {discord_id} verified @{u_clean} via live chat code "
+            f"[LIVE CODE] {actor_label} verified @{u_clean} via live chat code "
             f"in @{target_host}'s live.",
             target_host,
         )
@@ -2329,13 +2405,15 @@ async def _watch_unacknowledged_interaction(interaction: discord.Interaction) ->
         except Exception:
             received_lag = -1
         log.warning(
-            "[Interaction Timeout Risk] type=%s command=%s custom_id=%s user=%s guild=%s "
-            "was not acknowledged after 2.5s (gateway_lag=%.2fs; Discord shows 'didn't respond in time' at ~3s).",
+            "[Interaction Timeout Risk] type=%s command=%s custom_id=%s user=%s (%s) guild=%s (%s) "
+            "was not acknowledged after 2.5s (gateway_lag=%.2fs; Discord shows \"didn't respond in time\" at ~3s).",
             interaction.type.name,
             str((interaction.data or {}).get("name") or "-"),
             str((interaction.data or {}).get("custom_id") or "-"),
             getattr(interaction.user, "id", "?"),
+            _describe_user(interaction.user),
             getattr(getattr(interaction, "guild", None), "id", "-"),
+            getattr(getattr(interaction, "guild", None), "name", None) or "DM",
             received_lag,
         )
     except asyncio.CancelledError:
@@ -2357,20 +2435,29 @@ async def on_interaction(interaction: discord.Interaction):
     command_name = ""
     if interaction.type is discord.InteractionType.application_command:
         command_name = str((interaction.data or {}).get("name") or "")
+    _bind_interaction_context(interaction, command=command_name or None, custom_id=custom_id or None)
     try:
         lag = time.time() - interaction.created_at.timestamp()
     except Exception:
         lag = -1
     guild_id = getattr(interaction.guild, "id", None)
+    guild_name = getattr(interaction.guild, "name", None) or "DM"
+    channel = getattr(interaction, "channel", None)
+    channel_label = (
+        f"#{getattr(channel, 'name', None)}" if getattr(channel, "name", None)
+        else (str(getattr(channel, "id", None) or "-"))
+    )
     log.info(
-        "[Gateway] %s received command=%s custom_id=%s lag=%.2fs user=%s guild=%s channel=%s",
+        "[Gateway] %s received command=%s custom_id=%s lag=%.2fs user=%s (%s) guild=%s (%s) channel=%s",
         interaction_type,
         command_name or "-",
         custom_id or "-",
         lag,
-        interaction.user.id,
+        getattr(interaction.user, "id", "?"),
+        _describe_user(interaction.user),
         guild_id or "-",
-        getattr(interaction.channel, "id", None) or "-",
+        guild_name,
+        channel_label,
     )
     asyncio.create_task(_watch_unacknowledged_interaction(interaction))
     if interaction.type not in (
@@ -2425,6 +2512,17 @@ async def on_interaction(interaction: discord.Interaction):
 
 @bot.event
 async def on_command_error(ctx, error):
+    try:
+        log_setup.bind_log_context(
+            actor=_describe_user(ctx.author),
+            user_id=getattr(ctx.author, "id", None),
+            guild=getattr(getattr(ctx, "guild", None), "name", None) or "DM",
+            channel=getattr(getattr(ctx, "channel", None), "name", None)
+            or getattr(getattr(ctx, "channel", None), "id", None),
+            command=f"!{getattr(ctx.command, 'qualified_name', getattr(ctx, 'invoked_with', '?'))}",
+        )
+    except Exception:
+        pass
     if isinstance(error, commands.CommandNotFound):
         log.debug(
             "[Command] unknown !%s user=%s guild=%s",
@@ -2497,6 +2595,17 @@ async def on_command_error(ctx, error):
 @bot.before_invoke
 async def _log_prefix_command_start(ctx):
     ctx._log_started_at = time.perf_counter()
+    try:
+        log_setup.bind_log_context(
+            actor=_describe_user(ctx.author),
+            user_id=getattr(ctx.author, "id", None),
+            guild=getattr(getattr(ctx, "guild", None), "name", None) or "DM",
+            channel=getattr(getattr(ctx, "channel", None), "name", None)
+            or getattr(getattr(ctx, "channel", None), "id", None),
+            command=f"!{getattr(ctx.command, 'qualified_name', ctx.command)}",
+        )
+    except Exception:
+        pass
     log.info(
         "[Command] -> !%s user=%s(%s) guild=%s channel=%s content=%r",
         getattr(ctx.command, "qualified_name", ctx.command),
@@ -2521,6 +2630,7 @@ async def _log_prefix_command_end(ctx):
 
 
 async def _on_app_command_error(interaction: discord.Interaction, error: Exception):
+    _bind_interaction_context(interaction)
     original = getattr(error, "original", getattr(error, "orig", error))
     command_name = getattr(getattr(interaction, "command", None), "qualified_name", None) or str(
         (interaction.data or {}).get("name") or "?"

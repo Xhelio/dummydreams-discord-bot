@@ -4,6 +4,7 @@ import time
 from datetime import datetime, timedelta
 import pytz
 from TikTokLive import TikTokLiveClient
+import log_setup
 from TikTokLive.events import (
     ConnectEvent, 
     DisconnectEvent, 
@@ -457,6 +458,11 @@ def _record_gift_event_db(session_id, username_clean, user, display_name, gift_n
 
 async def start_single_observer(tiktok_username: str, announcement_callback, role_callback, comment_callback=None):
     username_clean = tiktok_username.lower().lstrip("@")
+    # Notifications from this observer task should always name the host.
+    try:
+        log_setup.bind_log_context(host=f"@{username_clean}")
+    except Exception:
+        pass
     current_session_id = None
     is_connected = False
     disconnect_timer_task = None
