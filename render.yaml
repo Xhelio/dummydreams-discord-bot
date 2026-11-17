@@ -52,6 +52,8 @@ services:
         sync: false
       - key: API_SECRET_KEY
         sync: false
+      - key: LOG_ERROR_CHANNEL_ID
+        value: "1572123726839947305"
 
   # ------------------------------------------------------------------ TEST
   - type: web
@@ -87,3 +89,5 @@ services:
         sync: false
       - key: API_SECRET_KEY
         sync: false
+      - key: LOG_ERROR_CHANNEL_ID
+        value: "1572123726839947305"

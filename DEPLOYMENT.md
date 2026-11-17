@@ -455,3 +455,70 @@ They remove the verified role **and** every role listed in `role_tiers` (reset a
 groups) across all guilds, delete `user_mappings` + `discord_verification_status`, and log the
 result to the activity log. If the bot is not running (Flask-only process) the link is still
 removed and the panel shows a warning that roles could not be revoked.
+
+## 13. Diagnostics and logging
+
+Every process writes to `logs/bot.log` from the moment `main.py` starts. The file is
+rotated at 10 MB with 4 backups (`bot.log.1` … `bot.log.4`); stdout/stderr are mirrored
+there too, so existing `print()` diagnostics from `observer.py`, Flask, waitress and
+discord.py are included. Lines look like:
+
+```
+2026-11-17 12:00:01 | INFO | bot.main | [Gateway] application_command received command=verify lag=0.12s user=... guild=... channel=...
+2026-11-17 12:00:01 | INFO | bot.web  | HTTP -> GET /admin/data?page=2 ip=... ua='Mozilla/5.0'
+2026-11-17 12:00:01 | INFO | bot.web  | HTTP <- GET /admin/data status=200 duration=41.2ms bytes=18233 ip=... req=4f2c1a8b9d01
+```
+
+What is recorded:
+
+- **Startup**: env, build version, Python/platform, pid, cwd, DB backend/host (token is
+  redacted), expected guild, admin-auth on/off, error channel, and a snapshot of every
+  important setting (verification mode, coin-only threshold, live/leaderboard flags,
+  role tiers count, announcement/allowed channels).
+- **Discord**: connected guilds, intents, latency, interactions (type, command,
+  `custom_id`, gateway lag, user, guild, channel), slash-command completion and failures,
+  prefix-command start/end with duration, denied commands, uncaught event errors.
+- **HTTP**: every admin/API request with method, path, status, duration, size, client IP,
+  user agent, and a per-request `X-Request-Id`; 4xx are WARNING, 5xx are ERROR.
+- **Discord HTTP**: non-GET calls (role edits, messages, DMs) at INFO; slow calls
+  (≥2 s), 4xx/5xx and network exceptions at WARNING/ERROR. Webhook tokens are redacted.
+- **Activity**: every `log_activity_event` entry (gifts, comments, sessions, host
+  connect/disconnect, verification attempts, admin actions) including the actor.
+- **Safety nets**: uncaught Python exceptions, thread exceptions, unhandled asyncio task
+  exceptions, and an interaction watchdog that warns at 2.5 s if an interaction was
+  never acknowledged (the direct cause of “didn't respond in time”).
+
+WARNING and ERROR records are queued and posted by the bot to
+`LOG_ERROR_CHANNEL_ID` (default `1572123726839947305`) with source, time, message and
+traceback. Identical messages are collapsed for 180 s and the channel is capped at
+12 messages/minute so an error storm cannot flood it. Notifications resume
+automatically once the bot is connected; messages raised while offline stay queued.
+
+### `/log`
+
+`/log` is administrator-only and ephemeral (only the caller sees it):
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `lines` | 300 | How many recent lines (1–3000). |
+| `level` | `all` | `all`, `info`, `warning`, or `error` (error also matches traceback/failed/timeout/gagal). |
+| `search` | – | Only lines containing this text. |
+
+Small results are shown in a code block; larger ones are sent as a downloadable `.txt`
+file. Use it **before** restarting the service: on Render the filesystem is ephemeral,
+so `logs/` disappears on deploy/restart. Errors already posted to the error channel
+remain in Discord permanently.
+
+### Troubleshooting an interaction timeout
+
+1. Open `/log level:error` and look for `[Interaction Timeout Risk]`, `[Interaction Lag]`,
+   `[Gateway]`, `[Discord] CRITICAL`, `[Slash] FAILED`, or `[Command] FAILED`.
+2. If there is **no** `[Gateway]` line for the click, the interaction never reached this
+   process: bot offline/sleeping, wrong token/app, or an **Interactions Endpoint URL** is
+   set in the Developer Portal (the bot logs `[Discord] CRITICAL` for this on startup).
+3. If `[Gateway] ... lag=1.5s+`, the event loop was busy; check the surrounding lines for
+   synchronous DB work, huge leaderboard queries, or Discord HTTP retries.
+4. If `[Gateway]` shows a legacy 32-hex `custom_id`, the click came from a DM created
+   before the persistent-view update; the fallback re-sends a fresh verification menu.
+5. Check the error channel for the matching ERROR/traceback. Send the `/log` file back
+   for analysis rather than only a screenshot.

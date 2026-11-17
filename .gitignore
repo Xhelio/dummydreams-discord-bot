@@ -53,6 +53,9 @@ __pycache__/
 routes/__pycache__/
 *.db
 
+# Runtime logs (rotated at runtime, not source)
+logs/
+
 # Environment secrets
 .env
 .env.*

@@ -1,5 +1,7 @@
 import asyncio
 import concurrent.futures
+import io
+import logging
 import os
 import json
 import re
@@ -60,6 +62,7 @@ from verification import async_verify_tiktok_bio
 from routes.settings import set_verification_refresh_handler, set_presence_refresh_handler
 import runtime_status
 import chatbot
+import log_setup
 
 DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN')
 ANNOUNCEMENT_CHANNEL_ID = int(os.environ.get('ANNOUNCEMENT_CHANNEL_ID', "0"))
@@ -69,8 +72,14 @@ NOTIFICATION_LOCK = asyncio.Lock()
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+bot = commands.Bot(
+    command_prefix="!",
+    intents=intents,
+    help_command=None,
+    http_trace=log_setup.build_http_trace(),
+)
 runtime_status.register_bot(bot)
+log = log_setup.get_logger("bot.main")
 
 # Saat main.py dijalankan sebagai script (Render: `python main.py`), modulnya
 # bernama "__main__". Daftarkan alias "main" supaya Flask (routes/admin.py)
@@ -118,9 +127,11 @@ def _note_interaction_lag(interaction: discord.Interaction, label: str):
     except Exception:
         return
     if lag >= 1.5:
-        print(
-            f"[Interaction Lag] {label}: handled after {lag:.2f}s "
-            f"(user={getattr(interaction.user, 'id', '?')})"
+        log.warning(
+            "[Interaction Lag] %s: handled after %.2fs (user=%s)",
+            label,
+            lag,
+            getattr(interaction.user, "id", "?"),
         )
 
 
@@ -2125,7 +2136,7 @@ async def on_message(message):
             elif err and str(os.environ.get("CHATBOT_DEBUG", "")).strip().lower() in ("1", "true", "yes", "on"):
                 print(f"[Chatbot] error: {err}")
     except Exception as e:
-        print(f"[Chatbot] handler error: {e}")
+        log.warning("[Chatbot] handler error: %s", e)
     await bot.process_commands(message)
 
 
@@ -2165,6 +2176,16 @@ async def on_ready():
             print(f"[Discord] Guild check OK: connected to expected guild {expected_guild_id}.")
 
     runtime_status.set_bot_ready(str(bot.user))
+    log.info(
+        "[Discord] Ready: user=%s id=%s env=%s version=%s latency=%.0fms guilds=%s intents=%s",
+        bot.user,
+        getattr(bot.user, "id", "?"),
+        bot_env,
+        get_push_code(),
+        (bot.latency or 0) * 1000,
+        [f"{g.name}({g.id})" for g in (bot.guilds or [])],
+        intents,
+    )
     # Register persistent views so verification buttons keep working after restarts
     bot.add_view(VerificationChannelView())
     bot.add_view(BioVerificationView())
@@ -2202,6 +2223,27 @@ async def on_resumed():
     print("[Gateway] Resumed Discord session.")
 
 
+async def _watch_unacknowledged_interaction(interaction: discord.Interaction) -> None:
+    """Warn when an interaction is still not acknowledged near Discord's 3s limit."""
+    try:
+        await asyncio.sleep(2.5)
+        if interaction.response.is_done():
+            return
+        log.warning(
+            "[Interaction Timeout Risk] type=%s command=%s custom_id=%s user=%s guild=%s "
+            "was not acknowledged after 2.5s (Discord will show 'didn't respond in time' at ~3s).",
+            interaction.type.name,
+            str((interaction.data or {}).get("name") or "-"),
+            str((interaction.data or {}).get("custom_id") or "-"),
+            getattr(interaction.user, "id", "?"),
+            getattr(getattr(interaction, "guild", None), "id", "-"),
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pass
+
+
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
     """Log receipt and provide a fallback for outdated components/modals.
@@ -2210,20 +2252,32 @@ async def on_interaction(interaction: discord.Interaction):
     persistently. Instead of letting Discord show "didn't respond in time",
     answer with a clear instruction if nothing acknowledged the interaction.
     """
+    interaction_type = interaction.type.name
+    custom_id = str((interaction.data or {}).get("custom_id") or "")
+    command_name = ""
+    if interaction.type is discord.InteractionType.application_command:
+        command_name = str((interaction.data or {}).get("name") or "")
+    try:
+        lag = time.time() - interaction.created_at.timestamp()
+    except Exception:
+        lag = -1
+    guild_id = getattr(interaction.guild, "id", None)
+    log.info(
+        "[Gateway] %s received command=%s custom_id=%s lag=%.2fs user=%s guild=%s channel=%s",
+        interaction_type,
+        command_name or "-",
+        custom_id or "-",
+        lag,
+        interaction.user.id,
+        guild_id or "-",
+        getattr(interaction.channel, "id", None) or "-",
+    )
+    asyncio.create_task(_watch_unacknowledged_interaction(interaction))
     if interaction.type not in (
         discord.InteractionType.component,
         discord.InteractionType.modal_submit,
     ):
         return
-    custom_id = str((interaction.data or {}).get("custom_id") or "")
-    try:
-        lag = time.time() - interaction.created_at.timestamp()
-    except Exception:
-        lag = -1
-    print(
-        f"[Gateway] {interaction.type.name} received "
-        f"custom_id={custom_id or '-'} lag={lag:.2f}s user={interaction.user.id}"
-    )
     if not re.fullmatch(r"[0-9a-f]{32}", custom_id):
         return
 
@@ -2273,6 +2327,14 @@ async def on_interaction(interaction: discord.Interaction):
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CheckFailure):
         key = str(error)
+        log.info(
+            "[Command] denied !%s user=%s(%s) guild=%s reason=%s",
+            getattr(ctx.command, "qualified_name", ctx.command),
+            getattr(ctx.author, "id", "?"),
+            getattr(ctx.author, "name", "?"),
+            getattr(getattr(ctx, "guild", None), "id", "-"),
+            key or type(error).__name__,
+        )
         if "bot_disabled" in key:
             message = "⛔ The bot is currently disabled by an administrator."
         elif "channel_not_allowed" in key:
@@ -2285,12 +2347,137 @@ async def on_command_error(ctx, error):
             pass
         return
     if isinstance(error, commands.MissingRequiredArgument):
+        log.info(
+            "[Command] missing argument !%s user=%s param=%s",
+            getattr(ctx.command, "qualified_name", ctx.command),
+            getattr(ctx.author, "id", "?"),
+            error.param.name,
+        )
         try:
             await ctx.send(f"❌ Missing argument: `{error.param.name}`.", delete_after=10)
         except Exception:
             pass
         return
-    print(f"[Command Error] {ctx.command}: {error}")
+    original = getattr(error, "original", error)
+    log.error(
+        "[Command] FAILED !%s user=%s(%s) guild=%s: %s",
+        getattr(ctx.command, "qualified_name", ctx.command),
+        getattr(ctx.author, "id", "?"),
+        getattr(ctx.author, "name", "?"),
+        getattr(getattr(ctx, "guild", None), "id", "-"),
+        error,
+        exc_info=(type(original), original, original.__traceback__),
+    )
+    try:
+        await ctx.send("❌ Something went wrong. The error was logged for the admin.", delete_after=15)
+    except Exception:
+        pass
+
+
+@bot.before_invoke
+async def _log_prefix_command_start(ctx):
+    ctx._log_started_at = time.perf_counter()
+    log.info(
+        "[Command] -> !%s user=%s(%s) guild=%s channel=%s content=%r",
+        getattr(ctx.command, "qualified_name", ctx.command),
+        getattr(ctx.author, "id", "?"),
+        getattr(ctx.author, "name", "?"),
+        getattr(getattr(ctx, "guild", None), "id", "-"),
+        getattr(getattr(ctx, "channel", None), "id", "-"),
+        log_setup.redact((getattr(ctx.message, "content", "") or "")[:300]),
+    )
+
+
+@bot.after_invoke
+async def _log_prefix_command_end(ctx):
+    started = getattr(ctx, "_log_started_at", None)
+    duration = (time.perf_counter() - started) * 1000 if started else -1
+    log.info(
+        "[Command] <- !%s user=%s duration=%.0fms",
+        getattr(ctx.command, "qualified_name", ctx.command),
+        getattr(ctx.author, "id", "?"),
+        duration,
+    )
+
+
+async def _on_app_command_error(interaction: discord.Interaction, error: Exception):
+    original = getattr(error, "original", getattr(error, "orig", error))
+    command_name = getattr(getattr(interaction, "command", None), "qualified_name", None) or str(
+        (interaction.data or {}).get("name") or "?"
+    )
+    if isinstance(error, app_commands.CheckFailure):
+        log.info(
+            "[Slash] denied /%s user=%s(%s) guild=%s reason=%s",
+            command_name,
+            getattr(interaction.user, "id", "?"),
+            getattr(interaction.user, "name", "?"),
+            getattr(getattr(interaction, "guild", None), "id", "-"),
+            error,
+        )
+        message = "🛡️ This command is restricted to administrators."
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(message, ephemeral=True)
+            else:
+                await interaction.response.send_message(message, ephemeral=True)
+        except Exception:
+            pass
+        return
+    if isinstance(error, app_commands.CommandInvokeError):
+        log.error(
+            "[Slash] FAILED /%s user=%s(%s) guild=%s: %s",
+            command_name,
+            getattr(interaction.user, "id", "?"),
+            getattr(interaction.user, "name", "?"),
+            getattr(getattr(interaction, "guild", None), "id", "-"),
+            original,
+            exc_info=(type(original), original, original.__traceback__),
+        )
+    else:
+        log.error(
+            "[Slash] FAILED /%s user=%s(%s) guild=%s: %s",
+            command_name,
+            getattr(interaction.user, "id", "?"),
+            getattr(interaction.user, "name", "?"),
+            getattr(getattr(interaction, "guild", None), "id", "-"),
+            error,
+        )
+    if interaction.response.is_done():
+        try:
+            await interaction.followup.send("❌ Something went wrong. The error was logged.", ephemeral=True)
+        except Exception:
+            pass
+    else:
+        try:
+            await interaction.response.send_message(
+                "❌ Something went wrong. The error was logged.", ephemeral=True
+            )
+        except Exception:
+            pass
+
+
+bot.tree.on_error = _on_app_command_error
+
+
+@bot.event
+async def on_app_command_completion(interaction: discord.Interaction, command):
+    log.info(
+        "[Slash] <- /%s user=%s(%s) guild=%s channel=%s",
+        getattr(command, "qualified_name", command),
+        getattr(interaction.user, "id", "?"),
+        getattr(interaction.user, "name", "?"),
+        getattr(getattr(interaction, "guild", None), "id", "-"),
+        getattr(getattr(interaction, "channel", None), "id", "-"),
+    )
+
+
+@bot.event
+async def on_error(event_method, *args, **kwargs):
+    log.exception(
+        "[Event] Unhandled exception in %s (args=%r)",
+        event_method,
+        log_setup.redact(repr(args)[:400]),
+    )
 
 @bot.event
 async def on_member_join(member: discord.Member):
@@ -2609,7 +2796,8 @@ def build_help_embed(user) -> discord.Embed:
                 "`!setup_verification` or `/setup_verification` — send the verification panel\n"
                 "`!set_verified_role` or `/set_verified_role` — set the verified role\n"
                 "`!unclaim` or `/unclaim` — remove a member's linked TikTok account\n"
-                "`!livesessions` or `/livesessions` — recent live sessions (admin only)"
+                "`!livesessions` or `/livesessions` — recent live sessions (admin only)\n"
+                "`/log` — download recent bot logs for debugging (admin only)"
             ),
             inline=False
         )
@@ -2884,19 +3072,134 @@ async def slash_unclaim(interaction: discord.Interaction, member: discord.Member
     await interaction.followup.send(message, ephemeral=True)
 
 
+@bot.tree.command(name="log", description="Admin: download recent bot logs for debugging")
+@app_commands.describe(
+    lines="How many recent lines to include (1-3000, default 300)",
+    level="Filter: all, info, warning, error",
+    search="Only include lines containing this text",
+)
+async def slash_log(
+    interaction: discord.Interaction,
+    lines: int = 300,
+    level: str = "all",
+    search: str = None,
+):
+    await interaction.response.defer(ephemeral=True)
+    if not is_admin_member(interaction.user):
+        await interaction.followup.send("🛡️ This command is restricted to administrators.", ephemeral=True)
+        return
+
+    line_count = max(1, min(int(lines or 300), 3000))
+    text, matched = await asyncio.to_thread(log_setup.tail_log, line_count, level, search)
+    info = log_setup.get_build_info()
+    log.info(
+        "[Log] /log requested by %s(%s) lines=%s level=%s search=%r matched=%s",
+        interaction.user.id,
+        interaction.user.name,
+        line_count,
+        level,
+        search,
+        matched,
+    )
+
+    if not (text or "").strip():
+        await interaction.followup.send(
+            f"No log lines matched (level={level}, search={search!r}).", ephemeral=True
+        )
+        return
+
+    header = (
+        f"🧾 **Bot log** — env=`{info['env']}` version=`{info['version']}` "
+        f"· {matched} matched, showing up to {line_count} lines"
+    )
+    if len(text) <= 1800 and line_count <= 250:
+        await interaction.followup.send(f"{header}\n```\n{text}\n```", ephemeral=True)
+        return
+
+    filename = f"bot-log-{info['env']}-{info['version']}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
+    payload = io.BytesIO(text.encode("utf-8", "replace"))
+    await interaction.followup.send(
+        header + "\nDownload the attached file (it is visible only to you).",
+        file=discord.File(payload, filename=filename),
+        ephemeral=True,
+    )
+
+
+def _log_startup_snapshot() -> None:
+    """Write the effective configuration (no secrets) to the log."""
+    from db import HAS_LIBSQL, TURSO_URL, TURSO_TOKEN
+
+    keys = (
+        "master_enabled",
+        "debug_mode",
+        "verification_enabled",
+        "coin_only_enabled",
+        "coin_only_min_coins",
+        "live_tracking_enabled",
+        "leaderboard_enabled",
+        "allowed_channels_enabled",
+        "admin_role_id",
+        "verified_role_id",
+        "live_verification_enabled",
+        "live_greeting_enabled",
+    )
+    snapshot = {}
+    for key in keys:
+        try:
+            snapshot[key] = log_setup.redact(str(get_setting(key, "") or ""))
+        except Exception as exc:
+            snapshot[key] = f"<error: {exc}>"
+    try:
+        snapshot["announcement_channels"] = len(get_announcement_channel_ids())
+    except Exception:
+        snapshot["announcement_channels"] = "?"
+    try:
+        snapshot["allowed_channels"] = len(get_int_list_setting("allowed_channel_ids"))
+    except Exception:
+        snapshot["allowed_channels"] = "?"
+    try:
+        snapshot["role_tiers"] = len(get_role_tiers() or [])
+    except Exception:
+        snapshot["role_tiers"] = "?"
+    snapshot["db_backend"] = "turso" if (HAS_LIBSQL and TURSO_URL) else "local-sqlite"
+    snapshot["db_host"] = log_setup.redact(
+        (TURSO_URL or "").split("?")[0].replace("libsql://", "").split("/")[0]
+    ) if TURSO_URL else "-"
+    snapshot["turso_token_set"] = bool(TURSO_TOKEN)
+    snapshot["expected_guild_id"] = os.environ.get("EXPECTED_GUILD_ID", "") or "-"
+    snapshot["admin_auth_enabled"] = bool(
+        os.environ.get("ADMIN_USERNAME") and os.environ.get("ADMIN_PASSWORD")
+    )
+    snapshot["error_channel_id"] = log_setup.LOG_ERROR_CHANNEL_ID or "-"
+    log.info("[Startup] Config snapshot: %s", json.dumps(snapshot, sort_keys=True))
+
+
 async def main():
+    log_setup.set_build_info(env=get_bot_env(), version=get_push_code())
+    log_setup.setup_logging()
+    loop = asyncio.get_running_loop()
+    log_setup.install_asyncio_exception_handler(loop)
+    log.info(
+        "[Startup] main() starting: env=%s version=%s python=%s pid=%s",
+        get_bot_env(),
+        get_push_code(),
+        sys.version.split()[0],
+        os.getpid(),
+    )
+
     # Turso/libSQL calls run in worker threads via asyncio.to_thread. The default
     # executor only has ~5 workers on small instances, so a burst of gift events
     # could starve interaction handlers. These tasks are network-bound, so extra
     # threads are cheap and keep slash commands responsive during busy lives.
     try:
-        asyncio.get_running_loop().set_default_executor(
+        loop.set_default_executor(
             concurrent.futures.ThreadPoolExecutor(max_workers=16, thread_name_prefix="db")
         )
     except Exception as e:
-        print(f"[Startup] Could not enlarge default executor: {e}")
+        log.exception("[Startup] Could not enlarge default executor: %s", e)
 
     init_db()
+    log.info("[Startup] Database initialised.")
 
     # Load bot_settings into memory before any interaction arrives. With the
     # stale-while-revalidate cache this means a settings read can never block
@@ -2924,6 +3227,21 @@ async def main():
     set_presence_refresh_handler(schedule_presence_refresh)
     keep_alive(handle_api_announcement)
 
+    # Log a secret-free snapshot of the runtime configuration. This is the first
+    # thing to read when a deployment misbehaves (wrong DB, wrong guild, wrong mode).
+    try:
+        await asyncio.to_thread(_log_startup_snapshot)
+    except Exception as e:
+        log.exception("[Startup] Could not log config snapshot: %s", e)
+
+    # Deliver queued warnings/errors to the Discord error channel.
+    asyncio.create_task(log_setup.notify_loop(bot))
+    log.info(
+        "[Startup] Error notifications -> channel %s (queue=%s).",
+        log_setup.LOG_ERROR_CHANNEL_ID,
+        log_setup.notification_queue_size(),
+    )
+
     # Start observers with announcement, role, and live chat verification callbacks
     asyncio.create_task(run_all_observers(
         announcement_callback=process_live_announcement,
@@ -2937,7 +3255,12 @@ async def main():
         runtime_status.set_bot_offline()
 
 if __name__ == "__main__":
+    log_setup.set_build_info(env=get_bot_env(), version=get_push_code())
+    log_setup.setup_logging()
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n[Bot] Stopped successfully.")
+        log.info("\n[Bot] Stopped successfully.")
+    except Exception:
+        log.exception("[Bot] Fatal crash in main()")
+        raise

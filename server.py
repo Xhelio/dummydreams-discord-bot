@@ -1,12 +1,18 @@
-from flask import Flask, redirect, request, Response, jsonify
+from flask import Flask, redirect, request, Response, jsonify, g
 from threading import Thread
+from werkzeug.exceptions import HTTPException
+import logging
 import os
 import hmac
+import time
+import uuid
 from routes.admin import admin_bp
 from routes.api import api_bp, set_announcement_handler
 from routes.settings import settings_bp
+import log_setup
 
 app = Flask(__name__)
+log = log_setup.get_logger("bot.web")
 
 # Optional basic auth for admin panel (recommended for production/public hosting).
 # Set ADMIN_USERNAME and ADMIN_PASSWORD to enable protection for /admin routes.
@@ -24,6 +30,70 @@ def _check_admin_auth(auth) -> bool:
     user_ok = hmac.compare_digest(str(auth.username), str(ADMIN_USERNAME))
     pass_ok = hmac.compare_digest(str(auth.password or ""), str(ADMIN_PASSWORD))
     return user_ok and pass_ok
+
+
+@app.before_request
+def _log_request_start():
+    g.log_request_id = uuid.uuid4().hex[:12]
+    g.log_request_started = time.perf_counter()
+    try:
+        log.info(
+            "HTTP -> %s %s ip=%s ua=%r",
+            request.method,
+            log_setup.redact(request.full_path),
+            request.remote_addr or "-",
+            (request.user_agent.string or "")[:120],
+        )
+    except Exception:
+        pass
+    return None
+
+
+@app.after_request
+def _log_request_end(response):
+    try:
+        request_id = getattr(g, "log_request_id", "-")
+        started = getattr(g, "log_request_started", None)
+        duration = (time.perf_counter() - started) * 1000 if started else -1
+        status = response.status_code
+        if status >= 500:
+            level = logging.ERROR
+        elif status >= 400:
+            level = logging.WARNING
+        else:
+            level = logging.INFO
+        log.log(
+            level,
+            "HTTP <- %s %s status=%s duration=%.1fms bytes=%s ip=%s req=%s",
+            request.method,
+            log_setup.redact(request.path),
+            status,
+            duration,
+            response.calculate_content_length() or 0,
+            request.remote_addr or "-",
+            request_id,
+        )
+        response.headers.setdefault("X-Request-Id", request_id)
+    except Exception:
+        pass
+    return response
+
+
+@app.errorhandler(Exception)
+def _handle_unexpected_error(error):
+    if isinstance(error, HTTPException):
+        return error.get_response()
+    request_id = getattr(g, "log_request_id", "-")
+    log.error(
+        "HTTP 500 %s %s req=%s ip=%s: %s",
+        request.method,
+        log_setup.redact(request.path),
+        request_id,
+        request.remote_addr or "-",
+        error,
+        exc_info=(type(error), error, error.__traceback__),
+    )
+    return jsonify({"ok": False, "error": "Internal server error", "request_id": request_id}), 500
 
 
 @app.before_request
@@ -103,10 +173,12 @@ def run():
     # Prefer a production WSGI server when available.
     try:
         from waitress import serve
+        log.info("[Web] Serving admin panel with waitress on 0.0.0.0:%s (threads=8).", port)
         serve(app, host='0.0.0.0', port=port, threads=8)
         return
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("[Web] waitress unavailable/failed (%s); falling back to Flask dev server.", exc)
+    log.info("[Web] Serving admin panel with Flask dev server on 0.0.0.0:%s.", port)
     app.run(host='0.0.0.0', port=port, threaded=True)
 
 

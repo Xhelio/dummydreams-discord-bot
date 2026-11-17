@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 import queue
 import re
 import time
@@ -24,6 +25,7 @@ from datetime import datetime, timedelta
 import pytz
 
 _DB_HEALTH_CACHE = {"ok": True, "at": 0.0}
+_ACTIVITY_LOGGER = logging.getLogger("bot.activity")
 
 # Short-lived cache for bot_settings. Hot paths (gift/comment handlers) read
 # several flags per event; without this each read opened a new Turso connection
@@ -1639,14 +1641,23 @@ def log_activity_event(event_type: str, message: str, tiktok_username: str = "")
     now_dt = datetime.now(wib)
     now_str = now_dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    # Always emit to console so logs remain visible in Render even if DB insert fails.
-    print(f"[ActivityLog] [{event_type}] @{user_clean or '-'} {message}")
+    # Route activity to the central logger: everything is persisted to
+    # logs/bot.log, and error/critical activity is also sent to the Discord
+    # error channel by log_setup.
+    type_key = event_type.strip().lower()
+    if type_key in ("error", "critical", "crash", "timeout", "failed", "failure"):
+        level = logging.ERROR
+    elif type_key in ("warning", "warn"):
+        level = logging.WARNING
+    else:
+        level = logging.INFO
+    _ACTIVITY_LOGGER.log(level, "[ActivityLog] [%s] @%s %s", event_type, user_clean or "-", message)
 
     _ensure_activity_log_writer()
     try:
         _ACTIVITY_LOG_QUEUE.put_nowait((event_type, message, user_clean, now_str))
     except queue.Full:
-        print("[ActivityLog] Queue penuh; event dibuang agar event loop tidak terblokir.")
+        _ACTIVITY_LOGGER.error("[ActivityLog] Queue is full; event dropped to keep the event loop responsive.")
 
 
 _ACTIVITY_LOG_QUEUE = queue.Queue(maxsize=5000)
@@ -1684,7 +1695,9 @@ def _activity_log_writer_loop():
                 """, (event_type, user_clean, message, now_str))
             )
         except Exception as e:
-            print(f"[ActivityLog Error] Failed to persist event ({event_type} @{user_clean}): {e}")
+            _ACTIVITY_LOGGER.error(
+                "[ActivityLog] Failed to persist event (%s @%s): %s", event_type, user_clean, e
+            )
         finally:
             _ACTIVITY_LOG_QUEUE.task_done()
 
