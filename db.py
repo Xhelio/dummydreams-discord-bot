@@ -3399,8 +3399,7 @@ def create_pending_verification(discord_id, tiktok_user: str, method: str = 'bio
     now_str = now.strftime('%Y-%m-%d %H:%M:%S')
     expires_str = expires.strftime('%Y-%m-%d %H:%M:%S')
 
-    conn = get_db_connection()
-    try:
+    def _store(conn):
         conn.execute("""
             INSERT INTO pending_verifications (discord_id, tiktok_user, code, method, created_at, expires_at)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -3411,10 +3410,12 @@ def create_pending_verification(discord_id, tiktok_user: str, method: str = 'bio
                 created_at = excluded.created_at,
                 expires_at = excluded.expires_at
         """, (did, u_clean, code, method, now_str, expires_str))
-        conn.commit()
-        return code
-    finally:
-        conn.close()
+
+    # Turso can roll back an idle stream ("SQLITE_BUSY ... idle for too long")
+    # during a CPU stall. Retry on a fresh connection instead of failing the
+    # whole verification with a generic error.
+    write_transaction(_store)
+    return code
 
 def get_pending_verification(discord_id) -> dict:
     """Mengambil status verifikasi pending untuk Discord ID tertentu."""

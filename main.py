@@ -232,12 +232,15 @@ async def _safe_defer(interaction: discord.Interaction, label: str, *,
         # expected during a freeze; log it without paging the error channel.
         if getattr(e, "code", None) in (10062, 40060):
             log.info(
-                "[Verify] %s: interaction expired before ACK (code=%s, custom_id=%s user=%s)",
+                "[Verify] %s: ACK delivered elsewhere (code=%s, custom_id=%s user=%s)",
                 label,
                 getattr(e, "code", None),
                 str((interaction.data or {}).get("custom_id") or "-"),
                 getattr(interaction.user, "id", "?"),
             )
+            # 40060 (already acknowledged) means the safety net answered first;
+            # the deferred response is valid, so keep going. 10062 is expired.
+            return getattr(e, "code", None) == 40060
         else:
             log.warning(
                 "[Verify] %s: could not acknowledge interaction: %s: %s",
@@ -3053,26 +3056,6 @@ async def on_interaction(interaction: discord.Interaction):
         guild_name,
         channel_label,
     )
-    # Pre-ACK known long-running verification buttons as soon as the event is
-    # parsed. Waiting for the view handler means a loop stall after delivery can
-    # eat the remaining 3-second window even though the click arrived in time.
-    if (
-        interaction.type is discord.InteractionType.component
-        and custom_id in _AUTO_ACK_IDS
-    ):
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=_AUTO_ACK_IDS[custom_id])
-                log.info("[Verify] %s pre-acknowledged in on_interaction.", custom_id)
-        except discord.InteractionResponded:
-            pass
-        except Exception as exc:
-            log.debug(
-                "[Verify] pre-ACK for %s failed: %s: %s",
-                custom_id,
-                type(exc).__name__,
-                exc,
-            )
     asyncio.create_task(_watch_unacknowledged_interaction(interaction))
     if interaction.type not in (
         discord.InteractionType.component,
