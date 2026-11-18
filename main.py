@@ -2268,18 +2268,8 @@ class BioVerificationView(VerificationView):
                 return
         self.tiktok_user = tiktok_user or self.tiktok_user
         self.code = code
-        embed = discord.Embed(
-            title="📋 Verification Code",
-            description=(
-                f"TikTok: **@{tiktok_user or 'your TikTok'}**\n\n"
-                f"**Code (tap and hold to copy):**\n"
-                f"```text\n{code}\n```\n"
-                f"Paste this code into your TikTok bio, then click **Verify Bio**."
-            ),
-            color=discord.Color.blurple(),
-        )
-        # Also include plain code for easy selection/copy on clients that show content.
-        await interaction.followup.send(content=f"`{code}`", embed=embed, ephemeral=True)
+        # Send only the code so it can be copied without extra text.
+        await interaction.followup.send(content=str(code), ephemeral=True)
 
     @discord.ui.button(
         label="Change Method",
