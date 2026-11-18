@@ -456,6 +456,22 @@ groups) across all guilds, delete `user_mappings` + `discord_verification_status
 result to the activity log. If the bot is not running (Flask-only process) the link is still
 removed and the panel shows a warning that roles could not be revoked.
 
+### Verification click timeout
+
+Every **Verify Bio** / **Verify via Live Greeting** click now runs behind a hard time
+limit. If TikTok or the database takes longer than the limit, the bot stops waiting,
+keeps the buttons usable, and answers with a "⏱️ Verification Timed Out" embed instead
+of leaving the member on a spinner.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `verification_click_timeout_seconds` | `45` | Max seconds one verification click may wait for TikTok/DB work. Clamped to 5–120. |
+
+Change it in Admin panel → **🔓 Coin-only Verification → Verification click timeout**.
+Timeout events are logged as `[Verify] <step> timed out after Xs (limit Ys)` and reach
+the error channel like any other WARNING. A value that is too low cuts off slow TikTok
+responses; 45 s is a safe default.
+
 ## 13. Diagnostics and logging
 
 Every process writes to `logs/bot.log` from the moment `main.py` starts. The file is
@@ -550,5 +566,8 @@ remain in Discord permanently.
    handler continues.
 5. If `[Gateway]` shows a legacy 32-hex `custom_id`, the click came from a DM created
    before the persistent-view update; the fallback re-sends a fresh verification menu.
-6. Check the error channel for the matching ERROR/traceback. Send the `/log` file back
+6. If the member sees **⏱️ Verification Timed Out**, the click ran longer than
+   `verification_click_timeout_seconds` (default 45 s). Raise it in the admin panel if
+   TikTok is routinely slow, and check `/log search:"[Verify]"` for the timed-out step.
+7. Check the error channel for the matching ERROR/traceback. Send the `/log` file back
    for analysis rather than only a screenshot.

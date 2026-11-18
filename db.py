@@ -1572,6 +1572,9 @@ def init_db():
             # TikTok account already has at least N coins (no proof required).
             "coin_only_verification_enabled": "0",
             "coin_only_min_coins": "100",
+            # Max seconds a Verify Bio / Live Greeting click may wait for
+            # TikTok or DB work before the bot answers with a timeout message.
+            "verification_click_timeout_seconds": "45",
         }
         for key, value in defaults.items():
             conn.execute(

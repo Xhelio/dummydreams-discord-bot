@@ -255,6 +255,58 @@ async def _safe_defer(interaction: discord.Interaction, label: str, *,
         return False
 
 
+def get_verification_click_timeout() -> float:
+    """Seconds a verification click may spend on TikTok/DB work.
+
+    Configurable in the admin panel (``verification_click_timeout_seconds``,
+    default 45 s, clamped to 5-120 s). Kept well below Discord's 15-minute
+    interaction-token lifetime so the user always gets a clear answer.
+    """
+    try:
+        value = float(get_setting("verification_click_timeout_seconds", "45") or 45)
+    except (TypeError, ValueError):
+        value = 45.0
+    return max(5.0, min(value, 120.0))
+
+
+def build_verification_timeout_embed(action: str) -> discord.Embed:
+    """Explain that a verification click hit its time limit."""
+    seconds = int(get_verification_click_timeout())
+    return discord.Embed(
+        title="⏱️ Verification Timed Out",
+        description=(
+            f"The **{action}** check took longer than **{seconds} seconds**, "
+            f"so the bot stopped waiting.\n\n"
+            f"**What to do:**\n"
+            f"1. Wait a few seconds, then click the button again.\n"
+            f"2. Make sure your TikTok profile and bio are public.\n"
+            f"3. If it keeps happening, try the other verification method or ask an admin.\n\n"
+            f"⏱️ *The current limit is {seconds}s; admins can change it in the admin panel.*"
+        ),
+        color=discord.Color.orange(),
+    )
+
+
+async def _run_verify_step(step, label: str):
+    """Await one verification step with the configured timeout.
+
+    Returns ``(True, result)`` when it finished, ``(False, None)`` on timeout.
+    The caller edits the deferred response so the user is never left waiting.
+    """
+    timeout = get_verification_click_timeout()
+    started = time.perf_counter()
+    try:
+        return True, await asyncio.wait_for(step, timeout=timeout)
+    except asyncio.TimeoutError:
+        log.warning(
+            "[Verify] %s timed out after %.1fs (limit %.0fs); click aborted cleanly.",
+            label,
+            time.perf_counter() - started,
+            timeout,
+        )
+        return False, None
+
+
 def get_verified_role(guild: discord.Guild) -> discord.Role:
     """Mengambil object Role verifikasi dari setting, env, roles.json, atau nama role."""
     if not guild:
@@ -1389,7 +1441,16 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
                 return "claimed", claimed_id
             return "ok", is_tiktok_user_in_db(u_clean)
 
-        precheck_status, precheck_payload = await asyncio.to_thread(_precheck)
+        ok, precheck = await _run_verify_step(
+            asyncio.to_thread(_precheck), "verification precheck"
+        )
+        if not ok:
+            await interaction.followup.send(
+                embed=build_verification_timeout_embed("verification precheck"),
+                ephemeral=True,
+            )
+            return
+        precheck_status, precheck_payload = precheck
 
         # 1. Discord user already linked?
         if precheck_status == "linked":
@@ -1550,7 +1611,15 @@ class VerificationMethodChoiceView(discord.ui.View):
         _note_interaction_lag(interaction, "verification method: bio")
         if not await _safe_defer(interaction, "verification method: bio"):
             return
-        tiktok_user, total_coins = await self._resolve(interaction)
+        ok, resolved = await _run_verify_step(
+            self._resolve(interaction), "resolve verification request"
+        )
+        if not ok:
+            await interaction.edit_original_response(
+                embed=build_verification_timeout_embed("verification session"), view=self
+            )
+            return
+        tiktok_user, total_coins = resolved
         if not tiktok_user:
             await interaction.edit_original_response(content="❌ This verification request expired. Please start again from the verification panel.", embed=None, view=None)
             return
@@ -1573,7 +1642,15 @@ class VerificationMethodChoiceView(discord.ui.View):
         _note_interaction_lag(interaction, "verification method: live greeting")
         if not await _safe_defer(interaction, "verification method: live greeting"):
             return
-        tiktok_user, total_coins = await self._resolve(interaction)
+        ok, resolved = await _run_verify_step(
+            self._resolve(interaction), "resolve verification request"
+        )
+        if not ok:
+            await interaction.edit_original_response(
+                embed=build_verification_timeout_embed("verification session"), view=self
+            )
+            return
+        tiktok_user, total_coins = resolved
         if not tiktok_user:
             await interaction.edit_original_response(content="❌ This verification request expired. Please start again from the verification panel.", embed=None, view=None)
             return
@@ -1639,7 +1716,15 @@ class LowActivityVerificationView(discord.ui.View):
         _note_interaction_lag(interaction, "low-activity method: live greeting")
         if not await _safe_defer(interaction, "low-activity method: live greeting"):
             return
-        tiktok_user, total_coins = await self._resolve(interaction)
+        ok, resolved = await _run_verify_step(
+            self._resolve(interaction), "resolve verification request"
+        )
+        if not ok:
+            await interaction.edit_original_response(
+                embed=build_verification_timeout_embed("verification session"), view=self
+            )
+            return
+        tiktok_user, total_coins = resolved
         if not tiktok_user:
             await interaction.edit_original_response(content="❌ This verification request expired. Please start again from the verification panel.", embed=None, view=None)
             return
@@ -1678,7 +1763,15 @@ class LowActivityVerificationView(discord.ui.View):
         _note_interaction_lag(interaction, "low-activity method: bio")
         if not await _safe_defer(interaction, "low-activity method: bio"):
             return
-        tiktok_user, total_coins = await self._resolve(interaction)
+        ok, resolved = await _run_verify_step(
+            self._resolve(interaction), "resolve verification request"
+        )
+        if not ok:
+            await interaction.edit_original_response(
+                embed=build_verification_timeout_embed("verification session"), view=self
+            )
+            return
+        tiktok_user, total_coins = resolved
         if not tiktok_user:
             await interaction.edit_original_response(content="❌ This verification request expired. Please start again from the verification panel.", embed=None, view=None)
             return
@@ -1757,6 +1850,7 @@ class BioVerificationView(discord.ui.View):
     )
     async def check_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
         _note_interaction_lag(interaction, "bio verify")
+        _bind_interaction_context(interaction)
         # Defer immediately: DB/Turso calls and TikTok fetch can exceed Discord's
         # 3-second interaction response deadline. Defer on the message so we can
         # update the verification panel in place (not an ephemeral-only response).
@@ -1775,7 +1869,16 @@ class BioVerificationView(discord.ui.View):
             )
             return
 
-        tiktok_user, code = await asyncio.to_thread(self._resolve_pending, interaction.user.id)
+        ok, resolved = await _run_verify_step(
+            asyncio.to_thread(self._resolve_pending, interaction.user.id),
+            "resolve pending bio request",
+        )
+        if not ok:
+            await interaction.edit_original_response(
+                embed=build_verification_timeout_embed("verification session"), view=self
+            )
+            return
+        tiktok_user, code = resolved
         if not tiktok_user:
             await interaction.edit_original_response(
                 content="⌛ Your verification session expired. Open the verification panel and start again.",
@@ -1784,7 +1887,17 @@ class BioVerificationView(discord.ui.View):
             )
             return
 
-        is_valid, current_bio = await async_verify_tiktok_bio(tiktok_user, code)
+        ok, bio_result = await _run_verify_step(
+            async_verify_tiktok_bio(tiktok_user, code),
+            f"TikTok bio check for @{tiktok_user}",
+        )
+        if not ok:
+            await interaction.edit_original_response(
+                embed=build_verification_timeout_embed(f"TikTok bio for @{tiktok_user}"),
+                view=self,
+            )
+            return
+        is_valid, current_bio = bio_result
 
         if is_valid:
             await asyncio.to_thread(bind_user_mapping, interaction.user.id, tiktok_user)
@@ -1873,12 +1986,32 @@ class BioVerificationView(discord.ui.View):
         except Exception:
             return
 
-        pending = get_pending_verification(interaction.user.id)
+        ok, pending = await _run_verify_step(
+            asyncio.to_thread(get_pending_verification, interaction.user.id),
+            "load bio verification code",
+        )
+        if not ok:
+            await interaction.followup.send(
+                embed=build_verification_timeout_embed("bio verification code"),
+                ephemeral=True,
+            )
+            return
         code = (pending or {}).get("code") or self.code
         tiktok_user = (pending or {}).get("tiktok_user") or self.tiktok_user
         if not code:
             if tiktok_user:
-                code = create_pending_verification(interaction.user.id, tiktok_user, method="bio")
+                ok, code = await _run_verify_step(
+                    asyncio.to_thread(
+                        create_pending_verification, interaction.user.id, tiktok_user, "bio"
+                    ),
+                    "create bio verification code",
+                )
+                if not ok:
+                    await interaction.followup.send(
+                        embed=build_verification_timeout_embed("bio verification code"),
+                        ephemeral=True,
+                    )
+                    return
                 self.code = code
             else:
                 await interaction.followup.send(
@@ -1915,8 +2048,23 @@ class BioVerificationView(discord.ui.View):
         except Exception:
             return
 
-        pending = get_pending_verification(interaction.user.id)
-        tiktok_user = (pending or {}).get("tiktok_user") or self.tiktok_user
+        def _load_method_target():
+            pending = get_pending_verification(interaction.user.id)
+            target = (pending or {}).get("tiktok_user") or self.tiktok_user
+            if not target:
+                return None, 0
+            _, coins, _ = is_tiktok_user_in_db(target)
+            return target, int(coins or 0)
+
+        ok, resolved = await _run_verify_step(
+            asyncio.to_thread(_load_method_target), "load verification method target"
+        )
+        if not ok:
+            await interaction.edit_original_response(
+                embed=build_verification_timeout_embed("verification method"), view=self
+            )
+            return
+        tiktok_user, total_coins = resolved
         if not tiktok_user:
             await interaction.edit_original_response(
                 content="⌛ Your verification session expired. Open the verification panel and start again.",
@@ -1924,7 +2072,6 @@ class BioVerificationView(discord.ui.View):
                 view=None
             )
             return
-        _, total_coins, _ = is_tiktok_user_in_db(tiktok_user)
         self.tiktok_user = tiktok_user
         self.total_coins = total_coins
 
@@ -1988,7 +2135,15 @@ class LiveVerificationView(discord.ui.View):
         _note_interaction_lag(interaction, "live code check")
         if not await _safe_defer(interaction, "live code check"):
             return
-        tiktok_user, code, total_coins = await self._resolve(interaction)
+        ok, resolved = await _run_verify_step(
+            self._resolve(interaction), "resolve live verification"
+        )
+        if not ok:
+            await interaction.edit_original_response(
+                embed=build_verification_timeout_embed("verification session"), view=self
+            )
+            return
+        tiktok_user, code, total_coins = resolved
         if not tiktok_user:
             await interaction.edit_original_response(content="❌ This verification request expired. Please start again from the verification panel.", embed=None, view=None)
             return
@@ -2029,7 +2184,15 @@ class LiveVerificationView(discord.ui.View):
     @discord.ui.button(label="Switch to Bio", style=discord.ButtonStyle.secondary, emoji="📝", custom_id="verify_live_code_switch_bio")
     async def switch_to_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        tiktok_user, _, total_coins = await self._resolve(interaction)
+        ok, resolved = await _run_verify_step(
+            self._resolve(interaction), "resolve live verification"
+        )
+        if not ok:
+            await interaction.edit_original_response(
+                embed=build_verification_timeout_embed("verification session"), view=self
+            )
+            return
+        tiktok_user, _, total_coins = resolved
         if not tiktok_user:
             await interaction.edit_original_response(content="❌ This verification request expired. Please start again from the verification panel.", embed=None, view=None)
             return
@@ -2073,7 +2236,15 @@ class LiveGreetingVerificationView(discord.ui.View):
         _note_interaction_lag(interaction, "live greeting check")
         if not await _safe_defer(interaction, "live greeting check"):
             return
-        tiktok_user, total_coins = await self._resolve(interaction)
+        ok, resolved = await _run_verify_step(
+            self._resolve(interaction), "resolve verification request"
+        )
+        if not ok:
+            await interaction.edit_original_response(
+                embed=build_verification_timeout_embed("verification session"), view=self
+            )
+            return
+        tiktok_user, total_coins = resolved
         if not tiktok_user:
             await interaction.edit_original_response(content="❌ This verification request expired. Please start again from the verification panel.", embed=None, view=None)
             return
@@ -2123,7 +2294,15 @@ class LiveGreetingVerificationView(discord.ui.View):
     @discord.ui.button(label="Switch to Bio", style=discord.ButtonStyle.secondary, emoji="📝", custom_id="verify_live_greeting_switch_bio")
     async def switch_to_bio(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        tiktok_user, total_coins = await self._resolve(interaction)
+        ok, resolved = await _run_verify_step(
+            self._resolve(interaction), "resolve verification request"
+        )
+        if not ok:
+            await interaction.edit_original_response(
+                embed=build_verification_timeout_embed("verification session"), view=self
+            )
+            return
+        tiktok_user, total_coins = resolved
         if not tiktok_user:
             await interaction.edit_original_response(content="❌ This verification request expired. Please start again from the verification panel.", embed=None, view=None)
             return
@@ -3375,6 +3554,7 @@ def _log_startup_snapshot() -> None:
         "verification_enabled",
         "coin_only_enabled",
         "coin_only_min_coins",
+        "verification_click_timeout_seconds",
         "live_tracking_enabled",
         "leaderboard_enabled",
         "allowed_channels_enabled",

@@ -94,6 +94,7 @@ def view_settings():
         "allowed_channels_enabled": get_bool_setting("allowed_channels_enabled", False),
         "coin_only_verification_enabled": get_bool_setting("coin_only_verification_enabled", False),
         "coin_only_min_coins": get_setting("coin_only_min_coins", "100") or "100",
+        "verification_click_timeout_seconds": get_setting("verification_click_timeout_seconds", "45") or "45",
     }
     tier_cfg = get_tier_settings()
     tier_cfg["announce_channel_id"] = get_setting("role_tier_announce_channel_id", "") or ""
@@ -223,6 +224,24 @@ def view_settings():
                             ⚠️ Coin-only mode removes the ownership check. Anyone who knows a
                             supporter's TikTok name can claim it and steal their status. Keep the
                             threshold high and review the verification log regularly.
+                        </small>
+                    </div>
+                </div>
+                <div class="form-grid two-col" style="margin-top: 10px;">
+                    <div>
+                        <label class="field-label">Verification click timeout (seconds)</label>
+                        <input type="number" name="verification_click_timeout_seconds" min="5" max="120" step="1" value="{{ s.verification_click_timeout_seconds }}" inputmode="numeric">
+                        <small class="field-help">
+                            How long <strong>Verify Bio</strong> and <strong>Verify via Live Greeting</strong> may
+                            wait for TikTok or the database before the bot stops and shows a timeout message.
+                            Default <strong>45</strong>, allowed 5–120.
+                        </small>
+                    </div>
+                    <div>
+                        <span class="badge" style="background:#334155;">Click timeout: {{ s.verification_click_timeout_seconds }}s</span>
+                        <small class="field-help" style="display:block; margin-top:8px;">
+                            ⏱️ A too-low value can cut off slow TikTok responses; a too-high value keeps
+                            members waiting. 45 seconds is a safe default.
                         </small>
                     </div>
                 </div>
@@ -536,6 +555,12 @@ def save_settings():
     except (TypeError, ValueError):
         min_coins = 100
     set_setting("coin_only_min_coins", str(min_coins))
+    try:
+        click_timeout = int(request.form.get("verification_click_timeout_seconds", "45"))
+    except (TypeError, ValueError):
+        click_timeout = 45
+    click_timeout = max(5, min(click_timeout, 120))
+    set_setting("verification_click_timeout_seconds", str(click_timeout))
 
     set_setting("role_tiers_mode", request.form.get("role_tiers_mode", "replace"))
     old_reset_enabled = get_bool_setting("role_tier_reset_enabled", False)
