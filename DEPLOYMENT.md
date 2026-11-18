@@ -501,7 +501,7 @@ What is recorded:
 - **Activity**: every `log_activity_event` entry (gifts, comments, sessions, host
   connect/disconnect, verification attempts, admin actions) including the actor.
 - **Safety nets**: uncaught Python exceptions, thread exceptions, unhandled asyncio task
-  exceptions, and an interaction watchdog that warns at 2.5 s if an interaction was
+  exceptions, and an interaction watchdog that warns at ~2.2 s if an interaction was
   never acknowledged (the direct cause of “didn't respond in time”).
 
 WARNING and ERROR records are queued and posted by the bot to
@@ -520,7 +520,7 @@ readable without digging through the bot log:
 **Button:** verify_low_bio
 
 ```
-[Interaction Timeout Risk] ... was not acknowledged after 2.5s
+[Interaction Timeout Risk] ... was not acknowledged after ~2.2s
 ```
 ````
 
@@ -554,6 +554,10 @@ remain in Discord permanently.
 2. If there is **no** `[Gateway]` line for the click, the interaction never reached this
    process: bot offline/sleeping, wrong token/app, or an **Interactions Endpoint URL** is
    set in the Developer Portal (the bot logs `[Discord] CRITICAL` for this on startup).
+   On Render's free plan the service shuts down after ~15 minutes without HTTP traffic
+   (the Discord gateway alone does not count), so the bot is gone until something wakes
+   it. `main.py` now pings `$RENDER_EXTERNAL_URL/health` every 10 minutes while running
+   (`[KeepAlive]` lines); keep an external uptime monitor on `/health` as backup.
 3. If `[Gateway] ... lag=1.5s+`, the event loop was busy; check the surrounding lines for
    synchronous DB work, huge leaderboard queries, or Discord HTTP retries. `[EventLoop]
    blocked ~Xs` lines show the size of the stall (≥2.5 s is posted to the error channel,
@@ -563,7 +567,8 @@ remain in Discord permanently.
    confirms the handler ran and when the ACK was sent. If that line is missing, the
    callback never ran (view not registered or `custom_id` unknown). If X.XX is near 3 s,
    the ACK was too late and Discord shows "didn't respond in time" even though the
-   handler continues.
+   handler continues. `[Interaction Rescue] <custom_id> was not acknowledged in time;
+   sent a defer at Xs` means the safety net answered for a slow handler.
 5. If `[Gateway]` shows a legacy 32-hex `custom_id`, the click came from a DM created
    before the persistent-view update; the fallback re-sends a fresh verification menu.
 6. If the member sees **⏱️ Verification Timed Out**, the click ran longer than

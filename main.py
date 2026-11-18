@@ -307,6 +307,40 @@ async def _run_verify_step(step, label: str):
         return False, None
 
 
+class VerificationView(discord.ui.View):
+    """Base for verification views: never leave a click unanswered.
+
+    Without ``on_error`` an exception inside a button callback makes Discord
+    show "didn't respond in time", which hides the real error from the member.
+    """
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
+        _bind_interaction_context(interaction)
+        log.exception(
+            "[Verify] %s failed on %s: %s: %s",
+            getattr(item, "custom_id", "-"),
+            interaction.type.name,
+            type(error).__name__,
+            error,
+        )
+        embed = discord.Embed(
+            title="❌ Verification Error",
+            description=(
+                "Something went wrong while handling that click, so nothing changed.\n\n"
+                "Please try again. If it keeps happening, screenshot this message and ask an admin "
+                "to check the bot log."
+            ),
+            color=discord.Color.red(),
+        )
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            else:
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+        except Exception:
+            pass
+
+
 def get_verified_role(guild: discord.Guild) -> discord.Role:
     """Mengambil object Role verifikasi dari setting, env, roles.json, atau nama role."""
     if not guild:
@@ -1378,7 +1412,7 @@ def build_verification_start(discord_user_id: int, tiktok_user: str, total_coins
     )
     return embed, VerificationMethodChoiceView(tiktok_user, code, total_coins)
 
-class VerificationChannelView(discord.ui.View):
+class VerificationChannelView(VerificationView):
     """Persistent view with the TikTok verification button."""
     def __init__(self):
         super().__init__(timeout=None)
@@ -1400,6 +1434,27 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
         max_length=32,
         required=True
     )
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        _bind_interaction_context(interaction, custom_id="modal_tiktok_username")
+        log.exception(
+            "[Verify] modal submit failed: %s: %s", type(error).__name__, error
+        )
+        embed = discord.Embed(
+            title="❌ Verification Error",
+            description=(
+                "Something went wrong while reading your TikTok username.\n\n"
+                "Please try again. If it keeps happening, screenshot this message and ask an admin."
+            ),
+            color=discord.Color.red(),
+        )
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            else:
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+        except Exception:
+            pass
 
     async def on_submit(self, interaction: discord.Interaction):
         _bind_interaction_context(interaction, custom_id="modal_tiktok_username")
@@ -1589,7 +1644,7 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
             print(f"[Verification] Failed to DM verification flow: {e}")
             await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
-class VerificationMethodChoiceView(discord.ui.View):
+class VerificationMethodChoiceView(VerificationView):
     """Standard verification (10+ coins): bio code or live greeting."""
     def __init__(self, tiktok_user: str = None, code: str = None, total_coins: int = 0):
         super().__init__(timeout=None)
@@ -1695,7 +1750,7 @@ class VerificationMethodChoiceView(discord.ui.View):
             _drop_live_pending(tiktok_user)
         await interaction.edit_original_response(content="❌ Verification cancelled.", embed=None, view=None)
 
-class LowActivityVerificationView(discord.ui.View):
+class LowActivityVerificationView(VerificationView):
     """Verification for accounts with fewer than 10 coins (or no transactions)."""
     def __init__(self, tiktok_user: str = None, total_coins: int = 0):
         super().__init__(timeout=None)
@@ -1819,7 +1874,7 @@ def build_live_greeting_embed(tiktok_user: str, live_hosts: list) -> discord.Emb
         color=discord.Color.red()
     )
 
-class BioVerificationView(discord.ui.View):
+class BioVerificationView(VerificationView):
     """Persistent bio verification: the button stays clickable and can be retried."""
 
     def __init__(self, tiktok_user: str = None, code: str = None, total_coins: int = 0, low_activity: bool = False):
@@ -2083,7 +2138,9 @@ class BioVerificationView(discord.ui.View):
             )
             view = LowActivityVerificationView(tiktok_user, total_coins)
         else:
-            code = create_pending_verification(interaction.user.id, tiktok_user, method='choice')
+            code = await asyncio.to_thread(
+                create_pending_verification, interaction.user.id, tiktok_user, 'choice'
+            )
             embed = discord.Embed(
                 title="🔒 Choose Verification Method",
                 description=f"Choose a verification method for TikTok account **@{tiktok_user}**:",
@@ -2109,7 +2166,7 @@ class BioVerificationView(discord.ui.View):
         _drop_live_pending(self.tiktok_user)
         await interaction.edit_original_response(content="❌ Verification cancelled.", embed=None, view=None)
 
-class LiveVerificationView(discord.ui.View):
+class LiveVerificationView(VerificationView):
     """Legacy live chat code verification (kept for old pending requests)."""
     def __init__(self, tiktok_user: str = None, code: str = None, total_coins: int = 0):
         super().__init__(timeout=None)
@@ -2213,7 +2270,7 @@ class LiveVerificationView(discord.ui.View):
             _drop_live_pending(tiktok_user)
         await interaction.edit_original_response(content="❌ Verification cancelled.", embed=None, view=None)
 
-class LiveGreetingVerificationView(discord.ui.View):
+class LiveGreetingVerificationView(VerificationView):
     """Live greeting verification."""
     def __init__(self, tiktok_user: str = None, total_coins: int = 0):
         super().__init__(timeout=None)
@@ -2446,6 +2503,34 @@ async def handle_live_comment_verification(tiktok_user: str, comment_text: str, 
 
 # --- Discord Events & Commands ---
 
+def _register_persistent_views() -> None:
+    """Register verification views before login.
+
+    Registering in ``on_ready`` meant a click during startup/reconnect could be
+    delivered before the view existed, which Discord reports as "didn't respond
+    in time". The ViewStore accepts registrations as soon as the client exists.
+    """
+    for view in (
+        VerificationChannelView(),
+        BioVerificationView(),
+        VerificationMethodChoiceView(),
+        LowActivityVerificationView(),
+        LiveGreetingVerificationView(),
+        LiveVerificationView(),
+    ):
+        try:
+            bot.add_view(view)
+        except Exception as exc:
+            log.warning(
+                "[Verify] Could not register persistent view %s: %s",
+                type(view).__name__,
+                exc,
+            )
+
+
+_register_persistent_views()
+
+
 @bot.event
 async def on_message(message):
     # Chatbot: reply when mentioned / replied to (and in DMs), then still process commands.
@@ -2509,12 +2594,11 @@ async def on_ready():
         intents,
     )
     # Register persistent views so verification buttons keep working after restarts
-    bot.add_view(VerificationChannelView())
-    bot.add_view(BioVerificationView())
-    bot.add_view(VerificationMethodChoiceView())
-    bot.add_view(LowActivityVerificationView())
-    bot.add_view(LiveGreetingVerificationView())
-    bot.add_view(LiveVerificationView())
+    # (they are already registered at import time; this is a safety net for reloads).
+    try:
+        _register_persistent_views()
+    except Exception as e:
+        log.warning("[Verify] Persistent view re-registration failed: %s", e)
 
     await apply_bot_presence()
 
@@ -2573,10 +2657,68 @@ async def _loop_lag_monitor() -> None:
             )
 
 
-async def _watch_unacknowledged_interaction(interaction: discord.Interaction) -> None:
-    """Warn when an interaction is still not acknowledged near Discord's 3s limit."""
+async def _keep_awake_loop() -> None:
+    """Keep a free Render service from sleeping on its own.
+
+    Render free web services shut down after ~15 minutes without inbound HTTP
+    traffic. The Discord gateway is outbound, so the bot disappears and every
+    click shows "didn't respond in time" until something wakes the service.
+    ``RENDER_EXTERNAL_URL`` is injected by Render; without it this is a no-op
+    (use an external uptime monitor on /health instead).
+    """
+    base = (os.environ.get("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
+    if not base:
+        log.info("[KeepAlive] RENDER_EXTERNAL_URL not set; self-ping disabled.")
+        return
+    url = f"{base}/health"
     try:
-        await asyncio.sleep(2.5)
+        import aiohttp
+    except Exception as exc:
+        log.info("[KeepAlive] aiohttp unavailable (%s); self-ping disabled.", exc)
+        return
+    await asyncio.sleep(90)
+    log.info("[KeepAlive] Pinging %s every 10 minutes.", url)
+    while True:
+        try:
+            timeout = aiohttp.ClientTimeout(total=20)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url) as response:
+                    await response.read()
+                    log.debug("[KeepAlive] GET %s -> %s", url, response.status)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.debug("[KeepAlive] ping failed: %s: %s", type(exc).__name__, exc)
+        await asyncio.sleep(600)
+
+
+_AUTO_ACK_IDS = {
+    # custom_id -> ephemeral?  Only long-running verification buttons whose
+    # handlers tolerate an already-acknowledged interaction.
+    "verify_choice_bio": False,
+    "verify_choice_live_greeting": False,
+    "verify_low_bio": False,
+    "verify_low_live_greeting": False,
+    "bio_verify_persistent": False,
+    "bio_change_method_persistent": False,
+    "bio_copy_code_persistent": True,
+    "verify_live_code_check": False,
+    "verify_live_greeting_check": False,
+}
+
+
+async def _watch_unacknowledged_interaction(interaction: discord.Interaction) -> None:
+    """Warn when an interaction is still not acknowledged near Discord's 3s limit.
+
+    Waits until ~2.2s after Discord created the interaction, leaving ~0.8s for
+    the HTTP defer to arrive, then answers on behalf of a stuck handler.
+    """
+    try:
+        try:
+            elapsed = time.time() - interaction.created_at.timestamp()
+        except Exception:
+            elapsed = 0.0
+        await asyncio.sleep(max(0.0, 2.2 - elapsed))
         if interaction.response.is_done():
             return
         try:
@@ -2585,7 +2727,7 @@ async def _watch_unacknowledged_interaction(interaction: discord.Interaction) ->
             received_lag = -1
         log.warning(
             "[Interaction Timeout Risk] type=%s command=%s custom_id=%s user=%s (%s) guild=%s (%s) "
-            "was not acknowledged after 2.5s (gateway_lag=%.2fs; Discord shows \"didn't respond in time\" at ~3s).",
+            "was not acknowledged after ~2.2s (gateway_lag=%.2fs; Discord shows \"didn't respond in time\" at ~3s).",
             interaction.type.name,
             str((interaction.data or {}).get("name") or "-"),
             str((interaction.data or {}).get("custom_id") or "-"),
@@ -2595,6 +2737,21 @@ async def _watch_unacknowledged_interaction(interaction: discord.Interaction) ->
             getattr(getattr(interaction, "guild", None), "name", None) or "DM",
             received_lag,
         )
+        custom_id = str((interaction.data or {}).get("custom_id") or "")
+        if (
+            custom_id in _AUTO_ACK_IDS
+            and interaction.type is discord.InteractionType.component
+        ):
+            try:
+                await interaction.response.defer(ephemeral=_AUTO_ACK_IDS[custom_id])
+                log.warning(
+                    "[Interaction Rescue] %s was not acknowledged in time; sent a defer at %.2fs "
+                    "so the member does not see \"didn't respond in time\".",
+                    custom_id,
+                    time.time() - interaction.created_at.timestamp(),
+                )
+            except Exception as exc:
+                log.debug("[Interaction Rescue] %s: could not defer: %s", custom_id, exc)
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -3657,6 +3814,7 @@ async def main():
     # Deliver queued warnings/errors to the Discord error channel.
     asyncio.create_task(log_setup.notify_loop(bot))
     asyncio.create_task(_loop_lag_monitor())
+    asyncio.create_task(_keep_awake_loop())
     log.info(
         "[Startup] Error notifications -> channel %s (queue=%s).",
         log_setup.LOG_ERROR_CHANNEL_ID,
