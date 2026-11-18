@@ -1093,7 +1093,14 @@ async def update_leaderboard_message():
             await msg.edit(embed=embed)
             return
         except Exception:
-            pass
+            # Edit/fetch failed (deleted, missing perms, transient error, etc.).
+            # Best-effort delete the tracked message so a resend doesn't leave a duplicate.
+            try:
+                stale = await channel.fetch_message(int(old_message_id))
+                await stale.delete()
+            except Exception:
+                pass
+            old_message_id = ""
 
     msg = await channel.send(embed=embed)
     await asyncio.to_thread(set_setting, "leaderboard_message_id", str(msg.id))
