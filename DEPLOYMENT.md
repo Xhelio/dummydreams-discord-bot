@@ -563,6 +563,11 @@ remain in Discord permanently.
    blocked ~Xs` lines show the size of the stall (≥2.5 s is posted to the error channel,
    smaller stalls stay in the file at INFO). Any synchronous Turso write on the event
    loop is a bug: DB calls must run through `asyncio.to_thread` or `queue_setting`.
+   `[EventLoop Stack] main thread blocked ~Xs` is written by a separate watchdog thread
+   and prints the **exact Python stack** that froze the loop — use the innermost frame
+   to find the blocking call. Note that raw `print()` output is now queued: before this
+   change, Render stdout backpressure from live-observer/gift prints could block the
+   loop for several seconds and cause missed interaction ACKs.
 4. When a verification button is clicked, `[Verify] <method>: acknowledged in X.XXs`
    confirms the handler ran and when the ACK was sent. If that line is missing, the
    callback never ran (view not registered or `custom_id` unknown). If X.XX is near 3 s,

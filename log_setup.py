@@ -314,19 +314,28 @@ class _LogFileWriter:
 
 
 class _Tee:
-    """Mirror raw stdout/stderr to the console and the log file."""
+    """Mirror raw stdout/stderr to the console and the log file.
 
-    def __init__(self, original, writer: _LogFileWriter, name: str):
+    Console output goes through a background queue: Render reads stdout from a
+    pipe, and a burst of ``print()`` calls (live observers, gift activity) can
+    fill that pipe and block the Discord event loop for seconds. That made
+    interactions miss Discord's 3-second ACK window even though the process was
+    healthy. If the console thread falls behind, output is dropped instead of
+    stalling the loop; the file writer still records every line.
+    """
+
+    def __init__(self, original, writer: _LogFileWriter, name: str, console_writer=None):
         self._original = original
         self._writer = writer
         self._name = name
+        self._console = console_writer or _ConsoleWriter(original)
         self._at_line_start = True
 
     def write(self, text):
         if not text:
             return 0
         try:
-            self._original.write(text)
+            self._console.write(text)
         except Exception:
             pass
         try:
@@ -343,10 +352,9 @@ class _Tee:
         return len(text)
 
     def flush(self):
-        try:
-            self._original.flush()
-        except Exception:
-            pass
+        # Flushing the real stream here could block the event loop; the console
+        # writer thread flushes after every chunk it writes.
+        return None
 
     @property
     def encoding(self):
@@ -490,7 +498,9 @@ def setup_logging() -> None:
     os.makedirs(LOG_DIR, exist_ok=True)
     _writer = _LogFileWriter(LOG_PATH, LOG_MAX_BYTES, LOG_BACKUPS)
     _console_writer = _ConsoleWriter(_ORIGINAL_STDOUT)
-    _console_stream = _Tee(_ORIGINAL_STDOUT, _writer, "stdout")
+    _console_stream = _Tee(
+        _ORIGINAL_STDOUT, _writer, "stdout", console_writer=_console_writer
+    )
     sys.stdout = _console_stream
     sys.stderr = _Tee(_ORIGINAL_STDERR, _writer, "stderr")
 

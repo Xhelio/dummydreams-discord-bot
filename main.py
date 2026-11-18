@@ -2629,6 +2629,49 @@ async def on_resumed():
     print("[Gateway] Resumed Discord session.")
 
 
+_LOOP_BEAT = {"at": time.monotonic(), "reported": 0.0}
+
+
+def _start_loop_stack_watchdog() -> None:
+    """Dump the main thread's Python stack when the event loop is stalled.
+
+    The task-name list from ``_loop_lag_monitor`` cannot say which call blocked
+    the loop. A separate OS thread keeps ticking while the loop is frozen and
+    can capture the exact stack, which is what turns "blocked ~7s" into a fix.
+    """
+    import threading
+    import traceback
+
+    main_ident = threading.main_thread().ident
+    if not main_ident:
+        return
+
+    def _watch() -> None:
+        while True:
+            time.sleep(1.0)
+            stalled = time.monotonic() - _LOOP_BEAT["at"]
+            if stalled < 2.0:
+                continue
+            now = time.monotonic()
+            if now - _LOOP_BEAT["reported"] < 10.0:
+                continue
+            _LOOP_BEAT["reported"] = now
+            frame = sys._current_frames().get(main_ident)
+            if frame is not None:
+                stack = "".join(traceback.format_stack(frame)[-14:])
+            else:
+                stack = "(main thread frame unavailable)"
+            log.warning(
+                "[EventLoop Stack] main thread blocked ~%.1fs; innermost Python frames:\n%s",
+                stalled,
+                stack,
+            )
+
+    threading.Thread(
+        target=_watch, name="loop-stack-watchdog", daemon=True
+    ).start()
+
+
 async def _loop_lag_monitor() -> None:
     """Detect synchronous work blocking the Discord event loop.
 
@@ -2640,6 +2683,7 @@ async def _loop_lag_monitor() -> None:
     while True:
         started = time.perf_counter()
         await asyncio.sleep(interval)
+        _LOOP_BEAT["at"] = time.monotonic()
         lag = (time.perf_counter() - started) - interval
         if lag >= 1.0:
             current = asyncio.current_task()
@@ -3814,6 +3858,7 @@ async def main():
     # Deliver queued warnings/errors to the Discord error channel.
     asyncio.create_task(log_setup.notify_loop(bot))
     asyncio.create_task(_loop_lag_monitor())
+    _start_loop_stack_watchdog()
     asyncio.create_task(_keep_awake_loop())
     log.info(
         "[Startup] Error notifications -> channel %s (queue=%s).",
