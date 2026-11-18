@@ -3426,15 +3426,11 @@ def get_pending_verification(discord_id) -> dict:
     now_str = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
     conn = get_db_connection()
     try:
-        cur = conn.cursor()
-        conn.execute("DELETE FROM pending_verifications WHERE expires_at < ?", (now_str,))
-        conn.commit()
-
-        row = cur.execute("""
-            SELECT discord_id, tiktok_user, code, method, created_at, expires_at 
-            FROM pending_verifications 
-            WHERE discord_id = ?
-        """, (did,)).fetchone()
+        row = conn.execute("""
+            SELECT discord_id, tiktok_user, code, method, created_at, expires_at
+            FROM pending_verifications
+            WHERE discord_id = ? AND expires_at >= ?
+        """, (did, now_str)).fetchone()
         if row:
             return {
                 "discord_id": _normalize_discord_id(row[0]),
@@ -3481,19 +3477,15 @@ def find_pending_live_verification(tiktok_user: str, comment_text: str) -> dict:
     now_str = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
     conn = get_db_connection()
     try:
-        cur = conn.cursor()
-        conn.execute("DELETE FROM pending_verifications WHERE expires_at < ?", (now_str,))
-        conn.commit()
-
-        rows = cur.execute("""
-            SELECT discord_id, tiktok_user, code, method 
-            FROM pending_verifications 
-            WHERE LOWER(tiktok_user) = ?
-        """, (u_clean,)).fetchall()
+        rows = conn.execute("""
+            SELECT discord_id, tiktok_user, code, method
+            FROM pending_verifications
+            WHERE LOWER(tiktok_user) = ? AND expires_at >= ?
+        """, (u_clean, now_str)).fetchall()
 
         for r in rows:
             code = r[2]
-            if code.lower() in comment_text.lower():
+            if code and code.lower() in comment_text.lower():
                 return {
                     "discord_id": _normalize_discord_id(r[0]),
                     "tiktok_user": r[1],
@@ -3511,17 +3503,13 @@ def find_pending_live_greeting(tiktok_user: str) -> dict:
     now_str = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
     conn = get_db_connection()
     try:
-        cur = conn.cursor()
-        conn.execute("DELETE FROM pending_verifications WHERE expires_at < ?", (now_str,))
-        conn.commit()
-
-        row = cur.execute("""
+        row = conn.execute("""
             SELECT discord_id, tiktok_user, code, method
             FROM pending_verifications
-            WHERE LOWER(tiktok_user) = ? AND method = 'live_greeting'
+            WHERE LOWER(tiktok_user) = ? AND method = 'live_greeting' AND expires_at >= ?
             ORDER BY created_at ASC
             LIMIT 1
-        """, (u_clean,)).fetchone()
+        """, (u_clean, now_str)).fetchone()
         if row:
             return {
                 "discord_id": _normalize_discord_id(row[0]),
@@ -3538,9 +3526,13 @@ def cancel_pending_verification(discord_id):
     did = _normalize_discord_id(discord_id)
     if not did:
         return
-    conn = get_db_connection()
-    try:
+    def _delete(conn):
         conn.execute("DELETE FROM pending_verifications WHERE discord_id = ?", (did,))
-        conn.commit()
-    finally:
-        conn.close()
+    try:
+        write_transaction(_delete)
+    except Exception as e:
+        if is_transient_db_error(e):
+            # Best-effort: a pending row will expire on its own.
+            print(f"[DB] cancel_pending_verification skipped after transient error: {e}")
+        else:
+            raise
