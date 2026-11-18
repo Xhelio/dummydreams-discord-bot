@@ -365,6 +365,13 @@ def _apply_sign_api_key() -> bool:
 # the cooldown so a redeploy/restart does not immediately burn more attempts.
 _LAST_OFFLINE_LOG = {}
 _OFFLINE_LOG_INTERVAL_SECONDS = 600
+# Identical observer errors repeat every retry cycle; report each distinct
+# signature once per window instead of paging the error channel every 30s.
+_LAST_OBSERVER_ERROR_LOG = {}
+_OBSERVER_ERROR_LOG_INTERVAL_SECONDS = 900
+# TikTokLive raises UserNotFoundError for accounts that cannot go live at all
+# (never live / not found). They are not hosts yet: poll slower, never alert.
+_UNAVAILABLE_RETRY_SECONDS = 300
 
 
 def _is_reconnect_requested(username: str) -> bool:
@@ -1199,9 +1206,18 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             err_lower = err_detail.lower()
             is_rate_limited = ("rate_limit" in err_lower) or ("too many connections" in err_lower) or ("eulerstream" in err_lower)
             is_json_empty_error = ("jsondecodeerror" in err_lower) or ("expecting value" in err_lower)
+            is_unavailable = (
+                "usernotfounderror" in err_lower
+                or "not capable of going live" in err_lower
+                or "never gone live" in err_lower
+                or "does not exist" in err_lower
+            )
             runtime_status.update_observer_diag(
                 username_clean,
-                status="rate_limited" if is_rate_limited else "error",
+                status=(
+                    "rate_limited" if is_rate_limited
+                    else ("unavailable" if is_unavailable else "error")
+                ),
                 consecutive_failures=consecutive_failures,
                 last_error=err_detail[:300],
                 rate_limited=is_rate_limited,
@@ -1213,6 +1229,23 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     f"[Debug @{username_clean}] Websocket RATE LIMITED (failures={consecutive_failures}, connected_this_cycle={connected_this_cycle}, host={current_host}) - backing off: {err_detail}",
                     username_clean,
                 )
+            elif is_unavailable:
+                # Not an error: TikTok says this account cannot go live (never
+                # live) or does not exist. Poll rarely and keep the channel clean.
+                last_log = _LAST_OFFLINE_LOG.get(username_clean, 0)
+                if time.time() - last_log >= _OFFLINE_LOG_INTERVAL_SECONDS:
+                    _LAST_OFFLINE_LOG[username_clean] = time.time()
+                    print(
+                        f"[{username_clean}] Account is not live-capable "
+                        f"(never live / not found): {err_detail}"
+                    )
+                    log_activity_event(
+                        "system",
+                        f"[Debug @{username_clean}] Account is not live-capable "
+                        f"(never live / not found). Polling every "
+                        f"{_UNAVAILABLE_RETRY_SECONDS // 60}m: {err_detail}",
+                        username_clean,
+                    )
             elif "offline" in err_lower or "not found" in err_lower or "useroffline" in err_lower:
                 # Offline is a normal state, not an error: throttle logging so the
                 # activity feed stays readable while we keep polling.
@@ -1227,11 +1260,24 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     )
             else:
                 print(f"[{username_clean}] Observer error while checking live (failures={consecutive_failures}): {err_detail}")
-                log_activity_event(
-                    "error",
-                    f"[Debug @{username_clean}] Websocket observer error (failures={consecutive_failures}, connected_this_cycle={connected_this_cycle}, host={current_host}, probe={probe_result if 'probe_result' in locals() else 'n/a'}): {err_detail}",
-                    username_clean,
-                )
+                now = time.time()
+                signature = (username_clean, err_detail[:160])
+                if now - _LAST_OBSERVER_ERROR_LOG.get(signature, 0) >= _OBSERVER_ERROR_LOG_INTERVAL_SECONDS:
+                    if len(_LAST_OBSERVER_ERROR_LOG) > 500:
+                        _LAST_OBSERVER_ERROR_LOG.clear()
+                    _LAST_OBSERVER_ERROR_LOG[signature] = now
+                    log_activity_event(
+                        "error",
+                        f"[Debug @{username_clean}] Websocket observer error (failures={consecutive_failures}, connected_this_cycle={connected_this_cycle}, host={current_host}, probe={probe_result if 'probe_result' in locals() else 'n/a'}): {err_detail}",
+                        username_clean,
+                    )
+                else:
+                    log_activity_event(
+                        "system",
+                        f"[Debug @{username_clean}] Repeated observer error (reported once per "
+                        f"{_OBSERVER_ERROR_LOG_INTERVAL_SECONDS // 60}m, failures={consecutive_failures}): {err_detail}",
+                        username_clean,
+                    )
             # Treat sign-server empty/invalid JSON responses as backoff-worthy (often blocking/rate-limit side effects).
             if is_json_empty_error:
                 runtime_status.update_observer_diag(username_clean, status="error_json_response")
@@ -1362,6 +1408,12 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         err_lower_cycle = str(cycle_error or "").lower()
         rate_limited_cycle = ("rate_limit" in err_lower_cycle) or ("too many connections" in err_lower_cycle) or ("eulerstream" in err_lower_cycle)
         json_empty_cycle = ("jsondecodeerror" in err_lower_cycle) or ("expecting value" in err_lower_cycle)
+        unavailable_cycle = (
+            "usernotfounderror" in err_lower_cycle
+            or "not capable of going live" in err_lower_cycle
+            or "never gone live" in err_lower_cycle
+            or "does not exist" in err_lower_cycle
+        )
         if reconnect_state.get("triggered"):
             wait_seconds = 2
             runtime_status.update_observer_diag(username_clean, status="reconnecting")
@@ -1388,6 +1440,13 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 "system",
                 f"[Debug @{username_clean}] Websocket returned empty/invalid JSON response; backing off {wait_seconds}s before retry (failures={consecutive_failures}, probe_online={probe_result is True}, mode={connect_mode}).",
                 username_clean,
+            )
+        elif unavailable_cycle:
+            # The account cannot go live (never live / not found). Keep a slow
+            # watch in case it becomes live-capable later, without burning quota.
+            wait_seconds = _UNAVAILABLE_RETRY_SECONDS
+            runtime_status.update_observer_diag(
+                username_clean, status="unavailable", wait_seconds=wait_seconds
             )
         elif probe_result is True and not connected_this_cycle:
             # Account is online (probe) but websocket event client not connected: retry to receive LiveIntroEvent.

@@ -583,7 +583,10 @@ remain in Discord permanently.
    callback never ran (view not registered or `custom_id` unknown). If X.XX is near 3 s,
    the ACK was too late and Discord shows "didn't respond in time" even though the
    handler continues. `[Interaction Rescue] <custom_id> was not acknowledged in time;
-   sent a defer at Xs` means the safety net answered for a slow handler.
+   sent a defer at Xs` means the safety net answered for a slow handler. Known
+   long-running verification buttons are now pre-acknowledged in `on_interaction`
+   (`pre-acknowledged in on_interaction`), and the rescue fires at 1.5 s instead of
+   2.2 s, so a loop stall after delivery no longer consumes the whole 3 s window.
 5. If `[Gateway]` shows a legacy 32-hex `custom_id`, the click came from a DM created
    before the persistent-view update; the fallback re-sends a fresh verification menu.
 6. If the member sees **⏱️ Verification Timed Out**, the click ran longer than
@@ -596,3 +599,8 @@ remain in Discord permanently.
    button is the first panel button whose handler never ran (check `[Gateway]`).
 7. Check the error channel for the matching ERROR/traceback. Send the `/log` file back
    for analysis rather than only a screenshot.
+8. `UserNotFoundError: ... not capable of going LIVE ... / does not exist` is not a bot
+   failure: that TikTok handle cannot go live (never live, wrong spelling, or deleted).
+   It is no longer paged as an error — the observer records a `system` note once per
+   10 minutes, marks the host `unavailable`, and polls it every 5 minutes. Other
+   identical observer errors are paged once per 15 minutes instead of every retry.

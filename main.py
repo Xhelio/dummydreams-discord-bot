@@ -2866,6 +2866,10 @@ async def _keep_awake_loop() -> None:
         await asyncio.sleep(600)
 
 
+# Rescue the ACK earlier than before: pre-ACK handles the normal case, and this
+# leaves ~1.5s for the HTTP callback to reach Discord if the loop stalls.
+_RESCUE_AFTER_SECONDS = 1.5
+
 _AUTO_ACK_IDS = {
     # custom_id -> ephemeral?  Only long-running verification buttons whose
     # handlers tolerate an already-acknowledged interaction.
@@ -2884,15 +2888,16 @@ _AUTO_ACK_IDS = {
 async def _watch_unacknowledged_interaction(interaction: discord.Interaction) -> None:
     """Warn when an interaction is still not acknowledged near Discord's 3s limit.
 
-    Waits until ~2.2s after Discord created the interaction, leaving ~0.8s for
-    the HTTP defer to arrive, then answers on behalf of a stuck handler.
+    Waits until ``_RESCUE_AFTER_SECONDS`` after Discord created the interaction,
+    leaving ~1.5s for the HTTP defer to arrive, then answers on behalf of a
+    stuck handler.
     """
     try:
         try:
             elapsed = time.time() - interaction.created_at.timestamp()
         except Exception:
             elapsed = 0.0
-        await asyncio.sleep(max(0.0, 2.2 - elapsed))
+        await asyncio.sleep(max(0.0, _RESCUE_AFTER_SECONDS - elapsed))
         if interaction.response.is_done():
             return
         try:
@@ -2901,7 +2906,7 @@ async def _watch_unacknowledged_interaction(interaction: discord.Interaction) ->
             received_lag = -1
         log.warning(
             "[Interaction Timeout Risk] type=%s command=%s custom_id=%s user=%s (%s) guild=%s (%s) "
-            "was not acknowledged after ~2.2s (gateway_lag=%.2fs; Discord shows \"didn't respond in time\" at ~3s).",
+            "was not acknowledged after ~%.1fs (gateway_lag=%.2fs; Discord shows \"didn't respond in time\" at ~3s).",
             interaction.type.name,
             str((interaction.data or {}).get("name") or "-"),
             str((interaction.data or {}).get("custom_id") or "-"),
@@ -2909,6 +2914,7 @@ async def _watch_unacknowledged_interaction(interaction: discord.Interaction) ->
             _describe_user(interaction.user),
             getattr(getattr(interaction, "guild", None), "id", "-"),
             getattr(getattr(interaction, "guild", None), "name", None) or "DM",
+            _RESCUE_AFTER_SECONDS,
             received_lag,
         )
         custom_id = str((interaction.data or {}).get("custom_id") or "")
@@ -2969,6 +2975,26 @@ async def on_interaction(interaction: discord.Interaction):
         guild_name,
         channel_label,
     )
+    # Pre-ACK known long-running verification buttons as soon as the event is
+    # parsed. Waiting for the view handler means a loop stall after delivery can
+    # eat the remaining 3-second window even though the click arrived in time.
+    if (
+        interaction.type is discord.InteractionType.component
+        and custom_id in _AUTO_ACK_IDS
+    ):
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=_AUTO_ACK_IDS[custom_id])
+                log.info("[Verify] %s pre-acknowledged in on_interaction.", custom_id)
+        except discord.InteractionResponded:
+            pass
+        except Exception as exc:
+            log.debug(
+                "[Verify] pre-ACK for %s failed: %s: %s",
+                custom_id,
+                type(exc).__name__,
+                exc,
+            )
     asyncio.create_task(_watch_unacknowledged_interaction(interaction))
     if interaction.type not in (
         discord.InteractionType.component,
