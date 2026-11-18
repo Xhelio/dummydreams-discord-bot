@@ -282,7 +282,9 @@ async def probe_room_live(username: str):
     if not username or FetchRoomIdAPIRoute is None:
         return None
     try:
-        client = TikTokLiveClient(unique_id=username)
+        # Construct off the loop: httpx loads the certifi CA bundle synchronously
+        # (ssl.create_default_context), which blocked the loop for seconds.
+        client = await asyncio.to_thread(TikTokLiveClient, unique_id=username)
         web = getattr(client, "web", None)
         if web is None:
             return None
@@ -765,7 +767,8 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             _apply_sign_api_key()
         except Exception:
             pass
-        client = TikTokLiveClient(unique_id=username_clean)
+        # See probe_room_live: TLS/CA setup must not run on the event loop.
+        client = await asyncio.to_thread(TikTokLiveClient, unique_id=username_clean)
         connected_this_cycle = False
         reconnect_state = {"triggered": False}
         with _ACTIVE_CLIENTS_LOCK:

@@ -3629,8 +3629,33 @@ async def slash_setup_verification(interaction: discord.Interaction):
             await old_msg.delete()
         except Exception:
             pass
+    try:
+        await send_verification_panel(interaction.channel)
+    except discord.Forbidden as e:
+        log.warning(
+            "[Verification] Cannot post panel in #%s (%s): %s",
+            getattr(interaction.channel, "name", "?"),
+            interaction.channel.id,
+            e,
+        )
+        await interaction.followup.send(
+            f"❌ I cannot post the verification panel in {interaction.channel.mention}.\n"
+            "Grant me these permissions in that channel, then run the command again:\n"
+            "• **View Channel**\n• **Send Messages**\n• **Embed Links**\n"
+            "• **Use External Emojis**\n• **Read Message History**",
+            ephemeral=True,
+        )
+        return
+    except discord.HTTPException as e:
+        log.warning("[Verification] Discord rejected the panel in %s: %s", interaction.channel.id, e)
+        await interaction.followup.send(
+            f"❌ Discord rejected the verification panel in {interaction.channel.mention} "
+            f"(`{getattr(e, 'status', '?')}` — {getattr(e, 'text', None) or type(e).__name__}).\n"
+            "Check my channel permissions and try again.",
+            ephemeral=True,
+        )
+        return
     await asyncio.to_thread(set_setting, "verification_channel_id", str(interaction.channel.id))
-    await send_verification_panel(interaction.channel)
     await interaction.followup.send("✅ Verification panel sent to this channel.", ephemeral=True)
 
 
@@ -3657,7 +3682,15 @@ async def verification_setup(interaction: discord.Interaction):
             ephemeral=True,
         )
         return
-    await interaction.channel.send(embed=build_rules_welcome_embed())
+    try:
+        await interaction.channel.send(embed=build_rules_welcome_embed())
+    except discord.Forbidden:
+        await interaction.followup.send(
+            f"❌ I cannot post in {interaction.channel.mention}. Grant me **View Channel**, "
+            "**Send Messages**, **Embed Links**, and **Read Message History** there.",
+            ephemeral=True,
+        )
+        return
     await interaction.followup.send("✅ Welcome/rules message sent to this channel.", ephemeral=True)
 
 
@@ -3673,7 +3706,15 @@ async def slash_welcome_setup(interaction: discord.Interaction):
             ephemeral=True,
         )
         return
-    await interaction.channel.send(embed=build_rules_welcome_embed())
+    try:
+        await interaction.channel.send(embed=build_rules_welcome_embed())
+    except discord.Forbidden:
+        await interaction.followup.send(
+            f"❌ I cannot post in {interaction.channel.mention}. Grant me **View Channel**, "
+            "**Send Messages**, **Embed Links**, and **Read Message History** there.",
+            ephemeral=True,
+        )
+        return
     await interaction.followup.send("✅ Welcome/rules message sent to this channel.", ephemeral=True)
 
 

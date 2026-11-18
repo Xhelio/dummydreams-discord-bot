@@ -32,9 +32,15 @@ _ACTIVITY_LOGGER = logging.getLogger("bot.activity")
 # and blocked the Discord event loop long enough to time out interactions.
 _SETTINGS_CACHE = {}
 _SETTINGS_CACHE_TTL = 15.0
+# Missing keys (e.g. per-host rate-limit counters) are cached briefly so the
+# event loop does not queue a refresh for them on every read.
+_SETTINGS_MISS_TTL = 60.0
 _SETTINGS_CACHE_LOCK = threading.Lock()
 _SETTINGS_REFRESHING = set()
 _SETTINGS_WARMED = False
+_SETTINGS_REFRESH_QUEUE: "queue.Queue[str]" = queue.Queue(maxsize=2000)
+_SETTINGS_REFRESH_WORKER = None
+_SETTINGS_REFRESH_WORKER_LOCK = threading.Lock()
 
 
 def invalidate_settings_cache():
@@ -70,16 +76,32 @@ def warm_settings_cache():
         for key, value in rows:
             _SETTINGS_CACHE[key] = (value, now + _SETTINGS_CACHE_TTL)
         _SETTINGS_WARMED = True
+    # Start the refresh worker here: warm-up runs in a worker thread, so the
+    # event loop never pays for Thread.start() when a setting goes stale.
+    start_settings_refresh_worker()
+    # Start the other background writers here too. Thread.start() can block for
+    # seconds on a busy CPU, and doing it lazily from the loop would freeze the
+    # first interaction ACK after a restart.
+    try:
+        _ensure_activity_log_writer()
+        _ensure_setting_writer()
+    except Exception:
+        pass
 
 
-def _schedule_setting_refresh(key: str):
-    """Refresh one stale setting in a daemon thread (stale-while-revalidate)."""
-    with _SETTINGS_CACHE_LOCK:
-        if key in _SETTINGS_REFRESHING:
+def _settings_refresh_worker() -> None:
+    """Single background worker that refreshes stale settings.
+
+    Spawning one ``threading.Thread`` per stale key from the Discord event loop
+    was catastrophic: ``Thread.start()`` waits for the OS thread to start, which
+    took 2-3 s on a busy Render CPU and froze the event loop long enough to miss
+    Discord's 3-second interaction ACK window. This worker is started once and
+    fed through a queue, so scheduling a refresh never blocks.
+    """
+    while True:
+        key = _SETTINGS_REFRESH_QUEUE.get()
+        if key is None:
             return
-        _SETTINGS_REFRESHING.add(key)
-
-    def _run():
         try:
             value = _fetch_setting_value(key)
             with _SETTINGS_CACHE_LOCK:
@@ -95,7 +117,34 @@ def _schedule_setting_refresh(key: str):
             with _SETTINGS_CACHE_LOCK:
                 _SETTINGS_REFRESHING.discard(key)
 
-    threading.Thread(target=_run, name=f"settings-refresh:{key}", daemon=True).start()
+
+def start_settings_refresh_worker() -> None:
+    """Start the background settings-refresh thread exactly once."""
+    global _SETTINGS_REFRESH_WORKER
+    with _SETTINGS_REFRESH_WORKER_LOCK:
+        if _SETTINGS_REFRESH_WORKER is not None and _SETTINGS_REFRESH_WORKER.is_alive():
+            return
+        _SETTINGS_REFRESH_WORKER = threading.Thread(
+            target=_settings_refresh_worker,
+            name="settings-refresh",
+            daemon=True,
+        )
+        _SETTINGS_REFRESH_WORKER.start()
+
+
+def _schedule_setting_refresh(key: str):
+    """Queue one stale setting for refresh; never blocks the caller."""
+    with _SETTINGS_CACHE_LOCK:
+        if key in _SETTINGS_REFRESHING:
+            return
+        _SETTINGS_REFRESHING.add(key)
+    if _SETTINGS_REFRESH_WORKER is None:
+        start_settings_refresh_worker()
+    try:
+        _SETTINGS_REFRESH_QUEUE.put_nowait(key)
+    except queue.Full:
+        with _SETTINGS_CACHE_LOCK:
+            _SETTINGS_REFRESHING.discard(key)
 
 
 # SQLite/Turso has a single writer. Now that gift/comment handlers run in worker
@@ -2812,7 +2861,7 @@ def get_setting(key: str, default: str = None) -> str:
     if _SETTINGS_WARMED:
         _schedule_setting_refresh(key)
         with _SETTINGS_CACHE_LOCK:
-            _SETTINGS_CACHE.setdefault(key, (None, time.time() + 2.0))
+            _SETTINGS_CACHE.setdefault(key, (None, time.time() + _SETTINGS_MISS_TTL))
         return default
 
     value = _fetch_setting_value(key)

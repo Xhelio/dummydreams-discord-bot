@@ -568,6 +568,12 @@ remain in Discord permanently.
    to find the blocking call. Note that raw `print()` output is now queued: before this
    change, Render stdout backpressure from live-observer/gift prints could block the
    loop for several seconds and cause missed interaction ACKs.
+   Two real blockers this watchdog caught and that are now fixed: `db.get_setting`
+   cold misses spawned one `threading.Thread` per key (`Thread.start()` blocked 2–3 s;
+   now a single `settings-refresh` worker is fed through a queue), and
+   `TikTokLiveClient(...)` loaded the certifi CA bundle synchronously on every observer
+   retry (`ssl.create_default_context`; now built inside `asyncio.to_thread`). If
+   `[EventLoop Stack]` shows a new innermost frame, that frame is the next blocker to fix.
 4. When a verification button is clicked, `[Verify] <method>: acknowledged in X.XXs`
    confirms the handler ran and when the ACK was sent. If that line is missing, the
    callback never ran (view not registered or `custom_id` unknown). If X.XX is near 3 s,

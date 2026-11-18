@@ -63,7 +63,8 @@ async def async_fetch_tiktok_bio(username: str) -> str:
 
     # Method 2: fallback to TikTokLive internal client API.
     try:
-        c = TikTokLiveClient(unique_id=u_clean)
+        # httpx builds its TLS context synchronously; keep that off the loop.
+        c = await asyncio.to_thread(TikTokLiveClient, unique_id=u_clean)
         data = await FetchRoomIdAPIRoute.fetch_user_room_data(c.web, u_clean)
         user_info = data.get("data", {}).get("user", {})
         bio = user_info.get("signature") or user_info.get("bioDescription")
@@ -125,7 +126,8 @@ async def async_fetch_tiktok_display_name(username: str) -> str:
         print(f"[Profile Scraper] HTTP error for @{u_clean}: {e}")
 
     try:
-        c = TikTokLiveClient(unique_id=u_clean)
+        # httpx builds its TLS context synchronously; keep that off the loop.
+        c = await asyncio.to_thread(TikTokLiveClient, unique_id=u_clean)
         data = await FetchRoomIdAPIRoute.fetch_user_room_data(c.web, u_clean)
         user_info = data.get("data", {}).get("user", {})
         name = user_info.get("nickname") or user_info.get("uniqueId")
