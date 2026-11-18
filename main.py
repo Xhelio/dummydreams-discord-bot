@@ -1461,7 +1461,12 @@ def build_verification_start(discord_user_id: int, tiktok_user: str, total_coins
                 f"⚪ **No host is live right now**, so please verify using your TikTok bio.\n\n"
                 + embed.description
             )
-            return embed, BioVerificationView(tiktok_user, code, total_coins, low_activity=True)
+            return embed, {
+                "kind": "bio",
+                "tiktok_user": tiktok_user,
+                "code": code,
+                "total_coins": total_coins,
+            }
 
         embed = discord.Embed(
             title="🔐 Verify Your TikTok Account",
@@ -1488,7 +1493,11 @@ def build_verification_start(discord_user_id: int, tiktok_user: str, total_coins
             ),
             inline=False
         )
-        return embed, LowActivityVerificationView(tiktok_user, total_coins)
+        return embed, {
+            "kind": "low_activity",
+            "tiktok_user": tiktok_user,
+            "total_coins": total_coins,
+        }
 
     # Standard flow for accounts with at least 10 coins
     code = create_pending_verification(discord_user_id, tiktok_user, method='choice')
@@ -1516,7 +1525,49 @@ def build_verification_start(discord_user_id: int, tiktok_user: str, total_coins
         ),
         inline=False
     )
-    return embed, VerificationMethodChoiceView(tiktok_user, code, total_coins)
+    return embed, {
+        "kind": "choice",
+        "tiktok_user": tiktok_user,
+        "code": code,
+        "total_coins": total_coins,
+    }
+
+def build_start_view(spec: dict):
+    """Create the first verification view on the event loop.
+
+    discord.py 2.6 creates the view's internal stop future from the running
+    loop and leaves it ``None`` when the view is constructed outside one.
+    ``ViewStore.dispatch_view`` then drops every click on that view silently:
+    Discord receives the ACK (so there is no "didn't respond in time") but the
+    callback never runs and the member keeps seeing a loading state.
+
+    ``build_verification_start`` therefore does the database work in a worker
+    thread and returns a plain ``dict``; construct the view here instead.
+    """
+    spec = spec or {}
+    kind = spec.get("kind")
+    if kind == "bio":
+        view = BioVerificationView(
+            spec.get("tiktok_user"),
+            spec.get("code"),
+            spec.get("total_coins", 0),
+            low_activity=True,
+        )
+    elif kind == "low_activity":
+        view = LowActivityVerificationView(
+            spec.get("tiktok_user"), spec.get("total_coins", 0)
+        )
+    elif kind == "choice":
+        view = VerificationMethodChoiceView(
+            spec.get("tiktok_user"),
+            spec.get("code"),
+            spec.get("total_coins", 0),
+        )
+    else:
+        raise ValueError(f"unknown verification view kind: {kind!r}")
+    _warn_if_view_built_off_loop(view)
+    return view
+
 
 class VerificationChannelView(VerificationView):
     """Persistent view with the TikTok verification button."""
@@ -1729,10 +1780,23 @@ class TikTokUsernameModal(discord.ui.Modal, title="Verify TikTok Account"):
             u_clean
         )
 
-        embed, view = await asyncio.to_thread(
-            build_verification_start,
-            interaction.user.id, u_clean, total_coins, display_name
+        ok, built = await _run_verify_step(
+            asyncio.to_thread(
+                build_verification_start,
+                interaction.user.id, u_clean, total_coins, display_name
+            ),
+            "build verification flow",
         )
+        if not ok:
+            await interaction.followup.send(
+                embed=build_verification_timeout_embed("verification start"),
+                ephemeral=True,
+            )
+            return
+        embed, view_spec = built
+        # Must stay on the event loop: a View created in a worker thread is
+        # silently undispatchable in discord.py 2.6 (see build_start_view).
+        view = build_start_view(view_spec)
         try:
             await interaction.user.send(embed=embed, view=view)
             await interaction.followup.send(
@@ -2633,12 +2697,27 @@ async def handle_live_comment_verification(tiktok_user: str, comment_text: str, 
 
 # --- Discord Events & Commands ---
 
-def _register_persistent_views() -> None:
-    """Register verification views before login.
+def _warn_if_view_built_off_loop(view) -> None:
+    """Catch the discord.py 2.6+ trap where a View built in a worker thread is
+    silently undispatchable (its stop future is ``None``)."""
+    try:
+        if getattr(view, "_BaseView__stopped", "missing") is None:
+            log.warning(
+                "[Verify] %s was created outside the event loop; its buttons "
+                "would be ACKed but never handled.",
+                type(view).__name__,
+            )
+    except Exception:
+        pass
 
-    Registering in ``on_ready`` meant a click during startup/reconnect could be
-    delivered before the view existed, which Discord reports as "didn't respond
-    in time". The ViewStore accepts registrations as soon as the client exists.
+
+def _register_persistent_views() -> None:
+    """Register verification views. Must be called from the event loop thread.
+
+    This runs in ``main()`` before login (so a click during startup still finds
+    the view) and again in ``on_ready``. It must not run at import time: a View
+    constructed without a running loop has no dispatch future on discord.py 2.6+
+    and its buttons are silently ignored.
     """
     for view in (
         VerificationChannelView(),
@@ -2648,6 +2727,7 @@ def _register_persistent_views() -> None:
         LiveGreetingVerificationView(),
         LiveVerificationView(),
     ):
+        _warn_if_view_built_off_loop(view)
         try:
             bot.add_view(view)
         except Exception as exc:
@@ -2657,8 +2737,6 @@ def _register_persistent_views() -> None:
                 exc,
             )
 
-
-_register_persistent_views()
 
 
 @bot.event
@@ -3031,13 +3109,15 @@ async def on_interaction(interaction: discord.Interaction):
             if not tiktok_user:
                 return
             _, total_coins, display_name = await asyncio.to_thread(is_tiktok_user_in_db, tiktok_user)
-            embed, view = await asyncio.to_thread(
+            embed, view_spec = await asyncio.to_thread(
                 build_verification_start,
                 interaction.user.id,
                 tiktok_user,
                 total_coins,
                 display_name,
             )
+            # Views must be built on the loop (see build_start_view).
+            view = build_start_view(view_spec)
             await interaction.user.send(embed=embed, view=view)
             print(f"[Interaction Fallback] Re-sent verification menu to {interaction.user.id} for @{tiktok_user}.")
         except Exception as e:
@@ -4062,6 +4142,11 @@ async def main():
         log_setup.LOG_ERROR_CHANNEL_ID,
         log_setup.notification_queue_size(),
     )
+
+    # Register persistent views on the running loop. Constructing them at
+    # import time (or in a worker thread) leaves discord.py 2.6 unable to
+    # dispatch their buttons: the click is ACKed but the handler never runs.
+    _register_persistent_views()
 
     # Start observers with announcement, role, and live chat verification callbacks
     asyncio.create_task(run_all_observers(

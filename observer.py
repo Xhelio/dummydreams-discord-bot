@@ -514,7 +514,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         except Exception:
             pass
 
-        detected, matched_alias = detect_host_match_from_welcome_message(text)
+        detected, matched_alias = detect_host_match_from_welcome_message(text, block=False)
         if detected:
             if detected != current_host:
                 conclusion = f"host changed: {current_host} -> {detected} (alias match: {matched_alias!r})"
@@ -522,7 +522,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 conclusion = f"host unchanged: {detected} (alias match: {matched_alias!r})"
         else:
             try:
-                alias_keys = sorted(get_host_aliases().keys())
+                alias_keys = sorted({alias for alias, _host in get_host_aliases(block=False)})
             except Exception:
                 alias_keys = []
             sample = ", ".join(alias_keys[:12]) + ("..." if len(alias_keys) > 12 else "")

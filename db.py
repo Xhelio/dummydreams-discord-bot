@@ -1955,31 +1955,77 @@ def repair_host_aliases(conn=None):
         if own:
             conn.close()
 
-_HOST_ALIAS_CACHE = {"loaded_at": 0, "items": None}
+_HOST_ALIAS_CACHE = {"loaded_at": 0.0, "items": None}
+_HOST_ALIAS_TTL = 30.0
+_HOST_ALIAS_REFRESH_LOCK = threading.Lock()
+_HOST_ALIAS_REFRESHING = False
 
 
 def invalidate_host_alias_cache():
-    _HOST_ALIAS_CACHE["loaded_at"] = 0
+    _HOST_ALIAS_CACHE["loaded_at"] = 0.0
     _HOST_ALIAS_CACHE["items"] = None
 
 
-def get_host_aliases() -> list:
-    """Return all aliases as (alias, host_name), cached briefly for live chat speed."""
-    now = time.time()
-    if _HOST_ALIAS_CACHE["items"] is None or now - _HOST_ALIAS_CACHE["loaded_at"] > 30:
+def _load_host_aliases_from_db() -> list:
+    conn = None
+    try:
         conn = get_db_connection()
+        rows = conn.execute(
+            "SELECT alias, host_name FROM host_aliases ORDER BY LENGTH(alias) DESC"
+        ).fetchall()
+        return [(r[0], r[1]) for r in rows if r[0] and r[1]]
+    except Exception:
+        return list(HOST_ALIASES.items())
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _refresh_host_aliases_async() -> None:
+    """Refresh the alias cache in a worker thread (single flight)."""
+    global _HOST_ALIAS_REFRESHING
+    with _HOST_ALIAS_REFRESH_LOCK:
+        if _HOST_ALIAS_REFRESHING:
+            return
+        _HOST_ALIAS_REFRESHING = True
+
+    def _run():
+        global _HOST_ALIAS_REFRESHING
         try:
-            rows = conn.execute(
-                "SELECT alias, host_name FROM host_aliases ORDER BY LENGTH(alias) DESC"
-            ).fetchall()
-            items = [(r[0], r[1]) for r in rows if r[0] and r[1]]
-        except Exception:
-            items = list(HOST_ALIASES.items())
+            items = _load_host_aliases_from_db()
+            _HOST_ALIAS_CACHE["items"] = items
+            _HOST_ALIAS_CACHE["loaded_at"] = time.time()
         finally:
-            conn.close()
-        _HOST_ALIAS_CACHE["items"] = items
-        _HOST_ALIAS_CACHE["loaded_at"] = now
-    return list(_HOST_ALIAS_CACHE["items"])
+            with _HOST_ALIAS_REFRESH_LOCK:
+                _HOST_ALIAS_REFRESHING = False
+
+    threading.Thread(target=_run, name="host-alias-refresh", daemon=True).start()
+
+
+def get_host_aliases(*, block: bool = True) -> list:
+    """Return all aliases as (alias, host_name), cached for live chat speed.
+
+    Live Intros arrive on the Discord event loop. A stale cache used to open a
+    Turso connection right there and froze the loop for 2.4 s (enough to miss
+    interaction ACKs). On the loop pass ``block=False``: cached aliases are
+    returned immediately and a worker thread refreshes them.
+    """
+    now = time.time()
+    items = _HOST_ALIAS_CACHE["items"]
+    if items is not None and now - _HOST_ALIAS_CACHE["loaded_at"] <= _HOST_ALIAS_TTL:
+        return list(items)
+
+    if not block:
+        _refresh_host_aliases_async()
+        return list(items if items is not None else HOST_ALIASES.items())
+
+    items = _load_host_aliases_from_db()
+    _HOST_ALIAS_CACHE["items"] = items
+    _HOST_ALIAS_CACHE["loaded_at"] = time.time()
+    return list(items)
 
 
 def add_host_alias(alias: str, host_name: str):
@@ -1995,6 +2041,7 @@ def add_host_alias(alias: str, host_name: str):
         """, (alias_clean, host_clean))
         conn.commit()
         invalidate_host_alias_cache()
+        _refresh_host_aliases_async()
         return True
     finally:
         conn.close()
@@ -2007,11 +2054,12 @@ def delete_host_alias(alias: str):
         conn.execute("DELETE FROM host_aliases WHERE alias = ?", (alias_clean,))
         conn.commit()
         invalidate_host_alias_cache()
+        _refresh_host_aliases_async()
     finally:
         conn.close()
 
 
-def detect_host_match_from_welcome_message(text: str):
+def detect_host_match_from_welcome_message(text: str, *, block: bool = True):
     """
     Deteksi host dari teks Live Intro/welcome.
 
@@ -2021,7 +2069,7 @@ def detect_host_match_from_welcome_message(text: str):
     """
     if not text:
         return None, None
-    for kw, host_name in get_host_aliases():
+    for kw, host_name in get_host_aliases(block=block):
         # Match alias as a token, allowing common possessive suffixes ('s, ’s, `s, s)
         # so "luna's" / "angel's" is detected as "luna" / "angel".
         pattern = rf"(?<![A-Za-z0-9]){re.escape(kw)}(?:['\u2019`s]+s|s)?(?![A-Za-z0-9])"

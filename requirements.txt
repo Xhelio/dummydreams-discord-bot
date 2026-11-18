@@ -1,4 +1,6 @@
-discord.py
+# Pinned: discord.py 2.6+ silently drops clicks on Views built outside the
+# running loop (see build_start_view in main.py).
+discord.py==2.7.1
 TikTokLive
 libsql-experimental
 python-dotenv

@@ -580,7 +580,13 @@ remain in Discord permanently.
    socket.
 4. When a verification button is clicked, `[Verify] <method>: acknowledged in X.XXs`
    confirms the handler ran and when the ACK was sent. If that line is missing, the
-   callback never ran (view not registered or `custom_id` unknown). If X.XX is near 3 s,
+   callback never ran. One cause bit us on discord.py 2.7: a `View` built **outside the
+   running event loop** (for example inside `asyncio.to_thread`) has no dispatch future,
+   so `ViewStore` silently drops every click — Discord sees the ACK, no handler runs, no
+   error is logged, and the member keeps seeing a loading state. `build_verification_start`
+   now returns a plain dict and `build_start_view` constructs the view on the loop;
+   persistent views are registered in `main()`/`on_ready`, never at import. `[Verify]
+   <View> was created outside the event loop` means a new code path reintroduced this. If X.XX is near 3 s,
    the ACK was too late and Discord shows "didn't respond in time" even though the
    handler continues. `[Interaction Rescue] <custom_id> was not acknowledged in time;
    sent a defer at Xs` means the safety net answered for a slow handler. Known
