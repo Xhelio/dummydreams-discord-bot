@@ -574,6 +574,10 @@ remain in Discord permanently.
    `TikTokLiveClient(...)` loaded the certifi CA bundle synchronously on every observer
    retry (`ssl.create_default_context`; now built inside `asyncio.to_thread`). If
    `[EventLoop Stack]` shows a new innermost frame, that frame is the next blocker to fix.
+   Activity-log rows are written in ~0.75 s batches, and a write that cannot take the
+   global write lock within 30 s fails with `Database write lock busy` instead of
+   stalling every other write (including verification clicks) behind a stuck Turso
+   socket.
 4. When a verification button is clicked, `[Verify] <method>: acknowledged in X.XXs`
    confirms the handler ran and when the ACK was sent. If that line is missing, the
    callback never ran (view not registered or `custom_id` unknown). If X.XX is near 3 s,
@@ -585,5 +589,10 @@ remain in Discord permanently.
 6. If the member sees **⏱️ Verification Timed Out**, the click ran longer than
    `verification_click_timeout_seconds` (default 45 s). Raise it in the admin panel if
    TikTok is routinely slow, and check `/log search:"[Verify]"` for the timed-out step.
+   After the ACK the panel switches to **⏳ Working…** so a slow click is visibly alive,
+   and every button has a hard deadline (`[Verify] <custom_id> exceeded the Ns click
+   budget`) that replaces the loading state with the timeout notice. A spinner that
+   never resolves therefore means the deployed commit predates these guards, or the
+   button is the first panel button whose handler never ran (check `[Gateway]`).
 7. Check the error channel for the matching ERROR/traceback. Send the `/log` file back
    for analysis rather than only a screenshot.

@@ -182,10 +182,19 @@ def write_transaction(operation, attempts: int = 4, base_delay: float = 0.35):
     The callback may issue several statements on ``conn``; the transaction is
     committed when it returns. Transient Turso/SQLite failures are retried with
     exponential backoff on a fresh connection.
+
+    Lock acquisition is bounded: a Turso socket can stall for minutes, and a
+    writer that never releases the lock used to block every other write (and
+    therefore verification clicks) indefinitely. Failing after 30s surfaces a
+    clear error instead of an endless loading spinner.
     """
     last_error = None
     for attempt in range(1, attempts + 1):
-        with _DB_WRITE_LOCK:
+        if not _DB_WRITE_LOCK.acquire(timeout=30.0):
+            raise TimeoutError(
+                "Database write lock busy for 30s; another write is stalled"
+            )
+        try:
             conn = get_db_connection()
             try:
                 result = operation(conn)
@@ -199,6 +208,8 @@ def write_transaction(operation, attempts: int = 4, base_delay: float = 0.35):
                     pass
             finally:
                 conn.close()
+        finally:
+            _DB_WRITE_LOCK.release()
 
         if attempt >= attempts or not is_transient_db_error(last_error):
             raise last_error
@@ -1743,25 +1754,54 @@ def _ensure_activity_log_writer():
 
 
 def _activity_log_writer_loop():
+    """Persist activity log rows in small batches.
+
+    One Turso write per event (gift bursts during a live) kept the global write
+    lock and the network busy, so unrelated writes -- including verification
+    clicks -- waited seconds behind the queue. Batching up to ~0.75s of events
+    into one transaction cuts connection/commit traffic by an order of magnitude.
+    """
     while True:
         item = _ACTIVITY_LOG_QUEUE.get()
         if item is None:
             _ACTIVITY_LOG_QUEUE.task_done()
             return
-        event_type, message, user_clean, now_str = item
-        try:
-            write_transaction(
-                lambda conn: conn.execute("""
+        batch = [item]
+        shutdown = False
+        deadline = time.monotonic() + 0.75
+        while len(batch) < 100:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                nxt = _ACTIVITY_LOG_QUEUE.get(timeout=remaining)
+            except queue.Empty:
+                break
+            if nxt is None:
+                _ACTIVITY_LOG_QUEUE.task_done()
+                shutdown = True
+                break
+            batch.append(nxt)
+
+        def _write_batch(conn, rows=batch):
+            for event_type, message, user_clean, now_str in rows:
+                conn.execute("""
                     INSERT INTO activity_logs (event_type, tiktok_username, message, created_at)
                     VALUES (?, ?, ?, ?)
                 """, (event_type, user_clean, message, now_str))
-            )
+
+        try:
+            write_transaction(_write_batch)
         except Exception as e:
             _ACTIVITY_LOGGER.error(
-                "[ActivityLog] Failed to persist event (%s @%s): %s", event_type, user_clean, e
+                "[ActivityLog] Failed to persist %d event(s): %s", len(batch), e
             )
         finally:
-            _ACTIVITY_LOG_QUEUE.task_done()
+            for _ in batch:
+                _ACTIVITY_LOG_QUEUE.task_done()
+
+        if shutdown:
+            return
 
 def get_user_channel_spent(viewer_user: str, target_user: str) -> int:
     """Menghitung total koin yang sudah di-spent oleh viewer di target channel ini."""
