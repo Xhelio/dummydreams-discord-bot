@@ -1964,7 +1964,7 @@ def view_analytics():
         <script>
         var CHART_DATA = {{ chart_payload|tojson }};
         var GROUP_BY = {{ group_by|tojson }};
-        var HOST_FREQ = {{ host_freq_series|tojson }};
+        var HOST_ENGAGEMENT = {{ (host_engagement_series|default({"labels": [], "keys": [], "hosts": []}, true))|tojson }};
 
         function fmtNum(n) { return (Math.round(n || 0)).toLocaleString('id-ID'); }
         function niceCeil(v) {
@@ -2079,21 +2079,90 @@ def view_analytics():
             wrap.innerHTML = parts.join('');
         }
 
+        var hostEngSelected = null;
+        var hostEngColors = ['#38bdf8','#f472b6','#34d399','#f59e0b','#a78bfa','#fb7185','#22d3ee','#facc15','#60a5fa','#4ade80','#f97316','#e879f9'];
+
+        function hostEngMetricLabel(metric) {
+            if (metric === 'coins') return 'Koin';
+            if (metric === 'viewers') return 'Viewer unik';
+            return 'Transaksi gift';
+        }
+        function hostEngTotal(host, metric) {
+            if (metric === 'coins') return host.total_coins || 0;
+            if (metric === 'viewers') return host.total_viewers || 0;
+            return host.total_transactions || 0;
+        }
+        function hostEngValues(host, metric) {
+            if (metric === 'coins') return host.coins || [];
+            if (metric === 'viewers') return host.viewers || [];
+            return host.transactions || [];
+        }
+
+        function renderHostSelector() {
+            var wrap = document.getElementById('host-select-controls');
+            if (!wrap) return;
+            var hosts = (HOST_ENGAGEMENT && HOST_ENGAGEMENT.hosts) || [];
+            if (!hosts.length) { wrap.innerHTML = '<span class="muted">Tidak ada data host.</span>'; return; }
+            if (!hostEngSelected) {
+                hostEngSelected = {};
+                for (var i = 0; i < hosts.length; i++) hostEngSelected[hosts[i].key] = true;
+            }
+            var metricSel = document.getElementById('host-eng-metric');
+            var metric = metricSel ? metricSel.value : 'transactions';
+            var html = '';
+            for (var j = 0; j < hosts.length; j++) {
+                var h = hosts[j];
+                var checked = hostEngSelected[h.key] ? ' checked' : '';
+                var color = hostEngColors[j % hostEngColors.length];
+                html += '<label style="display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border:1px solid #334155;border-radius:999px;background:#0b1220;cursor:pointer;font-size:0.76rem;flex-direction:row;">'
+                    + '<input type="checkbox" class="host-eng-pick" data-key="' + escHtml(h.key) + '"' + checked + ' style="width:auto;margin:0;">'
+                    + '<span style="width:10px;height:10px;border-radius:50%;background:' + color + ';display:inline-block;"></span>'
+                    + '<span style="color:#e2e8f0;">' + escHtml(h.name) + '</span>'
+                    + '<span class="muted">(' + fmtNum(hostEngTotal(h, metric)) + ')</span>'
+                    + '</label>';
+            }
+            wrap.innerHTML = html;
+            var picks = wrap.querySelectorAll('.host-eng-pick');
+            for (var k = 0; k < picks.length; k++) {
+                picks[k].addEventListener('change', function () {
+                    hostEngSelected[this.getAttribute('data-key')] = !!this.checked;
+                    drawHostFreq();
+                });
+            }
+        }
+
         function renderHostFrequencyChart(showTrend) {
             var wrap = document.getElementById('freq-chart-host-multi');
             var legend = document.getElementById('host-freq-legend');
             if (!wrap) return;
-            var labels = (HOST_FREQ && HOST_FREQ.labels) || [];
-            var hosts = (HOST_FREQ && HOST_FREQ.hosts) || [];
-            if (!labels.length || !hosts.length) {
+            var labels = (HOST_ENGAGEMENT && HOST_ENGAGEMENT.labels) || [];
+            var allHosts = (HOST_ENGAGEMENT && HOST_ENGAGEMENT.hosts) || [];
+            if (!labels.length || !allHosts.length) {
                 wrap.innerHTML = '<div class="muted" style="padding:32px;text-align:center;">No data host untuk filter ini.</div>';
                 if (legend) legend.innerHTML = '';
                 return;
             }
-            var colors = ['#38bdf8','#f472b6','#34d399','#f59e0b','#a78bfa','#fb7185','#22d3ee','#facc15'];
+            if (!hostEngSelected) {
+                hostEngSelected = {};
+                for (var si = 0; si < allHosts.length; si++) hostEngSelected[allHosts[si].key] = true;
+            }
+            var metricSel = document.getElementById('host-eng-metric');
+            var metric = metricSel ? metricSel.value : 'transactions';
+            var metricLabel = hostEngMetricLabel(metric);
+
+            var hosts = [];
+            for (var hi0 = 0; hi0 < allHosts.length; hi0++) {
+                if (hostEngSelected[allHosts[hi0].key]) hosts.push({ host: allHosts[hi0], idx: hi0 });
+            }
+            if (!hosts.length) {
+                wrap.innerHTML = '<div class="muted" style="padding:32px;text-align:center;">Pilih minimal satu host untuk ditampilkan.</div>';
+                if (legend) legend.innerHTML = '';
+                return;
+            }
+
             var n = labels.length;
             var width = Math.max(320, wrap.clientWidth || 800);
-            var height = 260;
+            var height = 280;
             var pad = { l: 58, r: 18, t: 22, b: 62 };
             var pw = width - pad.l - pad.r;
             var ph = height - pad.t - pad.b;
@@ -2102,7 +2171,7 @@ def view_analytics():
             var totals = [];
             for (var i = 0; i < n; i++) {
                 var sum = 0;
-                for (var h = 0; h < hosts.length; h++) sum += ((hosts[h].values || [])[i] || 0);
+                for (var h = 0; h < hosts.length; h++) sum += (hostEngValues(hosts[h].host, metric)[i] || 0);
                 totals.push(sum);
             }
             var ma = showTrend ? movingAvg(totals, trendWindow()) : [];
@@ -2112,7 +2181,7 @@ def view_analytics():
 
             var maxV = 0;
             for (var hi = 0; hi < hosts.length; hi++) {
-                var vals = hosts[hi].values || [];
+                var vals = hostEngValues(hosts[hi].host, metric);
                 for (var vi = 0; vi < vals.length; vi++) { if ((vals[vi] || 0) > maxV) maxV = vals[vi] || 0; }
             }
             if (showTrend) {
@@ -2133,21 +2202,22 @@ def view_analytics():
             }
 
             for (var s = 0; s < hosts.length; s++) {
-                var series = hosts[s];
-                var color = colors[s % colors.length];
-                var valsS = series.values || [];
+                var item = hosts[s];
+                var series = item.host;
+                var color = hostEngColors[item.idx % hostEngColors.length];
+                var valsS = hostEngValues(series, metric);
                 var pts = [];
                 for (var j = 0; j < n; j++) pts.push([xOf(j), yOf(valsS[j] || 0)]);
                 parts.push('<polyline fill="none" stroke="' + color + '" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" points="' + pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' ') + '"/>');
                 for (var k = 0; k < n; k++) {
-                    parts.push('<circle cx="' + pts[k][0] + '" cy="' + pts[k][1] + '" r="3" fill="#0b1220" stroke="' + color + '" stroke-width="2"><title>' + escHtml(series.name) + ' · ' + escHtml(labels[k]) + ': ' + fmtNum(valsS[k] || 0) + ' interaksi</title></circle>');
+                    parts.push('<circle cx="' + pts[k][0] + '" cy="' + pts[k][1] + '" r="3" fill="#0b1220" stroke="' + color + '" stroke-width="2"><title>' + escHtml(series.name) + ' · ' + escHtml(labels[k]) + ': ' + fmtNum(valsS[k] || 0) + ' ' + escHtml(metricLabel.toLowerCase()) + '</title></circle>');
                 }
             }
 
             if (showTrend) {
                 var yAvg = yOf(avg);
                 parts.push('<line x1="' + pad.l + '" y1="' + yAvg + '" x2="' + (pad.l + pw) + '" y2="' + yAvg + '" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="6 4"/>');
-                parts.push('<text x="' + (pad.l + pw - 4) + '" y="' + (yAvg - 5) + '" text-anchor="end" fill="#fbbf24" font-size="10">Rata-rata total: ' + fmtNum(avg) + '</text>');
+                parts.push('<text x="' + (pad.l + pw - 4) + '" y="' + (yAvg - 5) + '" text-anchor="end" fill="#fbbf24" font-size="10">Rata-rata: ' + fmtNum(avg) + '</text>');
                 if (ma.length > 1) {
                     var mpts = ma.map(function (v, i) { return xOf(i) + ',' + yOf(v); }).join(' ');
                     parts.push('<polyline fill="none" stroke="#22c55e" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="' + mpts + '"/>');
@@ -2163,15 +2233,16 @@ def view_analytics():
             wrap.innerHTML = parts.join('');
 
             if (legend) {
-                var items = hosts.map(function (series, idx) {
-                    var color = colors[idx % colors.length];
+                var items = hosts.map(function (item) {
+                    var series = item.host;
+                    var color = hostEngColors[item.idx % hostEngColors.length];
                     return '<span style="display:inline-flex;align-items:center;gap:6px;margin:2px 10px 2px 0;">'
                         + '<span style="width:12px;height:3px;border-radius:2px;background:' + color + ';display:inline-block;"></span>'
                         + '<strong style="color:#e2e8f0;">' + escHtml(series.name) + '</strong>'
-                        + '<span>(' + fmtNum(series.total || 0) + ' interaksi)</span></span>';
+                        + '<span>(' + fmtNum(hostEngTotal(series, metric)) + ' ' + escHtml(metricLabel.toLowerCase()) + ')</span></span>';
                 }).join('');
-                if (showTrend) items += '<span style="display:inline-flex;align-items:center;gap:6px;margin:2px 10px 2px 0;"><span style="width:12px;height:0;border-top:2px dashed #f59e0b;display:inline-block;"></span><span>Rata-rata total</span></span>'
-                    + '<span style="display:inline-flex;align-items:center;gap:6px;margin:2px 10px 2px 0;"><span style="width:12px;height:3px;background:#22c55e;display:inline-block;"></span><span>Tren total (MA ' + trendWindow() + ')</span></span>';
+                if (showTrend) items += '<span style="display:inline-flex;align-items:center;gap:6px;margin:2px 10px 2px 0;"><span style="width:12px;height:0;border-top:2px dashed #f59e0b;display:inline-block;"></span><span>Rata-rata</span></span>'
+                    + '<span style="display:inline-flex;align-items:center;gap:6px;margin:2px 10px 2px 0;"><span style="width:12px;height:3px;background:#22c55e;display:inline-block;"></span><span>Tren (MA ' + trendWindow() + ')</span></span>';
                 legend.innerHTML = items;
             }
         }
@@ -2222,6 +2293,9 @@ def view_analytics():
 
             var hostTrendCb = document.getElementById('host-freq-trend');
             if (hostTrendCb) hostTrendCb.addEventListener('change', function () { drawHostFreq(); });
+            var hostMetricSel = document.getElementById('host-eng-metric');
+            if (hostMetricSel) hostMetricSel.addEventListener('change', function () { renderHostSelector(); drawHostFreq(); });
+            renderHostSelector();
 
             function drawAll() { drawMain(); drawFreq(); }
             window.addEventListener('resize', function () { drawAll(); });
@@ -2252,7 +2326,7 @@ def view_analytics():
         freq_account_rows=freq_account_rows,
         freq_host_rows=freq_host_rows,
         freq_viewer_rows=freq_viewer_rows,
-        host_engagement_series=host_engagement_series,
+        host_engagement_series=host_engagement_series or {'labels': [], 'keys': [], 'hosts': []},
         chart_payload=chart_payload,
         start_str=start_str,
         end_str=end_str,
