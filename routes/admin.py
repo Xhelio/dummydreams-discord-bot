@@ -1825,7 +1825,7 @@ def view_analytics():
                         </label>
                     </div>
                 </div>
-                <div class="muted" style="font-size:0.78rem; margin-bottom:6px;">Sumbu X: waktu ({{ group_by }}) · Sumbu Y: engagement host (dari gift) · Tiap seri = nama host. Pilih host yang dianalisis:</div>
+                <div class="muted" style="font-size:0.78rem; margin-bottom:6px;">Sumbu X: waktu ({{ group_by }}) · Sumbu Y: engagement host (mengikuti metrik terpilih) · Tiap seri = nama host. Pilih host yang dianalisis:</div>
                 <div id="host-select-controls" style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px;"></div>
                 <div class="chart-wrap"><div id="freq-chart-host-multi"></div></div>
                 <div id="host-freq-legend" class="muted" style="font-size:0.78rem; margin-top:6px;"></div>
@@ -1993,13 +1993,27 @@ def view_analytics():
             return 7;
         }
 
+        function yAxisLabel(metric) {
+            var labels = {
+                coins: 'Koin (c)',
+                gifts: 'Jumlah gift (item)',
+                gift_events: 'Transaksi gift',
+                viewers: 'Viewer unik',
+                sessions: 'Sesi live',
+                active_accounts: 'Akun aktif',
+                active_hosts: 'Host aktif',
+                transactions: 'Transaksi gift'
+            };
+            return labels[metric] || metric || '-';
+        }
+
         function renderChart(containerId, metric, chartType, showTrend) {
             var wrap = document.getElementById(containerId);
             if (!wrap) return;
             var labels = CHART_DATA.labels || [];
             var values = (CHART_DATA[metric] || []).slice();
             if (!labels.length) {
-                wrap.innerHTML = '<div class="muted" style="padding:32px;text-align:center;">No data untuk filter ini.</div>';
+                wrap.innerHTML = '<div class="muted" style="padding:32px;text-align:center;">No data untuk filter ini. Sumbu Y: ' + escHtml(yAxisLabel(metric)) + '.</div>';
                 return;
             }
             var n = values.length;
@@ -2031,6 +2045,7 @@ def view_analytics():
             var parts = [];
             parts.push('<svg viewBox="0 0 ' + width + ' ' + height + '" width="100%" height="' + height + '" role="img">');
             parts.push('<defs><linearGradient id="' + gradId + '" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#38bdf8" stop-opacity="0.40"/><stop offset="100%" stop-color="#38bdf8" stop-opacity="0.02"/></linearGradient></defs>');
+            parts.push('<text x="4" y="13" fill="#94a3b8" font-size="10" font-weight="600">Sumbu Y: ' + escHtml(yAxisLabel(metric)) + '</text>');
             for (var t = 0; t <= 4; t++) {
                 var yy = pad.t + ph - (ph * t / 4);
                 var val = top * t / 4;
@@ -2205,6 +2220,7 @@ def view_analytics():
 
             var parts = [];
             parts.push('<svg viewBox="0 0 ' + width + ' ' + height + '" width="100%" height="' + height + '" role="img">');
+            parts.push('<text x="4" y="13" fill="#94a3b8" font-size="10" font-weight="600">Sumbu Y: ' + escHtml(hostEngMetricLabel(metric)) + (metric === 'coins' ? ' (c)' : '') + '</text>');
             for (var t = 0; t <= 4; t++) {
                 var yy = pad.t + ph - (ph * t / 4);
                 var val = top * t / 4;
