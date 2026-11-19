@@ -167,6 +167,12 @@ textarea { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px soli
 @media (min-width: 520px) and (max-width: 760px) {
   .stat-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
+
+/* Info icon: hover/focus shows a short explanation. */
+.info-i { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; border: 1px solid #475569; color: #94a3b8; font-size: 10px; font-weight: 800; cursor: help; position: relative; vertical-align: middle; margin-left: 4px; flex: 0 0 auto; }
+.info-i:hover, .info-i:focus { border-color: #38bdf8; color: #7dd3fc; }
+.info-i::after { content: attr(data-tip); position: absolute; left: 50%; bottom: calc(100% + 7px); transform: translateX(-50%) scale(0.98); background: #0f172a; border: 1px solid #334155; color: #cbd5e1; padding: 6px 9px; border-radius: 7px; font-size: 0.72rem; font-weight: 500; line-height: 1.35; width: max-content; max-width: 240px; white-space: normal; text-align: left; z-index: 60; opacity: 0; pointer-events: none; transition: opacity 0.12s ease; box-shadow: 0 8px 20px rgba(2,6,23,0.5); }
+.info-i:hover::after, .info-i:focus::after { opacity: 1; }
 """
 
 NAV_HTML = """

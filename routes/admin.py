@@ -35,6 +35,7 @@ from db import (
     get_analytics_host_engagement_timeseries,
     get_analytics_gift_by_host,
     get_analytics_gift_by_account,
+    get_analytics_top_gift_items,
     get_analytics_viewer_ranking,
     get_analytics_viewer_host_spend,
     get_analytics_host_options,
@@ -1300,14 +1301,14 @@ def _fmt_duration(seconds) -> str:
 ANALYTICS_PRESETS = [
     ("today", "Today"),
     ("yesterday", "Yesterday"),
-    ("7d", "7 hari last"),
-    ("30d", "30 hari last"),
-    ("90d", "90 hari last"),
+    ("7d", "Last 7 days"),
+    ("30d", "Last 30 days"),
+    ("90d", "Last 90 days"),
     ("this_week", "This week"),
     ("this_month", "This month"),
-    ("last_month", "Bulan lalu"),
+    ("last_month", "Last month"),
     ("all", "All time"),
-    ("custom", "Kustom"),
+    ("custom", "Custom"),
 ]
 
 
@@ -1390,13 +1391,13 @@ def view_analytics():
 
     chart_group = 'hour' if (days == 1 and group_by == 'day') else group_by
     if chart_group == 'hour':
-        group_label = 'per jam (dalam sehari)'
+        group_label = 'hourly (within day)'
     elif chart_group == 'day':
-        group_label = 'per hari'
+        group_label = 'daily'
     elif chart_group == 'week':
-        group_label = 'per minggu'
+        group_label = 'weekly'
     else:
-        group_label = 'per bulan'
+        group_label = 'monthly'
 
 
     chart_type = (request.args.get('chart') or 'bar').strip()
@@ -1422,6 +1423,43 @@ def view_analytics():
     spend_rows_raw = get_analytics_viewer_host_spend(start_str, end_str, viewer_arg, host_arg, account_arg, 200)
     host_options = get_analytics_host_options()
     account_options = get_analytics_account_options()
+    top_gift_items_raw = get_analytics_top_gift_items(start_str, end_str, host_arg, account_arg, viewer_arg, 12)
+
+    if host_filter:
+        analysis_subject = host_filter
+        analysis_subject_type = 'Host'
+    elif viewer_filter:
+        analysis_subject = '@' + viewer_filter
+        analysis_subject_type = 'Viewer'
+    elif account_filter:
+        analysis_subject = '@' + account_filter
+        analysis_subject_type = 'Account'
+    else:
+        analysis_subject = ''
+        analysis_subject_type = ''
+
+
+    def _coin_value(unit_coins, total_coins, item_count):
+        try:
+            u = int(unit_coins or 0)
+        except Exception:
+            u = 0
+        if u > 0 or not item_count:
+            return u
+        try:
+            return int(round(int(total_coins or 0) / int(item_count)))
+        except Exception:
+            return 0
+
+    top_gift_items = []
+    for name, unit_coins, item_count, total_coins, transactions in top_gift_items_raw:
+        top_gift_items.append({
+            'name': name or 'Unknown',
+            'unit_coins': _coin_value(unit_coins, total_coins, item_count),
+            'count': int(item_count or 0),
+            'coins': int(total_coins or 0),
+            'events': int(transactions or 0),
+        })
 
     total_coins = summary.get('coins', 0) or 0
 
@@ -1584,7 +1622,10 @@ def view_analytics():
         <div class="header">
             <div>
                 <h1>📈 Analytics</h1>
-                <p class="page-subtitle">{{ start_str }} s/d {{ end_str }} (WIB) · {{ days }} hari · grup: {{ group_label }}</p>
+                <p class="page-subtitle">{{ start_str }} to {{ end_str }} (WIB) · {{ days }} day(s) · group: {{ group_label }}</p>
+                {% if analysis_subject %}
+                <p class="page-subtitle" style="margin-top:4px;"><strong style="color:#7dd3fc;">{{ analysis_subject_type }}:</strong> {{ analysis_subject }} <span class="info-i" data-tip="These charts and tables only include the selected {{ analysis_subject_type|lower }}.">!</span></p>
+                {% endif %}
             </div>
             <a class="nav-btn" href="/admin/analytics?preset=7d">🔄 Reset Filter</a>
         </div>
@@ -1592,35 +1633,35 @@ def view_analytics():
 
         <div class="card">
             <div class="card-header">
-                <h2>🔎 Filter &amp; Rentang</h2>
-                <span class="muted" style="font-size:0.8rem;">All metrik di bawah mengikuti filter ini</span>
+                <h2>🔎 Filters</h2>
+                <span class="info-i" data-tip="All metrics below follow these filters.">!</span>
             </div>
             <div class="analytics-chips">
                 <button type="button" class="nav-btn" onclick="applyPreset('today')">Today</button>
-                <button type="button" class="nav-btn" onclick="applyPreset('7d')">7 hari</button>
-                <button type="button" class="nav-btn" onclick="applyPreset('30d')">30 hari</button>
+                <button type="button" class="nav-btn" onclick="applyPreset('7d')">7 days</button>
+                <button type="button" class="nav-btn" onclick="applyPreset('30d')">30 days</button>
                 <button type="button" class="nav-btn" onclick="applyPreset('this_month')">This month</button>
-                <button type="button" class="nav-btn" onclick="applyPreset('last_month')">Bulan lalu</button>
+                <button type="button" class="nav-btn" onclick="applyPreset('last_month')">Last month</button>
                 <button type="button" class="nav-btn" onclick="applyPreset('all')">All</button>
             </div>
             <form method="GET" action="/admin/analytics" class="analytics-form" id="analytics-form">
                 <div class="form-grid">
-                    <label>Rentang
+                    <label>Range
                         <select name="preset" id="preset-select">
                             {% for value, label in presets %}
                             <option value="{{ value }}" {% if preset == value %}selected{% endif %}>{{ label }}</option>
                             {% endfor %}
                         </select>
                     </label>
-                    <label>Dari tanggal
+                    <label>From date
                         <input type="date" name="start" value="{{ start_str }}">
                     </label>
-                    <label>Sampai tanggal
+                    <label>To date
                         <input type="date" name="end" value="{{ end_str }}">
                     </label>
                     <label>Host
                         <select name="host">
-                            <option value="">All host</option>
+                            <option value="">All hosts</option>
                             {% for h in host_options %}
                             <option value="{{ h }}" {% if host_filter|lower == h|lower %}selected{% endif %}>{{ h }}</option>
                             {% endfor %}
@@ -1628,76 +1669,76 @@ def view_analytics():
                     </label>
                     <label>TikTok Account
                         <select name="account">
-                            <option value="">All akun</option>
+                            <option value="">All accounts</option>
                             {% for a in account_options %}
                             <option value="{{ a }}" {% if account_filter|lower == a|lower %}selected{% endif %}>@{{ a }}</option>
                             {% endfor %}
                         </select>
                     </label>
-                    <label>Viewer (opsional)
-                        <input type="text" name="viewer" value="{{ viewer_filter }}" placeholder="username TikTok">
+                    <label>Viewer (optional)
+                        <input type="text" name="viewer" value="{{ viewer_filter }}" placeholder="TikTok username">
                     </label>
-                    <label>Group grafik
+                    <label>Chart group
                         <select name="group">
-                            <option value="day" {% if group_by == 'day' %}selected{% endif %}>Per hari</option>
-                            <option value="week" {% if group_by == 'week' %}selected{% endif %}>Per minggu</option>
-                            <option value="month" {% if group_by == 'month' %}selected{% endif %}>Per bulan</option>
+                            <option value="day" {% if group_by == 'day' %}selected{% endif %}>Daily</option>
+                            <option value="week" {% if group_by == 'week' %}selected{% endif %}>Weekly</option>
+                            <option value="month" {% if group_by == 'month' %}selected{% endif %}>Monthly</option>
                         </select>
                     </label>
                     <label>&nbsp;
                         <button type="submit" class="btn-save" style="background:#0e7490;">Apply Filter</button>
                     </label>
                 </div>
-                <p class="muted" style="font-size:0.76rem; margin-top:8px;">Preset "Kustom" memakai tanggal Dari/Sampai. Filter viewer dipakai untuk analisa spent viewer &amp; grafik pribadinya.</p>
+                <p class="muted" style="font-size:0.76rem; margin-top:8px;">"Custom" uses the From/To dates <span class="info-i" data-tip="Viewer filter applies to viewer spending analysis and its charts.">!</span></p>
             </form>
         </div>
 
         <div class="stat-grid">
             <div class="stat-box">
-                <div class="muted" style="font-size:0.82rem;">TOTAL KOIN</div>
+                <div class="muted" style="font-size:0.82rem;">TOTAL COINS</div>
                 <div class="stat-number" style="color:#eab308;">{{ summary.coins }} c</div>
             </div>
             <div class="stat-box">
-                <div class="muted" style="font-size:0.82rem;">GIFT MASUK</div>
+                <div class="muted" style="font-size:0.82rem;">GIFTS</div>
                 <div class="stat-number">{{ summary.gifts }}</div>
-                <div class="muted" style="font-size:0.75rem;">{{ summary.gift_rows }} transaksi log</div>
+                <div class="muted" style="font-size:0.75rem;">{{ summary.gift_rows }} transactions</div>
             </div>
             <div class="stat-box">
-                <div class="muted" style="font-size:0.82rem;">VIEWER UNIK</div>
+                <div class="muted" style="font-size:0.82rem;">UNIQUE VIEWERS</div>
                 <div class="stat-number" style="color:#22c55e;">{{ summary.viewers }}</div>
             </div>
             <div class="stat-box">
-                <div class="muted" style="font-size:0.82rem;">HOST AKTIF</div>
+                <div class="muted" style="font-size:0.82rem;">ACTIVE HOSTS</div>
                 <div class="stat-number">{{ summary.hosts }}</div>
             </div>
             <div class="stat-box">
-                <div class="muted" style="font-size:0.82rem;">AKUN LIVE</div>
+                <div class="muted" style="font-size:0.82rem;">LIVE ACCOUNTS</div>
                 <div class="stat-number">{{ summary.accounts }}</div>
             </div>
             <div class="stat-box">
-                <div class="muted" style="font-size:0.82rem;">SESI LIVE</div>
+                <div class="muted" style="font-size:0.82rem;">LIVE SESSIONS</div>
                 <div class="stat-number">{{ session_summary.sessions }}</div>
-                <div class="muted" style="font-size:0.75rem;">rata-rata {{ session_summary.avg_duration // 60 }} mnt</div>
+                <div class="muted" style="font-size:0.75rem;">avg {{ session_summary.avg_duration // 60 }} min</div>
             </div>
             <div class="stat-box">
-                <div class="muted" style="font-size:0.82rem;">DURASI LIVE</div>
+                <div class="muted" style="font-size:0.82rem;">LIVE DURATION</div>
                 <div class="stat-number" style="color:#f472b6;">{{ fmt_duration(session_summary.duration) }}</div>
             </div>
         </div>
 
         <div class="card">
             <div class="card-header">
-                <h2>📊 Grafik Metrik (Waktu)</h2>
+                <h2>📊 Metric Chart (Time)</h2>
                 <div class="chart-toolbar">
-                    <label>Metrik
+                    <label>Metric
                         <select id="chart-metric">
-                            <option value="coins">Koin</option>
-                            <option value="gifts">Jumlah gift (item)</option>
-                            <option value="gift_events">Transaksi gift</option>
-                            <option value="viewers">Viewer aktif unik</option>
-                            <option value="sessions">Sesi live (frekuensi)</option>
-                            <option value="active_accounts">Akun aktif</option>
-                            <option value="active_hosts">Host aktif</option>
+                            <option value="coins">Coins</option>
+                            <option value="gifts">Gift items</option>
+                            <option value="gift_events">Gift transactions</option>
+                            <option value="viewers">Unique viewers</option>
+                            <option value="sessions">Live sessions</option>
+                            <option value="active_accounts">Active accounts</option>
+                            <option value="active_hosts">Active hosts</option>
                         </select>
                     </label>
                     <label>Format
@@ -1714,7 +1755,7 @@ def view_analytics():
             </div>
             <div class="table-scroll analytics-scroll" style="margin-top:12px;">
                 <table>
-                    <tr><th>Periode</th><th>Koin</th><th>Gift (item)</th><th>Transaksi gift</th><th>Viewer aktif</th><th>Sesi live</th><th>Akun aktif</th><th>Host aktif</th></tr>
+                    <tr><th>Period</th><th>Coins</th><th>Gift items</th><th>Gift transactions</th><th>Unique viewers</th><th>Live sessions</th><th>Active accounts</th><th>Active hosts</th></tr>
                     {% for b in series %}
                     <tr>
                         <td><strong>{{ b.label }}</strong></td>
@@ -1727,7 +1768,7 @@ def view_analytics():
                         <td>{{ b.active_hosts }}</td>
                     </tr>
                     {% else %}
-                    <tr><td colspan="8" class="muted">No data pada rentang ini.</td></tr>
+                    <tr><td colspan="8" class="muted">No data in this range.</td></tr>
                     {% endfor %}
                 </table>
             </div>
@@ -1735,12 +1776,12 @@ def view_analytics():
 
         <div class="card">
             <div class="card-header">
-                <h2>🏆 Ranking Host</h2>
-                <span class="muted" style="font-size:0.8rem;">Klik nama host untuk melihat koin host tersebut di rentang tanggal ini</span>
+                <h2>🏆 Host Ranking</h2>
+                <span class="info-i" data-tip="Click a host name to filter the whole page by that host.">!</span>
             </div>
             <div class="table-scroll analytics-scroll">
                 <table>
-                    <tr><th>#</th><th>Host</th><th>Koin</th><th>Share</th><th>Gift</th><th>Viewer</th><th>Akun</th><th>Sesi</th><th>Duration live</th></tr>
+                    <tr><th>#</th><th>Host</th><th>Coins</th><th>Share</th><th>Gifts</th><th>Viewers</th><th>Accounts</th><th>Sessions</th><th>Live duration</th></tr>
                     {% for h in host_rows %}
                     <tr>
                         <td>{{ loop.index }}</td>
@@ -1757,7 +1798,7 @@ def view_analytics():
                         <td>{{ h.duration }}</td>
                     </tr>
                     {% else %}
-                    <tr><td colspan="9" class="muted">Belum ada data host pada rentang ini.</td></tr>
+                    <tr><td colspan="9" class="muted">No host data in this range.</td></tr>
                     {% endfor %}
                 </table>
             </div>
@@ -1765,12 +1806,12 @@ def view_analytics():
 
         <div class="card">
             <div class="card-header">
-                <h2>📡 Traffic &amp; Ranking Akun</h2>
-                <span class="muted" style="font-size:0.8rem;">Koin, sesi live, durasi, viewer, dan jumlah host per akun</span>
+                <h2>📡 Traffic &amp; Account Ranking</h2>
+                <span class="info-i" data-tip="Coins, live sessions, duration, viewers, and host count per account.">!</span>
             </div>
             <div class="table-scroll analytics-scroll">
                 <table>
-                    <tr><th>#</th><th>TikTok Account</th><th>Koin</th><th>Share</th><th>Gift</th><th>Viewer</th><th>Host</th><th>Sesi</th><th>Duration live</th></tr>
+                    <tr><th>#</th><th>TikTok Account</th><th>Coins</th><th>Share</th><th>Gifts</th><th>Viewers</th><th>Hosts</th><th>Sessions</th><th>Live duration</th></tr>
                     {% for a in account_rows %}
                     <tr>
                         <td>{{ loop.index }}</td>
@@ -1787,7 +1828,7 @@ def view_analytics():
                         <td>{{ a.duration }}</td>
                     </tr>
                     {% else %}
-                    <tr><td colspan="9" class="muted">Belum ada data akun pada rentang ini.</td></tr>
+                    <tr><td colspan="9" class="muted">No account data in this range.</td></tr>
                     {% endfor %}
                 </table>
             </div>
@@ -1795,18 +1836,18 @@ def view_analytics():
 
         <div class="card">
             <div class="card-header">
-                <h2>📈 Frekuensi / Traffic (Grafik Waktu)</h2>
-                <span class="muted" style="font-size:0.8rem;">Sumbu X = waktu ({{ group_label }}). Menampilkan frekuensi/interaksi akun, host, dan keaktifan viewer.</span>
+                <h2>📈 Frequency / Traffic (Time Chart)</h2>
+                <span class="info-i" data-tip="X axis = time ({{ group_label }}). Shows account, host, and viewer activity over time.">!</span>
             </div>
 
             <div style="margin-bottom:18px;">
                 <div class="card-header" style="margin-bottom:6px;">
-                    <h3 style="margin:0;">Akun (interaksi / sesi live)</h3>
+                    <h3 style="margin:0;">Accounts (interactions / live sessions)</h3>
                     <div class="chart-toolbar" style="margin-bottom:0;">
                         <label>Metrik
                             <select class="freq-metric" data-target="freq-chart-account">
-                                <option value="sessions" selected>Sesi live (frekuensi)</option>
-                                <option value="active_accounts">Akun aktif</option>
+                                <option value="sessions" selected>Live sessions</option>
+                                <option value="active_accounts">Active accounts</option>
                             </select>
                         </label>
                     </div>
@@ -1816,18 +1857,18 @@ def view_analytics():
 
             <div style="margin-bottom:18px;">
                 <div class="card-header" style="margin-bottom:6px;">
-                    <h3 style="margin:0;">Host (engagement per nama host)</h3>
+                    <h3 style="margin:0;">Hosts (engagement by name)</h3>
                     <div class="chart-toolbar" style="margin-bottom:0;">
                         <label>Metrik
                             <select id="host-eng-metric">
-                                <option value="transactions" selected>Transaksi gift (frekuensi)</option>
-                                <option value="coins">Koin (gift)</option>
-                                <option value="viewers">Viewer unik (pemberi gift)</option>
+                                <option value="transactions" selected>Gift transactions</option>
+                                <option value="coins">Coins (gifts)</option>
+                                <option value="viewers">Unique gifters</option>
                             </select>
                         </label>
                     </div>
                 </div>
-                <div class="muted" style="font-size:0.78rem; margin-bottom:6px;">Sumbu X: waktu ({{ group_label }}) · Tiap seri = nama host. Pilih host yang dianalisis:</div>
+                <div class="muted" style="font-size:0.78rem; margin-bottom:6px;">X axis: time ({{ group_label }}) · Each series = host. Select hosts to analyze:</div>
                 <div id="host-select-controls" style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px;"></div>
                 <div class="chart-wrap"><div id="freq-chart-host-multi"></div></div>
                 <div id="host-freq-legend" class="muted" style="font-size:0.78rem; margin-top:6px;"></div>
@@ -1835,13 +1876,13 @@ def view_analytics():
 
             <div>
                 <div class="card-header" style="margin-bottom:6px;">
-                    <h3 style="margin:0;">Viewer (keaktifan harian/mingguan/bulanan)</h3>
+                    <h3 style="margin:0;">Viewers (activity)</h3>
                     <div class="chart-toolbar" style="margin-bottom:0;">
                         <label>Metrik
                             <select class="freq-metric" data-target="freq-chart-viewer">
-                                <option value="viewers" selected>Viewer aktif unik</option>
-                                <option value="gift_events">Transaksi gift (frekuensi)</option>
-                                <option value="gifts">Jumlah gift (item)</option>
+                                <option value="viewers" selected>Unique viewers</option>
+                                <option value="gift_events">Gift transactions</option>
+                                <option value="gifts">Gift items</option>
                             </select>
                         </label>
                     </div>
@@ -1851,25 +1892,25 @@ def view_analytics():
 
             <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; align-items: start; margin-top:16px;">
                 <div>
-                    <h3 style="margin-bottom:8px;">Top Akun (frekuensi sesi)</h3>
+                    <h3 style="margin-bottom:8px;">Top Accounts (session frequency)</h3>
                     <div class="table-scroll">
                         <table>
-                            <tr><th>#</th><th>Akun</th><th>Frekuensi</th><th>Durasi</th></tr>
+                            <tr><th>#</th><th>Account</th><th>Frequency</th><th>Duration</th></tr>
                             {% for a in freq_account_rows %}
                             <tr>
                                 <td>{{ loop.index }}</td>
                                 <td><a href="{{ _link(preset='custom', account=a.name) }}" class="viewer-link">@{{ a.name }}</a></td>
-                                <td><span class="badge">{{ a.sessions }} sesi</span></td>
+                                <td><span class="badge">{{ a.sessions }} sessions</span></td>
                                 <td class="muted">{{ a.duration }}</td>
                             </tr>
                             {% else %}
-                            <tr><td colspan="4" class="muted">Belum ada data.</td></tr>
+                            <tr><td colspan="4" class="muted">No data.</td></tr>
                             {% endfor %}
                         </table>
                     </div>
                 </div>
                 <div>
-                    <h3 style="margin-bottom:8px;">Top Host (frekuensi tampil)</h3>
+                    <h3 style="margin-bottom:8px;">Top Hosts (appearance frequency)</h3>
                     <div class="table-scroll">
                         <table>
                             <tr><th>#</th><th>Host</th><th>Frekuensi</th><th>Durasi</th></tr>
@@ -1877,7 +1918,7 @@ def view_analytics():
                             <tr>
                                 <td>{{ loop.index }}</td>
                                 <td><a href="{{ _link(preset='custom', host=h.name) }}" class="host-link">{{ h.name }}</a></td>
-                                <td><span class="badge" style="background:#7c3aed;">{{ h.sessions }} sesi</span></td>
+                                <td><span class="badge" style="background:#7c3aed;">{{ h.sessions }} sessions</span></td>
                                 <td class="muted">{{ h.duration }}</td>
                             </tr>
                             {% else %}
@@ -1887,15 +1928,15 @@ def view_analytics():
                     </div>
                 </div>
                 <div>
-                    <h3 style="margin-bottom:8px;">Top Viewer (frekuensi gift)</h3>
+                    <h3 style="margin-bottom:8px;">Top Viewers (gift frequency)</h3>
                     <div class="table-scroll">
                         <table>
-                            <tr><th>#</th><th>Viewer</th><th>Frekuensi</th><th>Koin</th></tr>
+                            <tr><th>#</th><th>Viewer</th><th>Frequency</th><th>Coins</th></tr>
                             {% for v in freq_viewer_rows %}
                             <tr>
                                 <td>{{ loop.index }}</td>
                                 <td><a href="{{ _link(preset='custom', viewer=v.key) }}" class="viewer-link">{{ v.name }}</a></td>
-                                <td><span class="badge" style="background:#ca8a04;">{{ v.gifts }}x gift</span></td>
+                                <td><span class="badge" style="background:#ca8a04;">{{ v.gifts }}x gifts</span></td>
                                 <td class="muted">{{ v.coins }} c</td>
                             </tr>
                             {% else %}
@@ -1909,12 +1950,12 @@ def view_analytics():
 
         <div class="card">
             <div class="card-header">
-                <h2>💎 Ranking Viewer (Spent Koin)</h2>
-                <span class="muted" style="font-size:0.8rem;">Klik nama viewer untuk analisa spent-nya per host</span>
+                <h2>💎 Viewer Ranking (Coins Spent)</h2>
+                <span class="info-i" data-tip="Click a viewer name to analyze their spending per host.">!</span>
             </div>
             <div class="table-scroll analytics-scroll">
                 <table>
-                    <tr><th>#</th><th>Viewer</th><th>Koin</th><th>Share</th><th>Gift</th><th>Host berbeda</th><th>Terakhir gift</th></tr>
+                    <tr><th>#</th><th>Viewer</th><th>Coins</th><th>Share</th><th>Gifts</th><th>Hosts</th><th>Last gift</th></tr>
                     {% for v in viewer_rows %}
                     <tr>
                         <td>{{ loop.index }}</td>
@@ -1929,7 +1970,7 @@ def view_analytics():
                         <td class="muted">{{ v.last_at }}</td>
                     </tr>
                     {% else %}
-                    <tr><td colspan="7" class="muted">Belum ada data viewer pada rentang ini.</td></tr>
+                    <tr><td colspan="7" class="muted">No viewer data in this range.</td></tr>
                     {% endfor %}
                 </table>
             </div>
@@ -1937,12 +1978,12 @@ def view_analytics():
 
         <div class="card">
             <div class="card-header">
-                <h2>🎯 Spent Viewer ke Host{% if viewer_filter %} — @{{ viewer_filter }}{% endif %}</h2>
-                <span class="muted" style="font-size:0.8rem;">Berapa koin yang dibelanjakan ke masing-masing host dalam rentang ini</span>
+                <h2>🎯 Viewer Spending by Host{% if viewer_filter %} — @{{ viewer_filter }}{% endif %}</h2>
+                <span class="info-i" data-tip="Coins spent on each host within this range.">!</span>
             </div>
             <div class="table-scroll analytics-scroll">
                 <table>
-                    <tr><th>#</th><th>Viewer</th><th>Host</th><th>Koin</th><th>Share</th><th>Gift</th></tr>
+                    <tr><th>#</th><th>Viewer</th><th>Host</th><th>Coins</th><th>Share</th><th>Gifts</th></tr>
                     {% for s in spend_rows %}
                     <tr>
                         <td>{{ loop.index }}</td>
@@ -1953,7 +1994,30 @@ def view_analytics():
                         <td>{{ s.gifts }}</td>
                     </tr>
                     {% else %}
-                    <tr><td colspan="6" class="muted">Belum ada data spent viewer ke host pada rentang ini.</td></tr>
+                    <tr><td colspan="6" class="muted">No viewer spending data in this range.</td></tr>
+                    {% endfor %}
+                </table>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h2>🎁 Top Gift Objects (Spent)</h2>
+                <span class="info-i" data-tip="Gift objects ranked by total coins in this range.">!</span>
+            </div>
+            <div class="table-scroll analytics-scroll">
+                <table>
+                    <tr><th>#</th><th>Object</th><th>Coin value</th><th>Count</th><th>Total coins</th></tr>
+                    {% for g in top_gift_items %}
+                    <tr>
+                        <td>{{ loop.index }}</td>
+                        <td><strong>{{ g.name }}</strong></td>
+                        <td><span class="badge" style="background:#ca8a04;">{{ g.unit_coins }} c</span></td>
+                        <td>{{ g.count }}</td>
+                        <td><span class="badge" style="background:#0e7490;">{{ g.coins }} c</span></td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="5" class="muted">No gift object data in this range.</td></tr>
                     {% endfor %}
                 </table>
             </div>
@@ -1976,16 +2040,22 @@ def view_analytics():
         function escHtml(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
         function yAxisUnit(metric) {
             var units = {
-                coins: 'koin',
-                gifts: 'gift',
-                gift_events: 'transaksi',
-                viewers: 'viewer',
-                sessions: 'sesi',
-                active_accounts: 'akun',
-                active_hosts: 'host',
-                transactions: 'transaksi'
+                coins: 'coins',
+                gifts: 'gifts',
+                gift_events: 'transactions',
+                viewers: 'viewers',
+                sessions: 'sessions',
+                active_accounts: 'accounts',
+                active_hosts: 'hosts',
+                transactions: 'transactions'
             };
             return units[metric] || '';
+        }
+        function avgPeriodLabel() {
+            if (GROUP_BY === 'hour') return '/hour';
+            if (GROUP_BY === 'week') return '/week';
+            if (GROUP_BY === 'month') return '/month';
+            return '/day';
         }
 
         function renderChart(containerId, metric, chartType) {
@@ -1994,7 +2064,7 @@ def view_analytics():
             var labels = CHART_DATA.labels || [];
             var values = (CHART_DATA[metric] || []).slice();
             if (!labels.length) {
-                wrap.innerHTML = '<div class="muted" style="padding:32px;text-align:center;">No data untuk filter ini (' + escHtml(yAxisUnit(metric)) + ').</div>';
+                wrap.innerHTML = '<div class="muted" style="padding:32px;text-align:center;">No data for this filter (' + escHtml(yAxisUnit(metric)) + ').</div>';
                 return;
             }
             var n = values.length;
@@ -2010,6 +2080,9 @@ def view_analytics():
             for (var mi = 0; mi < n; mi++) { if ((values[mi] || 0) > maxV) maxV = values[mi] || 0; }
             var top = niceCeil(maxV);
             var unit = yAxisUnit(metric);
+            var avgSum = 0;
+            for (var ai = 0; ai < n; ai++) avgSum += (values[ai] || 0);
+            var avg = n ? avgSum / n : 0;
 
             function yOf(v) { return pad.t + ph - ph * ((v || 0) / top); }
             function xOf(i) { return pad.l + slot * (i + 0.5); }
@@ -2047,6 +2120,12 @@ def view_analytics():
                 }
             }
 
+            if (avg > 0) {
+                var yAvg = yOf(avg);
+                parts.push('<line x1="' + pad.l + '" y1="' + yAvg + '" x2="' + (pad.l + pw) + '" y2="' + yAvg + '" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="6 4"/>');
+                parts.push('<text x="' + (pad.l + pw - 4) + '" y="' + (yAvg - 5) + '" text-anchor="end" fill="#fbbf24" font-size="10">Avg: ' + fmtNum(avg) + escHtml(avgPeriodLabel()) + '</text>');
+            }
+
             var step = Math.max(1, Math.ceil(n / 12));
             for (var x = 0; x < n; x += step) {
                 var cx = pad.l + slot * (x + 0.5);
@@ -2060,9 +2139,9 @@ def view_analytics():
         var hostEngColors = ['#38bdf8','#f472b6','#34d399','#f59e0b','#a78bfa','#fb7185','#22d3ee','#facc15','#60a5fa','#4ade80','#f97316','#e879f9'];
 
         function hostEngMetricLabel(metric) {
-            if (metric === 'coins') return 'Koin';
-            if (metric === 'viewers') return 'Viewer unik';
-            return 'Transaksi gift';
+            if (metric === 'coins') return 'Coins';
+            if (metric === 'viewers') return 'Unique gifters';
+            return 'Gift transactions';
         }
         function hostEngTotal(host, metric) {
             if (metric === 'coins') return host.total_coins || 0;
@@ -2079,7 +2158,7 @@ def view_analytics():
             var wrap = document.getElementById('host-select-controls');
             if (!wrap) return;
             var hosts = (HOST_ENGAGEMENT && HOST_ENGAGEMENT.hosts) || [];
-            if (!hosts.length) { wrap.innerHTML = '<span class="muted">Tidak ada data host.</span>'; return; }
+            if (!hosts.length) { wrap.innerHTML = '<span class="muted">No host data.</span>'; return; }
             if (!hostEngSelected) {
                 hostEngSelected = {};
                 for (var i = 0; i < hosts.length; i++) hostEngSelected[hosts[i].key] = true;
@@ -2117,7 +2196,7 @@ def view_analytics():
             var labels = (HOST_ENGAGEMENT && HOST_ENGAGEMENT.labels) || [];
             var allHosts = (HOST_ENGAGEMENT && HOST_ENGAGEMENT.hosts) || [];
             if (!labels.length || !allHosts.length) {
-                wrap.innerHTML = '<div class="muted" style="padding:32px;text-align:center;">No data host untuk filter ini.</div>';
+                wrap.innerHTML = '<div class="muted" style="padding:32px;text-align:center;">No host data for this filter.</div>';
                 if (legend) legend.innerHTML = '';
                 return;
             }
@@ -2143,7 +2222,7 @@ def view_analytics():
                 if (hostEngSelected[allHosts[hi0].key]) hosts.push({ host: allHosts[hi0], idx: hi0 });
             }
             if (!hosts.length) {
-                wrap.innerHTML = '<div class="muted" style="padding:32px;text-align:center;">Pilih minimal satu host untuk ditampilkan.</div>';
+                wrap.innerHTML = '<div class="muted" style="padding:32px;text-align:center;">Select at least one host to display.</div>';
                 if (legend) legend.innerHTML = '';
                 return;
             }
@@ -2156,13 +2235,21 @@ def view_analytics():
             var ph = height - pad.t - pad.b;
             var slot = pw / n;
 
-            var maxV = 0;
-            for (var hi = 0; hi < hosts.length; hi++) {
-                var vals = hostEngValues(hosts[hi].host, metric);
-                for (var vi = 0; vi < vals.length; vi++) { if ((vals[vi] || 0) > maxV) maxV = vals[vi] || 0; }
+            var maxV = 0, totals = [], avgSum = 0;
+            for (var ti = 0; ti < n; ti++) {
+                var tsum = 0;
+                for (var th = 0; th < hosts.length; th++) {
+                    var sv = hostEngValues(hosts[th].host, metric)[ti] || 0;
+                    tsum += sv;
+                    if (sv > maxV) maxV = sv;
+                }
+                totals.push(tsum);
+                avgSum += tsum;
+                if (tsum > maxV) maxV = tsum;
             }
             var top = niceCeil(maxV);
             var unit = yAxisUnit(metric);
+            var avg = n ? avgSum / n : 0;
             function yOf(v) { return pad.t + ph - ph * ((v || 0) / top); }
             function xOf(i) { return pad.l + slot * (i + 0.5); }
 
@@ -2187,6 +2274,12 @@ def view_analytics():
                 for (var k = 0; k < n; k++) {
                     parts.push('<circle cx="' + pts[k][0] + '" cy="' + pts[k][1] + '" r="3" fill="#0b1220" stroke="' + color + '" stroke-width="2"><title>' + escHtml(series.name) + ' · ' + escHtml(labels[k]) + ': ' + fmtNum(valsS[k] || 0) + ' ' + escHtml(metricLabel.toLowerCase()) + '</title></circle>');
                 }
+            }
+
+            if (avg > 0) {
+                var yAvg = yOf(avg);
+                parts.push('<line x1="' + pad.l + '" y1="' + yAvg + '" x2="' + (pad.l + pw) + '" y2="' + yAvg + '" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="6 4"/>');
+                parts.push('<text x="' + (pad.l + pw - 4) + '" y="' + (yAvg - 5) + '" text-anchor="end" fill="#fbbf24" font-size="10">Avg: ' + fmtNum(avg) + escHtml(avgPeriodLabel()) + '</text>');
             }
 
             var step = Math.max(1, Math.ceil(n / 12));
@@ -2289,6 +2382,9 @@ def view_analytics():
         viewer_filter=viewer_filter,
         host_options=host_options,
         account_options=account_options,
+        top_gift_items=top_gift_items,
+        analysis_subject=analysis_subject,
+        analysis_subject_type=analysis_subject_type,
         host_max=host_max,
         account_max=account_max,
         metric=metric,

@@ -991,6 +991,38 @@ def get_analytics_host_engagement_timeseries(start_date, end_date, group_by="day
     }
 
 
+def get_analytics_top_gift_items(start_date, end_date, host=None, account=None, viewer=None,
+                                 limit=12) -> list:
+    """Top gift objects by coins spent in the selected range.
+
+    Returns rows: (gift_name, unit_coins, item_count, total_coins, transactions).
+    unit_coins = average coin value per item (total coins / total item count).
+    """
+    where, params = _analytics_gift_where(start_date, end_date, host, account, viewer)
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        return cur.execute(f"""
+            SELECT COALESCE(NULLIF(g.gift_name, ''), 'Unknown') AS gift_name,
+                   CASE WHEN COALESCE(SUM(g.gift_count), 0) > 0
+                        THEN CAST(ROUND(SUM(g.coins) * 1.0 / SUM(g.gift_count)) AS INTEGER)
+                        ELSE 0 END AS unit_coins,
+                   COALESCE(SUM(g.gift_count), 0) AS item_count,
+                   COALESCE(SUM(g.coins), 0) AS total_coins,
+                   COUNT(*) AS transactions
+            FROM gift_logs g
+            WHERE {where}
+            GROUP BY gift_name
+            ORDER BY total_coins DESC, item_count DESC
+            LIMIT ?
+        """, tuple(params) + (int(limit or 12),)).fetchall()
+    except Exception as e:
+        print(f"[Analytics] top gift items failed: {e}")
+        return []
+    finally:
+        conn.close()
+
+
 def get_analytics_gift_by_host(start_date, end_date, account=None, viewer=None) -> list:
     where, params = _analytics_gift_where(start_date, end_date, None, account, viewer)
     conn = get_db_connection()
