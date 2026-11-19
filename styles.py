@@ -135,7 +135,7 @@ textarea { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px soli
   .nav-links { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; width: 100%; }
   .nav-btn { justify-content: center; padding: 7px 6px; font-size: 0.75rem; text-align: center; }
   .status-cluster { flex-direction: row; width: 100%; gap: 6px; justify-content: flex-start; }
-  .status-indicator-pill { width: auto; flex: 0 1 auto; justify-content: center; padding: 4px 8px; font-size: 0.7rem; gap: 6px; }
+  .status-indicator-pill { width: auto; max-width: 100%; flex: 0 0 auto; justify-content: center; padding: 4px 8px; font-size: 0.7rem; gap: 6px; }
   .ping-badge { font-size: 0.65rem; }
   .card { padding: 12px; border-radius: 10px; margin-bottom: 12px; }
   .card-header { gap: 8px; margin-bottom: 8px; }
