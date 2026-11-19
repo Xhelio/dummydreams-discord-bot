@@ -220,8 +220,45 @@ def set_build_info(*, env: str = None, version: str = None) -> None:
         _version = str(version)
 
 
+_build_extra = None
+
+
+def _resolve_build_extra() -> dict:
+    global _build_extra
+    if _build_extra is not None:
+        return _build_extra
+    commit = ""
+    for key in ("GIT_COMMIT", "COMMIT_SHA", "COMMIT_HASH", "RENDER_GIT_COMMIT", "SOURCE_VERSION", "HEROKU_SLUG_COMMIT"):
+        val = (os.environ.get(key) or "").strip()
+        if val:
+            commit = val[:12]
+            break
+    if not commit:
+        try:
+            import subprocess
+            r = subprocess.run(
+                ["git", "rev-parse", "--short=7", "HEAD"],
+                cwd=BASE_DIR,
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            if r.returncode == 0:
+                commit = (r.stdout or "").strip()
+        except Exception:
+            commit = ""
+    _build_extra = {"commit": commit or "unknown"}
+    return _build_extra
+
+
 def get_build_info() -> dict:
-    return {"env": _env or "stable", "version": _version or "unknown"}
+    extra = _resolve_build_extra()
+    commit = extra.get("commit") or "unknown"
+    version = _version or "unknown"
+    if version in ("unknown", "") and commit not in ("unknown", ""):
+        version = commit
+    return {"env": _env or "stable", "version": version, "commit": commit}
 
 
 def get_logger(name: str = "bot") -> logging.Logger:

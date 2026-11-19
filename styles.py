@@ -197,6 +197,10 @@ NAV_HTML = """
             <span id="discord-status-text">Discord Bot</span>
             <span id="discord-ping-badge" class="ping-badge">&bull; Checking...</span>
         </div>
+        <div id="build-status-box" class="status-indicator-pill status-neutral" title="Kode build Git yang sedang berjalan">
+            <span id="build-status-text">Build</span>
+            <span id="build-badge" class="ping-badge">&bull; ...</span>
+        </div>
     </div>
 </div>
 <script>
@@ -242,6 +246,19 @@ NAV_HTML = """
       var newUrl = window.location.pathname + (qs ? ('?' + qs) : '');
       window.history.replaceState({}, '', newUrl);
     }
+    try {
+      fetch('/admin/build-info', { cache: 'no-store' })
+        .then(function(r){ return r.ok ? r.json() : null; })
+        .then(function(info){
+          if (!info) return;
+          var code = info.commit || info.version || info.env || 'unknown';
+          var el = document.getElementById('build-badge');
+          var box = document.getElementById('build-status-box');
+          if (el) el.textContent = code;
+          if (box) box.title = 'Build: ' + code + (info.env ? (' (' + info.env + ')') : '');
+        })
+        .catch(function(){});
+    } catch(e){}
   } catch(e){}
 })();
 </script>

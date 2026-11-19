@@ -2789,6 +2789,21 @@ def revoke_role_admin(discord_id):
     return redirect('/admin/verifications?msg=' + quote_plus(msg) + '&msg_type=' + msg_type)
 
 
+@admin_bp.route('/build-info', methods=['GET'])
+def build_info():
+    from flask import jsonify
+    try:
+        from log_setup import get_build_info
+        info = get_build_info() or {}
+    except Exception:
+        info = {}
+    return jsonify({
+        "env": info.get("env") or "stable",
+        "version": info.get("version") or "unknown",
+        "commit": info.get("commit") or info.get("version") or "unknown",
+    })
+
+
 @admin_bp.route('/clear-activity-logs', methods=['POST'])
 def clear_activity():
     clear_activity_logs()
