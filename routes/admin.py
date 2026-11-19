@@ -1391,7 +1391,8 @@ def view_analytics():
     if chart_type not in ('bar', 'line', 'area'):
         chart_type = 'bar'
     metric = (request.args.get('metric') or 'coins').strip()
-    if metric not in ('coins', 'gifts', 'viewers', 'sessions'):
+    allowed_metrics = ('coins', 'gifts', 'gift_events', 'viewers', 'sessions', 'active_accounts', 'active_hosts')
+    if metric not in allowed_metrics:
         metric = 'coins'
 
     host_arg = host_filter or None
@@ -1498,10 +1499,13 @@ def view_analytics():
     chart_payload = {
         'labels': [b['label'] for b in series],
         'keys': [b['key'] for b in series],
-        'coins': [b['coins'] for b in series],
-        'gifts': [b['gifts'] for b in series],
-        'viewers': [b['viewers'] for b in series],
-        'sessions': [b['sessions'] for b in series],
+        'coins': [b.get('coins', 0) for b in series],
+        'gifts': [b.get('gifts', 0) for b in series],
+        'gift_events': [b.get('gift_events', 0) for b in series],
+        'viewers': [b.get('viewers', 0) for b in series],
+        'sessions': [b.get('sessions', 0) for b in series],
+        'active_accounts': [b.get('active_accounts', 0) for b in series],
+        'active_hosts': [b.get('active_hosts', 0) for b in series],
     }
 
     def _link(**overrides):
@@ -1670,14 +1674,17 @@ def view_analytics():
 
         <div class="card">
             <div class="card-header">
-                <h2>📊 Tren Metrik</h2>
+                <h2>📊 Grafik Metrik (Waktu)</h2>
                 <div class="chart-toolbar">
                     <label>Metrik
                         <select id="chart-metric">
                             <option value="coins">Koin</option>
-                            <option value="gifts">Gift</option>
-                            <option value="viewers">Viewer unik</option>
-                            <option value="sessions">Sesi live</option>
+                            <option value="gifts">Jumlah gift (item)</option>
+                            <option value="gift_events">Transaksi gift</option>
+                            <option value="viewers">Viewer aktif unik</option>
+                            <option value="sessions">Sesi live (frekuensi)</option>
+                            <option value="active_accounts">Akun aktif</option>
+                            <option value="active_hosts">Host aktif</option>
                         </select>
                     </label>
                     <label>Format
@@ -1687,6 +1694,9 @@ def view_analytics():
                             <option value="area">Area</option>
                         </select>
                     </label>
+                    <label style="flex-direction:row; align-items:center; gap:6px; cursor:pointer;">
+                        <input type="checkbox" id="chart-trend" style="width:auto;"> Tren/Rata-rata
+                    </label>
                 </div>
             </div>
             <div class="chart-wrap">
@@ -1694,17 +1704,20 @@ def view_analytics():
             </div>
             <div class="table-scroll analytics-scroll" style="margin-top:12px;">
                 <table>
-                    <tr><th>Periode</th><th>Koin</th><th>Gift</th><th>Viewer unik</th><th>Sesi live</th></tr>
+                    <tr><th>Periode</th><th>Koin</th><th>Gift (item)</th><th>Transaksi gift</th><th>Viewer aktif</th><th>Sesi live</th><th>Akun aktif</th><th>Host aktif</th></tr>
                     {% for b in series %}
                     <tr>
                         <td><strong>{{ b.label }}</strong></td>
                         <td>{{ b.coins }} c</td>
                         <td>{{ b.gifts }}</td>
+                        <td>{{ b.gift_events }}</td>
                         <td>{{ b.viewers }}</td>
                         <td>{{ b.sessions }}</td>
+                        <td>{{ b.active_accounts }}</td>
+                        <td>{{ b.active_hosts }}</td>
                     </tr>
                     {% else %}
-                    <tr><td colspan="5" class="muted">No data pada rentang ini.</td></tr>
+                    <tr><td colspan="8" class="muted">No data pada rentang ini.</td></tr>
                     {% endfor %}
                 </table>
             </div>
@@ -1772,12 +1785,68 @@ def view_analytics():
 
         <div class="card">
             <div class="card-header">
-                <h2>📊 Frekuensi Traffic</h2>
-                <span class="muted" style="font-size:0.8rem;">Frekuensi aktivitas akun, host, dan viewer pada rentang ini</span>
+                <h2>📈 Frekuensi / Traffic (Grafik Waktu)</h2>
+                <span class="muted" style="font-size:0.8rem;">Sumbu X = waktu ({{ group_by }}). Menampilkan frekuensi/interaksi akun, host, dan keaktifan viewer.</span>
             </div>
-            <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; align-items: start;">
+
+            <div style="margin-bottom:18px;">
+                <div class="card-header" style="margin-bottom:6px;">
+                    <h3 style="margin:0;">Akun (interaksi / sesi live)</h3>
+                    <div class="chart-toolbar" style="margin-bottom:0;">
+                        <label>Metrik
+                            <select class="freq-metric" data-target="freq-chart-account">
+                                <option value="sessions" selected>Sesi live (frekuensi)</option>
+                                <option value="active_accounts">Akun aktif</option>
+                            </select>
+                        </label>
+                        <label style="flex-direction:row; align-items:center; gap:6px; cursor:pointer;">
+                            <input type="checkbox" class="freq-trend" data-target="freq-chart-account" checked style="width:auto;"> Tren/Rata-rata
+                        </label>
+                    </div>
+                </div>
+                <div class="chart-wrap"><div id="freq-chart-account" class="freq-chart" data-metric="sessions" data-trend="1"></div></div>
+            </div>
+
+            <div style="margin-bottom:18px;">
+                <div class="card-header" style="margin-bottom:6px;">
+                    <h3 style="margin:0;">Host (interaksi harian / tampil)</h3>
+                    <div class="chart-toolbar" style="margin-bottom:0;">
+                        <label>Metrik
+                            <select class="freq-metric" data-target="freq-chart-host">
+                                <option value="active_hosts" selected>Host aktif</option>
+                                <option value="sessions">Sesi tampil (frekuensi)</option>
+                            </select>
+                        </label>
+                        <label style="flex-direction:row; align-items:center; gap:6px; cursor:pointer;">
+                            <input type="checkbox" class="freq-trend" data-target="freq-chart-host" checked style="width:auto;"> Tren/Rata-rata
+                        </label>
+                    </div>
+                </div>
+                <div class="chart-wrap"><div id="freq-chart-host" class="freq-chart" data-metric="active_hosts" data-trend="1"></div></div>
+            </div>
+
+            <div>
+                <div class="card-header" style="margin-bottom:6px;">
+                    <h3 style="margin:0;">Viewer (keaktifan harian/mingguan/bulanan)</h3>
+                    <div class="chart-toolbar" style="margin-bottom:0;">
+                        <label>Metrik
+                            <select class="freq-metric" data-target="freq-chart-viewer">
+                                <option value="viewers" selected>Viewer aktif unik</option>
+                                <option value="gift_events">Transaksi gift (frekuensi)</option>
+                                <option value="gifts">Jumlah gift (item)</option>
+                            </select>
+                        </label>
+                        <label style="flex-direction:row; align-items:center; gap:6px; cursor:pointer;">
+                            <input type="checkbox" class="freq-trend" data-target="freq-chart-viewer" checked style="width:auto;"> Tren/Rata-rata
+                        </label>
+                    </div>
+                </div>
+                <div class="chart-wrap"><div id="freq-chart-viewer" class="freq-chart" data-metric="viewers" data-trend="1"></div></div>
+            </div>
+
+            <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; align-items: start; margin-top:16px;">
                 <div>
-                    <h3 style="margin-bottom:8px;">Akun (sesi live)</h3>
+                    <h3 style="margin-bottom:8px;">Top Akun (frekuensi sesi)</h3>
                     <div class="table-scroll">
                         <table>
                             <tr><th>#</th><th>Akun</th><th>Frekuensi</th><th>Durasi</th></tr>
@@ -1795,7 +1864,7 @@ def view_analytics():
                     </div>
                 </div>
                 <div>
-                    <h3 style="margin-bottom:8px;">Host (sesi tampil)</h3>
+                    <h3 style="margin-bottom:8px;">Top Host (frekuensi tampil)</h3>
                     <div class="table-scroll">
                         <table>
                             <tr><th>#</th><th>Host</th><th>Frekuensi</th><th>Durasi</th></tr>
@@ -1813,7 +1882,7 @@ def view_analytics():
                     </div>
                 </div>
                 <div>
-                    <h3 style="margin-bottom:8px;">Viewer (transaksi gift)</h3>
+                    <h3 style="margin-bottom:8px;">Top Viewer (frekuensi gift)</h3>
                     <div class="table-scroll">
                         <table>
                             <tr><th>#</th><th>Viewer</th><th>Frekuensi</th><th>Koin</th></tr>
@@ -1887,83 +1956,163 @@ def view_analytics():
 
         AUTO_REFRESH_JS_PLACEHOLDER
         <script>
+        var CHART_DATA = {{ chart_payload|tojson }};
+        var GROUP_BY = {{ group_by|tojson }};
+
+        function fmtNum(n) { return (Math.round(n || 0)).toLocaleString('id-ID'); }
+        function niceCeil(v) {
+            if (!v || v <= 0) return 1;
+            var exp = Math.pow(10, Math.floor(Math.log10(v)));
+            var f = v / exp;
+            var nf = f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10;
+            return nf * exp;
+        }
+        function escHtml(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+        function movingAvg(values, windowSize) {
+            var out = [], n = values.length;
+            var w = Math.max(1, windowSize || 1);
+            for (var i = 0; i < n; i++) {
+                var start = Math.max(0, i - w + 1);
+                var sum = 0, count = 0;
+                for (var j = start; j <= i; j++) { sum += (values[j] || 0); count++; }
+                out.push(count ? (sum / count) : 0);
+            }
+            return out;
+        }
+        function trendWindow() {
+            if (GROUP_BY === 'day') return 7;
+            if (GROUP_BY === 'week') return 4;
+            if (GROUP_BY === 'month') return 3;
+            return 7;
+        }
+
+        function renderChart(containerId, metric, chartType, showTrend) {
+            var wrap = document.getElementById(containerId);
+            if (!wrap) return;
+            var labels = CHART_DATA.labels || [];
+            var values = (CHART_DATA[metric] || []).slice();
+            if (!labels.length) {
+                wrap.innerHTML = '<div class="muted" style="padding:32px;text-align:center;">No data untuk filter ini.</div>';
+                return;
+            }
+            var n = values.length;
+            var type = chartType || 'line';
+            var width = Math.max(320, wrap.clientWidth || 800);
+            var height = (containerId === 'chart-svg') ? 300 : 240;
+            var pad = { l: 58, r: 18, t: 22, b: 62 };
+            var pw = width - pad.l - pad.r;
+            var ph = height - pad.t - pad.b;
+            var slot = pw / n;
+
+            var ma = showTrend ? movingAvg(values, trendWindow()) : [];
+            var avg = 0;
+            for (var ai = 0; ai < n; ai++) avg += (values[ai] || 0);
+            avg = n ? (avg / n) : 0;
+
+            var maxV = 0;
+            for (var mi = 0; mi < n; mi++) { if ((values[mi] || 0) > maxV) maxV = values[mi] || 0; }
+            if (showTrend) {
+                for (var mj = 0; mj < ma.length; mj++) { if ((ma[mj] || 0) > maxV) maxV = ma[mj] || 0; }
+                if (avg > maxV) maxV = avg;
+            }
+            var top = niceCeil(maxV);
+
+            function yOf(v) { return pad.t + ph - ph * ((v || 0) / top); }
+            function xOf(i) { return pad.l + slot * (i + 0.5); }
+
+            var gradId = 'grad-' + containerId;
+            var parts = [];
+            parts.push('<svg viewBox="0 0 ' + width + ' ' + height + '" width="100%" height="' + height + '" role="img">');
+            parts.push('<defs><linearGradient id="' + gradId + '" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#38bdf8" stop-opacity="0.40"/><stop offset="100%" stop-color="#38bdf8" stop-opacity="0.02"/></linearGradient></defs>');
+            for (var t = 0; t <= 4; t++) {
+                var yy = pad.t + ph - (ph * t / 4);
+                var val = top * t / 4;
+                parts.push('<line x1="' + pad.l + '" y1="' + yy + '" x2="' + (pad.l + pw) + '" y2="' + yy + '" stroke="#1e293b" stroke-width="1"/>');
+                parts.push('<text x="' + (pad.l - 8) + '" y="' + (yy + 4) + '" text-anchor="end" fill="#64748b" font-size="10">' + fmtNum(val) + '</text>');
+            }
+
+            if (type === 'bar') {
+                var bw = Math.max(2, Math.min(44, slot * 0.62));
+                for (var i = 0; i < n; i++) {
+                    var bh = ph * ((values[i] || 0) / top);
+                    var bx = pad.l + slot * i + (slot - bw) / 2;
+                    var by = pad.t + ph - bh;
+                    parts.push('<rect x="' + bx + '" y="' + by + '" width="' + bw + '" height="' + Math.max(0, bh) + '" rx="3" fill="#38bdf8"><title>' + escHtml(labels[i]) + ': ' + fmtNum(values[i]) + '</title></rect>');
+                }
+            } else {
+                var pts = [];
+                for (var j = 0; j < n; j++) pts.push([xOf(j), yOf(values[j] || 0)]);
+                if (type === 'area') {
+                    var area = 'M' + pts[0][0] + ',' + (pad.t + ph) + ' L' + pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' L') + ' L' + pts[n - 1][0] + ',' + (pad.t + ph) + ' Z';
+                    parts.push('<path d="' + area + '" fill="url(#' + gradId + ')" stroke="none"/>');
+                }
+                parts.push('<polyline fill="none" stroke="#38bdf8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" points="' + pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' ') + '"/>');
+                for (var k = 0; k < n; k++) {
+                    parts.push('<circle cx="' + pts[k][0] + '" cy="' + pts[k][1] + '" r="3.2" fill="#0b1220" stroke="#38bdf8" stroke-width="2"><title>' + escHtml(labels[k]) + ': ' + fmtNum(values[k]) + '</title></circle>');
+                }
+            }
+
+            if (showTrend) {
+                var yAvg = yOf(avg);
+                parts.push('<line x1="' + pad.l + '" y1="' + yAvg + '" x2="' + (pad.l + pw) + '" y2="' + yAvg + '" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="6 4"/>');
+                parts.push('<text x="' + (pad.l + pw - 4) + '" y="' + (yAvg - 5) + '" text-anchor="end" fill="#fbbf24" font-size="10">Rata-rata: ' + fmtNum(avg) + '</text>');
+                if (ma.length > 1) {
+                    var mpts = ma.map(function (v, i) { return xOf(i) + ',' + yOf(v); }).join(' ');
+                    parts.push('<polyline fill="none" stroke="#22c55e" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="' + mpts + '"/>');
+                    parts.push('<text x="' + (pad.l + 6) + '" y="' + (pad.t + 12) + '" fill="#4ade80" font-size="10">Tren (MA ' + trendWindow() + ' ' + escHtml(GROUP_BY) + ')</text>');
+                }
+            }
+
+            var step = Math.max(1, Math.ceil(n / 12));
+            for (var x = 0; x < n; x += step) {
+                var cx = pad.l + slot * (x + 0.5);
+                parts.push('<text x="' + cx + '" y="' + (pad.t + ph + 18) + '" text-anchor="end" fill="#94a3b8" font-size="10" transform="rotate(-28 ' + cx + ' ' + (pad.t + ph + 18) + ')">' + escHtml(labels[x]) + '</text>');
+            }
+            parts.push('</svg>');
+            wrap.innerHTML = parts.join('');
+        }
+
         (function () {
-            var DATA = {{ chart_payload|tojson }};
-            var state = { metric: {{ metric|tojson }}, type: {{ chart_type|tojson }} };
+            var mainMetric = {{ metric|tojson }};
+            var mainType = {{ chart_type|tojson }};
+            var mainTrend = false;
             var metricSelect = document.getElementById('chart-metric');
             var typeSelect = document.getElementById('chart-type');
-            if (metricSelect) { metricSelect.value = state.metric; metricSelect.addEventListener('change', function () { state.metric = this.value; draw(); }); }
-            if (typeSelect) { typeSelect.value = state.type; typeSelect.addEventListener('change', function () { state.type = this.value; draw(); }); }
+            var trendCheck = document.getElementById('chart-trend');
 
-            function fmt(n) { return (Math.round(n || 0)).toLocaleString('id-ID'); }
-            function niceCeil(v) {
-                if (!v || v <= 0) return 1;
-                var exp = Math.pow(10, Math.floor(Math.log10(v)));
-                var f = v / exp;
-                var nf = f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10;
-                return nf * exp;
-            }
-            function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+            function drawMain() { renderChart('chart-svg', mainMetric, mainType, mainTrend); }
+            if (metricSelect) { metricSelect.value = mainMetric; metricSelect.addEventListener('change', function () { mainMetric = this.value; drawMain(); }); }
+            if (typeSelect) { typeSelect.value = mainType; typeSelect.addEventListener('change', function () { mainType = this.value; drawMain(); }); }
+            if (trendCheck) { trendCheck.checked = mainTrend; trendCheck.addEventListener('change', function () { mainTrend = !!this.checked; drawMain(); }); }
 
-            function draw() {
-                var wrap = document.getElementById('chart-svg');
-                if (!wrap) return;
-                var labels = DATA.labels || [];
-                var values = DATA[state.metric] || [];
-                if (!labels.length) {
-                    wrap.innerHTML = '<div class="muted" style="padding:40px;text-align:center;">No data untuk filter ini.</div>';
-                    return;
+            function drawFreq() {
+                var charts = document.querySelectorAll('.freq-chart');
+                for (var i = 0; i < charts.length; i++) {
+                    var el = charts[i];
+                    var m = el.getAttribute('data-metric') || 'sessions';
+                    var tr = el.getAttribute('data-trend') === '1';
+                    renderChart(el.id, m, 'line', tr);
                 }
-                var width = Math.max(320, wrap.clientWidth || 800);
-                var height = 300;
-                var pad = { l: 58, r: 18, t: 22, b: 62 };
-                var pw = width - pad.l - pad.r;
-                var ph = height - pad.t - pad.b;
-                var maxV = Math.max.apply(null, values.concat([0]));
-                var top = niceCeil(maxV);
-                var parts = [];
-                parts.push('<svg viewBox="0 0 ' + width + ' ' + height + '" width="100%" height="' + height + '" role="img" aria-label="Grafik metrik">');
-                parts.push('<defs><linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#38bdf8" stop-opacity="0.45"/><stop offset="100%" stop-color="#38bdf8" stop-opacity="0.02"/></linearGradient></defs>');
-                for (var t = 0; t <= 4; t++) {
-                    var y = pad.t + ph - (ph * t / 4);
-                    var val = top * t / 4;
-                    parts.push('<line x1="' + pad.l + '" y1="' + y + '" x2="' + (pad.l + pw) + '" y2="' + y + '" stroke="#1e293b" stroke-width="1"/>');
-                    parts.push('<text x="' + (pad.l - 8) + '" y="' + (y + 4) + '" text-anchor="end" fill="#64748b" font-size="10">' + fmt(val) + '</text>');
-                }
-                var n = values.length;
-                var slot = pw / n;
-                if (state.type === 'bar') {
-                    var bw = Math.max(2, Math.min(44, slot * 0.62));
-                    for (var i = 0; i < n; i++) {
-                        var bh = ph * (values[i] / top);
-                        var bx = pad.l + slot * i + (slot - bw) / 2;
-                        var by = pad.t + ph - bh;
-                        parts.push('<rect x="' + bx + '" y="' + by + '" width="' + bw + '" height="' + Math.max(0, bh) + '" rx="3" fill="#38bdf8"><title>' + esc(labels[i]) + ': ' + fmt(values[i]) + '</title></rect>');
-                    }
-                } else {
-                    var pts = [];
-                    for (var j = 0; j < n; j++) {
-                        pts.push([pad.l + slot * (j + 0.5), pad.t + ph - ph * (values[j] / top)]);
-                    }
-                    if (state.type === 'area') {
-                        var area = 'M' + pts[0][0] + ',' + (pad.t + ph) + ' L' + pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' L') + ' L' + pts[n - 1][0] + ',' + (pad.t + ph) + ' Z';
-                        parts.push('<path d="' + area + '" fill="url(#areaGrad)" stroke="none"/>');
-                    }
-                    parts.push('<polyline fill="none" stroke="#38bdf8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" points="' + pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' ') + '"/>');
-                    for (var k = 0; k < n; k++) {
-                        parts.push('<circle cx="' + pts[k][0] + '" cy="' + pts[k][1] + '" r="3.5" fill="#0b1220" stroke="#38bdf8" stroke-width="2"><title>' + esc(labels[k]) + ': ' + fmt(values[k]) + '</title></circle>');
-                    }
-                }
-                var step = Math.max(1, Math.ceil(n / 12));
-                for (var x = 0; x < n; x += step) {
-                    var cx = pad.l + slot * (x + 0.5);
-                    parts.push('<text x="' + cx + '" y="' + (pad.t + ph + 18) + '" text-anchor="end" fill="#94a3b8" font-size="10" transform="rotate(-28 ' + cx + ' ' + (pad.t + ph + 18) + ')">' + esc(labels[x]) + '</text>');
-                }
-                parts.push('</svg>');
-                wrap.innerHTML = parts.join('');
             }
-            window.addEventListener('resize', function () { draw(); });
-            draw();
+
+            var metricSelects = document.querySelectorAll('.freq-metric');
+            for (var i = 0; i < metricSelects.length; i++) {
+                metricSelects[i].addEventListener('change', function () {
+                    var target = document.getElementById(this.getAttribute('data-target'));
+                    if (target) { target.setAttribute('data-metric', this.value); renderChart(target.id, this.value, 'line', target.getAttribute('data-trend') === '1'); }
+                });
+            }
+            var trendChecks = document.querySelectorAll('.freq-trend');
+            for (var j = 0; j < trendChecks.length; j++) {
+                trendChecks[j].addEventListener('change', function () {
+                    var target = document.getElementById(this.getAttribute('data-target'));
+                    if (target) { target.setAttribute('data-trend', this.checked ? '1' : '0'); renderChart(target.id, target.getAttribute('data-metric') || 'sessions', 'line', this.checked); }
+                });
+            }
+
+            function drawAll() { drawMain(); drawFreq(); }
+            window.addEventListener('resize', function () { drawAll(); });
+            drawAll();
         })();
 
         function applyPreset(value) {

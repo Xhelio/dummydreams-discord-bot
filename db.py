@@ -586,8 +586,11 @@ def get_analytics_timeseries(start_date, end_date, group_by="day", host=None,
                 "label": _analytics_bucket_label(cursor_day, group_by),
                 "coins": 0,
                 "gifts": 0,
+                "gift_events": 0,
                 "sessions": 0,
                 "_viewers": set(),
+                "_accounts": set(),
+                "_hosts": set(),
             }
             order.append(key)
         cursor_day = _analytics_next_bucket(cursor_day, group_by)
@@ -595,8 +598,11 @@ def get_analytics_timeseries(start_date, end_date, group_by="day", host=None,
     conn = get_db_connection()
     try:
         cur = conn.cursor()
-        for log_date, coins, gifts in cur.execute(f"""
-            SELECT substr(g.log_date, 1, 10) AS log_date, COALESCE(SUM(g.coins), 0), COALESCE(SUM(g.gift_count), 0)
+        for log_date, coins, gifts, events in cur.execute(f"""
+            SELECT substr(g.log_date, 1, 10) AS log_date,
+                   COALESCE(SUM(g.coins), 0),
+                   COALESCE(SUM(g.gift_count), 0),
+                   COUNT(*)
             FROM gift_logs g
             WHERE {where}
             GROUP BY substr(g.log_date, 1, 10)
@@ -609,6 +615,7 @@ def get_analytics_timeseries(start_date, end_date, group_by="day", host=None,
                 continue
             bucket["coins"] += int(coins or 0)
             bucket["gifts"] += int(gifts or 0)
+            bucket["gift_events"] += int(events or 0)
 
         for log_date, viewer_key in cur.execute(f"""
             SELECT substr(g.log_date, 1, 10) AS log_date, LOWER(g.viewer_username)
@@ -623,18 +630,27 @@ def get_analytics_timeseries(start_date, end_date, group_by="day", host=None,
             if bucket and viewer_key:
                 bucket["_viewers"].add(viewer_key)
 
-        for log_date, session_count in cur.execute(f"""
-            SELECT substr(start_time, 1, 10), COUNT(*)
+        for log_date, session_count, account_key, host_key in cur.execute(f"""
+            SELECT substr(start_time, 1, 10),
+                   COUNT(*),
+                   LOWER(tiktok_username),
+                   LOWER(COALESCE(NULLIF(scheduled_host, ''), tiktok_username))
             FROM live_sessions
             WHERE {swhere}
-            GROUP BY substr(start_time, 1, 10)
+            GROUP BY substr(start_time, 1, 10), LOWER(tiktok_username),
+                     LOWER(COALESCE(NULLIF(scheduled_host, ''), tiktok_username))
         """, sparams).fetchall():
             parsed = _analytics_parse_date(log_date)
             if not parsed:
                 continue
             bucket = buckets.get(_analytics_bucket_key(parsed, group_by))
-            if bucket:
-                bucket["sessions"] += int(session_count or 0)
+            if not bucket:
+                continue
+            bucket["sessions"] += int(session_count or 0)
+            if account_key:
+                bucket["_accounts"].add(account_key)
+            if host_key:
+                bucket["_hosts"].add(host_key)
 
         return [
             {
@@ -642,8 +658,11 @@ def get_analytics_timeseries(start_date, end_date, group_by="day", host=None,
                 "label": buckets[k]["label"],
                 "coins": buckets[k]["coins"],
                 "gifts": buckets[k]["gifts"],
+                "gift_events": buckets[k]["gift_events"],
                 "viewers": len(buckets[k]["_viewers"]),
                 "sessions": buckets[k]["sessions"],
+                "active_accounts": len(buckets[k]["_accounts"]),
+                "active_hosts": len(buckets[k]["_hosts"]),
             }
             for k in order
         ]
