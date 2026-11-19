@@ -506,7 +506,7 @@ def view_viewers():
                         <form action="/admin/edit-coin" method="POST" class="edit-form">
                             <input type="hidden" name="tiktok_user" value="{{ v[0] }}">
                             <input type="number" name="new_coins" value="{{ v[2] }}" required>
-                            <button type="submit">Save</button>
+                            <button type="submit" class="icon-btn" title="Save" aria-label="Save">💾</button>
                         </form>
                     </td>
                 </tr>

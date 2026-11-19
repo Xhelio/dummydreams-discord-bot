@@ -53,9 +53,10 @@ button:disabled, .btn:disabled { opacity: 0.55; cursor: not-allowed; transform: 
 .btn-action { padding: 5px 9px; font-size: 0.74rem; text-decoration: none; border-radius: 6px; display: inline-flex; align-items: center; gap: 4px; }
 .btn-toggle { background: #a16207; color: #fff; }
 .btn-toggle:hover { background: #854d0e; }
-.edit-form { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.edit-form { display: flex; gap: 6px; align-items: center; flex-wrap: nowrap; }
 .edit-form input, .edit-form select { width: auto; min-width: 90px; padding: 6px 8px; }
 .edit-form button { padding: 6px 8px; font-size: 0.74rem; }
+.icon-btn { width: auto !important; min-width: 32px; padding: 6px 8px; font-size: 0.95rem; line-height: 1; display: inline-flex; align-items: center; justify-content: center; }
 .host-link, .viewer-link { color: #7dd3fc; text-decoration: underline; font-weight: 700; }
 .host-link:hover, .viewer-link:hover { color: #bae6fd; }
 .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 18px; }
@@ -161,8 +162,9 @@ textarea { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px soli
   .tt-bar .tt-count { width: 100%; }
   #summary-table th, #summary-table td { white-space: normal; }
   .terminal-row { flex-direction: column; gap: 4px; }
-  .edit-form { flex-wrap: wrap; }
-  .edit-form input, .edit-form select { width: 100%; }
+  .edit-form { flex-wrap: nowrap; }
+  .edit-form input, .edit-form select { width: auto; min-width: 72px; flex: 1 1 auto; }
+  .edit-form .icon-btn { width: auto; flex: 0 0 auto; }
 }
 @media (min-width: 520px) and (max-width: 760px) {
   .stat-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
