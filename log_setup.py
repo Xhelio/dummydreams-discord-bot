@@ -231,7 +231,7 @@ def _resolve_build_extra() -> dict:
     for key in ("GIT_COMMIT", "COMMIT_SHA", "COMMIT_HASH", "RENDER_GIT_COMMIT", "SOURCE_VERSION", "HEROKU_SLUG_COMMIT"):
         val = (os.environ.get(key) or "").strip()
         if val:
-            commit = val[:12]
+            commit = val[:7]
             break
     if not commit:
         try:
