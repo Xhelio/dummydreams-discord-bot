@@ -144,6 +144,7 @@ NAV_HTML = """
         <a href="/admin/monitor" class="nav-btn" data-path="/admin/monitor">📹 Live Monitor</a>
         <a href="/admin/activity" class="nav-btn" data-path="/admin/activity">📊 Activity Log</a>
         <a href="/admin/analytics" class="nav-btn" data-path="/admin/analytics">📈 Analytics</a>
+        <a href="/admin/timeline" class="nav-btn" data-path="/admin/timeline">🗓️ Timeline</a>
         <a href="/admin/verifications" class="nav-btn" data-path="/admin/verifications">🔐 Verification</a>
         <a href="/admin/settings" class="nav-btn" data-path="/admin/settings">⚙️ Settings</a>
     </nav>
@@ -303,6 +304,7 @@ AUTO_REFRESH_JS = """
     setInterval(function() {
         if (document.hidden) return;
         if (window.location.pathname.indexOf('/admin/settings') === 0) return;
+        if (window.location.pathname.indexOf('/admin/timeline') === 0) return;
         if (document.getElementById('copy-log-modal')) return;
         const ae = document.activeElement;
         if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT' || ae.isContentEditable)) return;

@@ -3536,3 +3536,221 @@ def cancel_pending_verification(discord_id):
             print(f"[DB] cancel_pending_verification skipped after transient error: {e}")
         else:
             raise
+
+
+# ----------------------------- Timeline -----------------------------
+
+
+def _wib_localize(dt_naive, wib=None):
+    wib = wib or pytz.timezone("Asia/Jakarta")
+    try:
+        return wib.localize(dt_naive)
+    except Exception:
+        try:
+            return dt_naive.replace(tzinfo=wib)
+        except Exception:
+            return dt_naive
+
+
+def _parse_wib_dt(value, wib=None):
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s or s == "-":
+        return None
+    wib = wib or pytz.timezone("Asia/Jakarta")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return _wib_localize(datetime.strptime(s[:19], fmt), wib)
+        except Exception:
+            continue
+    return None
+
+
+def get_timeline_sessions_for_date(date_str: str) -> list:
+    """Live sessions that overlap the given WIB date (YYYY-MM-DD).
+
+    Returns dicts with session, host, stream account/channel, and times
+    clamped to the day window for Gantt rendering.
+    """
+    wib = pytz.timezone("Asia/Jakarta")
+    try:
+        day = datetime.strptime(str(date_str)[:10], "%Y-%m-%d").date()
+    except Exception:
+        day = datetime.now(wib).date()
+    day_start = _wib_localize(datetime.combine(day, datetime.min.time()), wib)
+    day_end = day_start + timedelta(days=1)
+    now = datetime.now(wib)
+
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        rows = cur.execute(
+            """
+            SELECT s.session_id, s.tiktok_username,
+                   COALESCE(h.display_name, s.tiktok_username) AS channel_name,
+                   COALESCE(NULLIF(s.scheduled_host, ''), '') AS host_name,
+                   s.start_time, s.end_time, s.duration_seconds, s.paused_seconds,
+                   s.total_coins
+            FROM live_sessions s
+            LEFT JOIN hosts h ON LOWER(h.tiktok_username) = LOWER(s.tiktok_username)
+            WHERE substr(s.start_time, 1, 10) <= ?
+              AND substr(COALESCE(NULLIF(s.end_time, ''), ?), 1, 10) >= ?
+            ORDER BY s.start_time ASC, s.session_id ASC
+            """,
+            (day.isoformat(), now.strftime("%Y-%m-%d %H:%M:%S"), day.isoformat()),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    out = []
+    for r in rows:
+        start_dt = _parse_wib_dt(r[4], wib)
+        if not start_dt:
+            continue
+        end_dt = _parse_wib_dt(r[5], wib)
+        if end_dt is None:
+            # Ongoing session: clamp to now (or end of day for past days).
+            end_dt = now if now < day_end else day_end
+        # Ignore inverted/empty intervals.
+        if end_dt <= start_dt:
+            continue
+        seg_start = max(start_dt, day_start)
+        seg_end = min(end_dt, day_end)
+        if seg_end <= seg_start:
+            continue
+        host_name = str(r[3] or "").strip()
+        if host_name in ("", "Host", "-"):
+            host_name = "-"
+        # Portion within the selected day (seconds), for per-day totals.
+        day_seconds = int((seg_end - seg_start).total_seconds())
+        out.append({
+            "session_id": int(r[0]),
+            "tiktok_username": str(r[1] or "").lower().lstrip("@"),
+            "channel_name": str(r[2] or r[1] or "").strip(),
+            "host_name": host_name,
+            "host_key": (host_name if host_name != "-" else "").strip().lower(),
+            "start_time": str(r[4] or ""),
+            "end_time": str(r[5] or "") if r[5] else None,
+            "seg_start": seg_start.isoformat(),
+            "seg_end": seg_end.isoformat(),
+            "seg_start_min": round((seg_start - day_start).total_seconds() / 60.0, 3),
+            "seg_end_min": round((seg_end - day_start).total_seconds() / 60.0, 3),
+            "duration_seconds": int(r[6] or 0),
+            "day_seconds": max(0, day_seconds),
+            "total_coins": int(r[8] or 0),
+            "is_open": r[5] in (None, ""),
+        })
+    return out
+
+
+def get_timeline_daily_summary(date_str: str) -> list:
+    """Per (host, stream account) summary for a WIB day.
+
+    Duration comes from live sessions overlapping the day; coins come from
+    gift_logs on that log_date attributed to the same host+account.
+    """
+    wib = pytz.timezone("Asia/Jakarta")
+    try:
+        day = datetime.strptime(str(date_str)[:10], "%Y-%m-%d").date()
+    except Exception:
+        day = datetime.now(wib).date()
+    day_str = day.isoformat()
+
+    sessions = get_timeline_sessions_for_date(day_str)
+
+    # Aggregate duration by (host_key, account_key). Keep display names.
+    dur_map = {}
+    for s in sessions:
+        host_disp = s["host_name"] if s["host_name"] != "-" else "-"
+        account = s["tiktok_username"]
+        key = (host_disp.lower() if host_disp != "-" else "-", account)
+        entry = dur_map.setdefault(key, {
+            "host_name": host_disp,
+            "host_key": s["host_key"],
+            "account": account,
+            "channel_name": s["channel_name"],
+            "total_duration": 0,
+            "session_durations": [],
+            "session_count": 0,
+        })
+        ds = int(s.get("day_seconds") or 0)
+        entry["total_duration"] += ds
+        entry["session_durations"].append(ds)
+        entry["session_count"] += 1
+        # Prefer a real host label if we only had '-'.
+        if entry["host_name"] == "-" and host_disp != "-":
+            entry["host_name"] = host_disp
+            entry["host_key"] = s["host_key"]
+
+    # Coins from gift_logs for that day, grouped by host+target account.
+    coin_map = {}
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        rows = cur.execute(
+            """
+            SELECT COALESCE(NULLIF(g.host_name, ''), NULLIF(g.scheduled_host, ''), '-') AS host_name,
+                   LOWER(g.target_username) AS account,
+                   COALESCE(MAX(NULLIF(h.display_name, '')), MAX(g.target_username)) AS channel_name,
+                   COALESCE(SUM(g.coins), 0) AS coins
+            FROM gift_logs g
+            LEFT JOIN hosts h ON LOWER(h.tiktok_username) = LOWER(g.target_username)
+            WHERE substr(g.log_date, 1, 10) = ?
+            GROUP BY 1, 2
+            """,
+            (day_str,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    for host_name, account, channel_name, coins in rows:
+        host_disp = str(host_name or "-").strip() or "-"
+        if host_disp == "Host":
+            host_disp = "-"
+        acct = str(account or "").lower().lstrip("@")
+        key = (host_disp.lower() if host_disp != "-" else "-", acct)
+        entry = coin_map.setdefault(key, {
+            "host_name": host_disp,
+            "host_key": "" if host_disp == "-" else host_disp.lower(),
+            "account": acct,
+            "channel_name": str(channel_name or acct),
+            "coins": 0,
+        })
+        entry["coins"] += int(coins or 0)
+        if entry["host_name"] == "-" and host_disp != "-":
+            entry["host_name"] = host_disp
+            entry["host_key"] = host_disp.lower()
+        if (not entry["channel_name"] or entry["channel_name"] == acct) and channel_name:
+            entry["channel_name"] = str(channel_name)
+
+    # Merge: include any key that has duration or coins.
+    keys = set(dur_map.keys()) | set(coin_map.keys())
+    out = []
+    for key in keys:
+        d = dur_map.get(key, {})
+        c = coin_map.get(key, {})
+        host_name = d.get("host_name") or c.get("host_name") or "-"
+        account = d.get("account") or c.get("account") or ""
+        channel_name = d.get("channel_name") or c.get("channel_name") or account
+        total_duration = int(d.get("total_duration") or 0)
+        coins = int(c.get("coins") or 0)
+        session_durations = list(d.get("session_durations") or [])
+        session_count = int(d.get("session_count") or len(session_durations))
+        # Skip completely empty rows.
+        if total_duration <= 0 and coins <= 0 and session_count <= 0:
+            continue
+        out.append({
+            "host_name": host_name,
+            "host_key": "" if host_name == "-" else host_name.lower(),
+            "account": account,
+            "channel_name": channel_name,
+            "total_duration": total_duration,
+            "session_durations": session_durations,
+            "session_count": session_count,
+            "total_coins": coins,
+        })
+
+    # Sort: host name, then channel/account.
+    out.sort(key=lambda x: ((x["host_name"] or "").lower(), (x["channel_name"] or "").lower(), x["account"]))
+    return out

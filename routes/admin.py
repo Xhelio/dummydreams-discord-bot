@@ -1,4 +1,4 @@
-from flask import Blueprint, render_template_string, request, redirect
+from flask import Blueprint, render_template_string, request, redirect, jsonify
 from urllib.parse import quote_plus
 import asyncio
 import os
@@ -38,6 +38,8 @@ from db import (
     get_analytics_viewer_host_spend,
     get_analytics_host_options,
     get_analytics_account_options,
+    get_timeline_sessions_for_date,
+    get_timeline_daily_summary,
 )
 from runtime_status import get_live_snapshot, clear_all_live
 from verification import fetch_tiktok_display_name
@@ -700,13 +702,17 @@ def view_monitor():
     for h in host_rows:
         uname = (h[1] or "").lower()
         live_item = live_snapshot.get(uname)
+        live_host = (live_item or {}).get("host")
+        if live_host in (None, "", "Host", "-"):
+            live_host = None
+        host_name = live_host or open_hosts.get(uname) or "-"
         hosts.append({
             "host_id": h[0],
             "username": h[1],
             "display_name": h[2] or h[1],
             "is_active": bool(h[3]),
             "is_live": bool(live_item),
-            "host_name": (live_item or {}).get("host") or open_hosts.get(uname) or h[2] or h[1],
+            "host_name": host_name,
         })
 
     # Observer/connection diagnostics (rate limits, offline polling, cooldowns...).
@@ -2716,3 +2722,445 @@ def reset_live_state_route():
     except Exception as e:
         print(f"[Admin] Failed to reset live state/reconnect: {e}")
     return redirect('/admin/monitor?msg=' + quote_plus('Live state di-reset dan reconnect diminta.') + '&msg_type=warning')
+
+
+# ----------------------------- Live Timeline -----------------------------
+
+
+def _timeline_today_wib() -> str:
+    wib = pytz.timezone("Asia/Jakarta")
+    return datetime.now(wib).strftime("%Y-%m-%d")
+
+
+@admin_bp.route('/timeline/data', methods=['GET'])
+def timeline_data():
+    date_str = (request.args.get("date") or _timeline_today_wib()).strip()
+    try:
+        datetime.strptime(date_str[:10], "%Y-%m-%d")
+        date_str = date_str[:10]
+    except Exception:
+        date_str = _timeline_today_wib()
+
+    sessions = get_timeline_sessions_for_date(date_str)
+    summary = get_timeline_daily_summary(date_str)
+    wib = pytz.timezone("Asia/Jakarta")
+    now = datetime.now(wib)
+    return jsonify({
+        "date": date_str,
+        "today": now.strftime("%Y-%m-%d"),
+        "now_min": round((now.hour * 60) + now.minute + (now.second / 60.0), 3),
+        "sessions": sessions,
+        "summary": summary,
+    })
+
+
+@admin_bp.route('/timeline', methods=['GET'])
+def view_timeline():
+    date_str = (request.args.get("date") or _timeline_today_wib()).strip()
+    try:
+        datetime.strptime(date_str[:10], "%Y-%m-%d")
+        date_str = date_str[:10]
+    except Exception:
+        date_str = _timeline_today_wib()
+
+    html = r"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Live Timeline</title>
+        <style>BASE_CSS_PLACEHOLDER</style>
+        <style>
+            .tl-controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px; }
+            .tl-controls .group { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+            .tl-controls label { font-size: 0.82rem; color: #94a3b8; font-weight: 600; }
+            .tl-controls input[type="date"] { min-width: 160px; }
+            .tl-btn { padding: 7px 10px; font-size: 0.8rem; border-radius: 8px; }
+            .tl-legend { color: #94a3b8; font-size: 0.8rem; margin: 6px 0 10px; }
+            .tl-wrap { position: relative; border: 1px solid #334155; border-radius: 10px; background: #0b1220; overflow: auto; max-height: 70vh; }
+            .tl-inner { position: relative; min-width: 900px; }
+            .tl-header { position: sticky; top: 0; z-index: 5; display: flex; background: #0f172a; border-bottom: 1px solid #334155; }
+            .tl-corner { position: sticky; left: 0; z-index: 6; width: 240px; min-width: 240px; padding: 10px 12px; font-weight: 700; color: #7dd3fc; background: #0f172a; border-right: 1px solid #334155; }
+            .tl-hours { position: relative; height: 40px; flex: 1; }
+            .tl-hour-mark { position: absolute; top: 0; bottom: 0; border-left: 1px solid #1e293b; font-size: 0.7rem; color: #64748b; padding: 10px 0 0 4px; }
+            .tl-body { position: relative; }
+            .tl-row { display: flex; border-bottom: 1px solid #1e293b; min-height: 34px; }
+            .tl-row.group-row { background: rgba(2,132,199,0.08); }
+            .tl-label { position: sticky; left: 0; z-index: 4; width: 240px; min-width: 240px; padding: 8px 12px; background: #0b1220; border-right: 1px solid #334155; display: flex; flex-direction: column; justify-content: center; gap: 2px; }
+            .tl-row.group-row .tl-label { background: #0f172a; font-weight: 700; color: #e2e8f0; }
+            .tl-label .sub { font-size: 0.74rem; color: #94a3b8; font-weight: 500; }
+            .tl-track { position: relative; flex: 1; min-height: 34px; }
+            .tl-gridline { position: absolute; top: 0; bottom: 0; border-left: 1px solid #111827; }
+            .tl-gridline.major { border-left-color: #1e293b; }
+            .tl-bar { position: absolute; top: 4px; height: calc(100% - 8px); min-width: 3px; border-radius: 6px; background: linear-gradient(90deg, #0284c7, #38bdf8); border: 1px solid rgba(125,211,252,0.35); cursor: pointer; overflow: hidden; }
+            .tl-bar:hover { filter: brightness(1.15); box-shadow: 0 0 0 1px rgba(125,211,252,0.5); }
+            .tl-bar .txt { font-size: 0.7rem; color: #e0f2fe; padding: 2px 6px; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; line-height: 1.2; }
+            .tl-now { position: absolute; top: 0; bottom: 0; width: 2px; background: #ef4444; z-index: 3; pointer-events: none; }
+            .tl-now::before { content: 'now'; position: absolute; top: -2px; left: 4px; font-size: 0.65rem; color: #fca5a5; background: rgba(127,29,29,0.7); padding: 1px 4px; border-radius: 4px; }
+            .tl-empty { padding: 24px; text-align: center; color: #64748b; font-style: italic; }
+            .tl-detail { position: fixed; right: 18px; bottom: 18px; width: min(420px, calc(100vw - 36px)); max-height: 70vh; overflow: auto; background: #111827; border: 1px solid #334155; border-radius: 12px; box-shadow: 0 16px 40px rgba(0,0,0,0.45); padding: 14px 16px; z-index: 50; display: none; }
+            .tl-detail h3 { margin-bottom: 8px; color: #7dd3fc; font-size: 1rem; }
+            .tl-detail .close { float: right; background: #334155; border: none; color: #e2e8f0; width: 28px; height: 28px; border-radius: 6px; cursor: pointer; font-size: 16px; line-height: 1; }
+            .tl-detail table { min-width: 0; width: 100%; }
+            .tl-detail th, .tl-detail td { white-space: normal; font-size: 0.82rem; padding: 6px 8px; }
+            .summary-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 18px 0 10px; }
+            .summary-bar input[type="date"] { min-width: 160px; }
+            @media (max-width: 760px) {
+              .tl-corner, .tl-label { width: 170px; min-width: 170px; }
+              .tl-inner { min-width: 720px; }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <div>
+                <h1>🗓️ Live Timeline</h1>
+                <div class="page-subtitle">Gantt timeline live session per host dan jam (WIB), dikelompokkan per channel target.</div>
+            </div>
+        </div>
+        NAV_HTML_PLACEHOLDER
+
+        <div class="card">
+            <h2>Timeline Sesi Live</h2>
+            <div class="tl-controls">
+                <div class="group">
+                    <label for="tl-date">Tanggal</label>
+                    <button class="tl-btn btn-secondary" id="tl-prev" title="Hari sebelumnya">◀</button>
+                    <input type="date" id="tl-date" value="{{ date_str }}">
+                    <button class="tl-btn btn-secondary" id="tl-next" title="Hari berikutnya">▶</button>
+                    <button class="tl-btn" id="tl-today">Hari ini</button>
+                </div>
+                <div class="group">
+                    <label>Zoom waktu</label>
+                    <button class="tl-btn btn-secondary" id="tl-zoom-out" title="Perkecil">−</button>
+                    <button class="tl-btn btn-secondary" id="tl-zoom-in" title="Perbesar">+</button>
+                </div>
+                <div class="group">
+                    <label>Kerapatan baris</label>
+                    <button class="tl-btn btn-secondary" id="tl-row-down" title="Rapatkan">−</button>
+                    <button class="tl-btn btn-secondary" id="tl-row-up" title="Renggangkan">+</button>
+                </div>
+                <div class="group">
+                    <button class="tl-btn btn-secondary" id="tl-reset">Reset tampilan</button>
+                    <button class="tl-btn" id="tl-reload">Muat ulang</button>
+                </div>
+            </div>
+            <div class="tl-legend">Sumbu X: waktu (00:00–24:00 WIB) · Sumbu Y: host · Kategori: channel target. Hanya akun/host yang punya data pada hari ini yang ditampilkan. Klik bar untuk rincian. Geser area timeline untuk melihat jam lain; garis merah = waktu sekarang (jika hari ini).</div>
+            <div id="tl-status" class="section-note">Memuat data...</div>
+            <div class="tl-wrap" id="tl-wrap">
+                <div class="tl-inner" id="tl-inner"></div>
+            </div>
+        </div>
+
+        <div class="card" id="summary-card">
+            <h2>Rangkuman Harian</h2>
+            <div class="summary-bar">
+                <button class="tl-btn btn-secondary" id="sum-prev" title="Hari sebelumnya">◀</button>
+                <input type="date" id="sum-date" value="{{ date_str }}">
+                <button class="tl-btn btn-secondary" id="sum-next" title="Hari berikutnya">▶</button>
+                <button class="tl-btn" id="sum-today">Hari ini</button>
+            </div>
+            <div class="table-scroll">
+                <table id="summary-table">
+                    <thead>
+                        <tr>
+                            <th>Nama Host</th>
+                            <th>Akun Stream (Channel)</th>
+                            <th>Total Durasi (hari ini)</th>
+                            <th>Total Koin (hari ini)</th>
+                        </tr>
+                    </thead>
+                    <tbody id="summary-body">
+                        <tr><td colspan="4" class="empty-state">Memuat...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="tl-detail" id="tl-detail" role="dialog" aria-label="Rincian sesi">
+            <button class="close" id="tl-detail-close" title="Tutup">×</button>
+            <h3>Rincian Sesi</h3>
+            <div id="tl-detail-body"></div>
+        </div>
+
+        AUTO_REFRESH_JS_PLACEHOLDER
+        <script>
+        (function(){
+            const dateInput = document.getElementById('tl-date');
+            const sumDateInput = document.getElementById('sum-date');
+            const inner = document.getElementById('tl-inner');
+            const wrap = document.getElementById('tl-wrap');
+            const statusEl = document.getElementById('tl-status');
+            const detail = document.getElementById('tl-detail');
+            const detailBody = document.getElementById('tl-detail-body');
+            let pxPerHour = 120;
+            let rowHeight = 38;
+            let currentData = null;
+            let drag = null;
+
+            function pad(n){ return String(n).padStart(2,'0'); }
+            function fmtClock(mins){
+                mins = Math.max(0, Math.min(1440, mins));
+                const h = Math.floor(mins/60); const m = Math.round(mins%60);
+                return pad(h%24)+':'+pad(m===60?0:m);
+            }
+            function fmtDur(sec){
+                sec = Math.max(0, Math.round(Number(sec)||0));
+                const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60;
+                const parts = [];
+                if (h) parts.push(h+'j');
+                if (m || h) parts.push(m+'m');
+                parts.push(s+'d');
+                return parts.join(' ');
+            }
+            function fmtDurParts(durations){
+                const total = durations.reduce((a,b)=>a+(Number(b)||0),0);
+                let text = fmtDur(total);
+                if (durations.length > 1) {
+                    const parts = durations.map(d=>fmtDur(d)).join(' + ');
+                    text += ' <small style="color:#94a3b8">(' + parts + ')</small>';
+                }
+                return text;
+            }
+            function esc(s){
+                return String(s==null?'':s).replace(/[&<>"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+            }
+            function shiftDate(str, delta){
+                const d = new Date(str+'T00:00:00');
+                if (isNaN(d)) return str;
+                d.setDate(d.getDate()+delta);
+                return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate());
+            }
+            function setDate(str, reload){
+                dateInput.value = str; sumDateInput.value = str;
+                const url = new URL(window.location.href);
+                url.searchParams.set('date', str);
+                window.history.replaceState({}, '', url.toString());
+                if (reload !== false) load();
+            }
+            function getNowMinJakarta(){
+                try {
+                    const parts = new Intl.DateTimeFormat('en-GB', { timeZone:'Asia/Jakarta', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false }).formatToParts(new Date());
+                    const get = t => Number((parts.find(p=>p.type===t)||{}).value||0);
+                    let h=get('hour'); if(h===24) h=0;
+                    return h*60 + get('minute') + get('second')/60;
+                } catch(e){
+                    const d = new Date();
+                    return d.getHours()*60 + d.getMinutes() + d.getSeconds()/60;
+                }
+            }
+
+            function buildModel(data){
+                const sessions = Array.isArray(data.sessions)?data.sessions:[];
+                // Group: channel (target) -> host -> sessions
+                const chanMap = new Map();
+                sessions.forEach(s => {
+                    const host = (s.host_name && s.host_name !== '-') ? s.host_name : null;
+                    if (!host) return; // hide items without detected host value
+                    const chKey = (s.tiktok_username||'').toLowerCase() || ('ch:'+s.channel_name);
+                    if (!chanMap.has(chKey)) chanMap.set(chKey, { key: chKey, name: s.channel_name || s.tiktok_username || '-', account: s.tiktok_username || '', hosts: new Map() });
+                    const ch = chanMap.get(chKey);
+                    const hKey = host.toLowerCase();
+                    if (!ch.hosts.has(hKey)) ch.hosts.set(hKey, { name: host, sessions: [] });
+                    ch.hosts.get(hKey).sessions.push(s);
+                });
+                const channels = Array.from(chanMap.values()).sort((a,b)=> (a.name||'').localeCompare(b.name||''));
+                channels.forEach(ch => {
+                    ch.hostRows = Array.from(ch.hosts.values()).sort((a,b)=> (a.name||'').localeCompare(b.name||''));
+                });
+                return channels;
+            }
+
+            function render(){
+                if (!currentData) return;
+                const channels = buildModel(currentData);
+                const timelineWidth = 24 * pxPerHour;
+                const labelW = 240;
+                let rowsHtml = '';
+                let barHtml = '';
+
+                if (!channels.length) {
+                    inner.innerHTML = '<div class="tl-header"><div class="tl-corner">Channel / Host</div><div class="tl-hours" style="width:'+timelineWidth+'px"></div></div><div class="tl-empty">Tidak ada sesi live dengan host terdeteksi pada tanggal ini.</div>';
+                    renderSummary(currentData.summary||[]);
+                    statusEl.textContent = 'Tidak ada data timeline untuk ' + (currentData.date||'');
+                    return;
+                }
+
+                // hour header
+                let hours = '';
+                for (let h=0; h<=24; h++) {
+                    const left = h*pxPerHour;
+                    if (h < 24) hours += '<div class="tl-hour-mark" style="left:'+left+'px;width:'+pxPerHour+'px">'+pad(h)+':00</div>';
+                    else hours += '<div class="tl-hour-mark" style="left:'+left+'px;border-left-color:#334155"></div>';
+                }
+
+                let body = '';
+                let rowIndex = 0;
+                channels.forEach(ch => {
+                    // category header row
+                    const gTop = rowIndex * rowHeight;
+                    body += '<div class="tl-row group-row" style="height:'+rowHeight+'px">'
+                         +  '<div class="tl-label"><div>'+esc(ch.name)+'</div><div class="sub">@'+esc(ch.account)+'</div></div>'
+                         +  '<div class="tl-track" style="width:'+timelineWidth+'px;height:'+rowHeight+'px">'
+                         +    gridLines(timelineWidth, rowHeight)
+                         +  '</div></div>';
+                    rowIndex++;
+                    ch.hostRows.forEach(hr => {
+                        const top = rowIndex * rowHeight;
+                        let bars = gridLines(timelineWidth, rowHeight);
+                        hr.sessions.forEach((s, idx) => {
+                            const left = (Number(s.seg_start_min)||0)/60*pxPerHour;
+                            const right = (Number(s.seg_end_min)||0)/60*pxPerHour;
+                            const w = Math.max(3, right-left);
+                            const label = fmtClock(s.seg_start_min)+'–'+fmtClock(s.seg_end_min);
+                            bars += '<div class="tl-bar" data-sid="'+esc(s.session_id)+'" data-idx="'+rowIndex+'" data-si="'+idx+'" '
+                                 +  'style="left:'+left+'px;width:'+w+'px" title="'+esc(label+' · '+(s.channel_name||'')+' · '+(s.host_name||''))+'">'
+                                 +  '<div class="txt">'+esc(label)+'</div></div>';
+                        });
+                        body += '<div class="tl-row" style="height:'+rowHeight+'px">'
+                             +  '<div class="tl-label"><div>'+esc(hr.name)+'</div><div class="sub">Host</div></div>'
+                             +  '<div class="tl-track" data-row="'+rowIndex+'" style="width:'+timelineWidth+'px;height:'+rowHeight+'px">'+bars+'</div></div>';
+                        rowIndex++;
+                    });
+                });
+
+                // now line
+                let nowLine = '';
+                if (currentData.date === currentData.today) {
+                    const nm = getNowMinJakarta();
+                    nowLine = '<div class="tl-now" style="left:'+(nm/60*pxPerHour)+'px;height:'+ (rowIndex*rowHeight) +'px"></div>';
+                }
+
+                inner.innerHTML = ''
+                  + '<div class="tl-header"><div class="tl-corner">Channel / Host</div><div class="tl-hours" style="width:'+timelineWidth+'px">'+hours+'</div></div>'
+                  + '<div class="tl-body" style="height:'+ (rowIndex*rowHeight) +'px;width:'+ (labelW+timelineWidth) +'px">'+body+nowLine+'</div>';
+
+                // click handlers
+                inner.querySelectorAll('.tl-bar').forEach(el => {
+                    el.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        const sid = Number(el.getAttribute('data-sid'));
+                        const s = (currentData.sessions||[]).find(x=>Number(x.session_id)===sid);
+                        if (s) showDetail(s);
+                    });
+                });
+
+                renderSummary(currentData.summary||[]);
+                statusEl.textContent = 'Tanggal ' + esc(currentData.date) + ' · ' + channels.length + ' channel, ' + (currentData.sessions||[]).length + ' sesi (host terdeteksi).';
+            }
+
+            function gridLines(width, height){
+                let g = '';
+                for (let h=0; h<=24; h++) {
+                    const left = h*pxPerHour;
+                    g += '<div class="tl-gridline '+(h%6===0?'major':'')+'" style="left:'+left+'px;height:'+height+'px"></div>';
+                }
+                return g;
+            }
+
+            function showDetail(s){
+                const rows = [
+                    ['Session ID', s.session_id],
+                    ['Channel Target', (s.channel_name||'-') + (s.tiktok_username? ' (@'+s.tiktok_username+')':'')],
+                    ['Host Terdeteksi', s.host_name || '-'],
+                    ['Mulai', s.start_time || '-'],
+                    ['Selesai', s.end_time || (s.is_open ? 'Masih live / belum ditutup' : '-')],
+                    ['Durasi sesi', fmtDur(s.duration_seconds||0)],
+                    ['Durasi pada hari ini', fmtDur(s.day_seconds||0)],
+                    ['Total koin (sesi)', (Number(s.total_coins)||0).toLocaleString('id-ID') + ' c'],
+                    ['Rentang tampil', fmtClock(s.seg_start_min)+' – '+fmtClock(s.seg_end_min) + ' WIB'],
+                ];
+                let html = '<table><tbody>';
+                rows.forEach(r => { html += '<tr><th style="width:42%">'+esc(r[0])+'</th><td>'+esc(String(r[1]))+'</td></tr>'; });
+                html += '</tbody></table>';
+                detailBody.innerHTML = html;
+                detail.style.display = 'block';
+            }
+
+            function renderSummary(summary){
+                const tbody = document.getElementById('summary-body');
+                if (!summary || !summary.length) {
+                    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">Tidak ada data untuk tanggal ini.</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = summary.map(r => {
+                    const host = r.host_name && r.host_name !== '-' ? r.host_name : '-';
+                    const account = (r.channel_name || r.account || '-') + (r.account ? ' <small style="color:#94a3b8">@'+esc(r.account)+'</small>' : '');
+                    const dur = fmtDurParts(r.session_durations && r.session_durations.length ? r.session_durations : [r.total_duration||0]);
+                    const coins = (Number(r.total_coins)||0).toLocaleString('id-ID') + ' c';
+                    return '<tr>'
+                        + '<td>' + (host === '-' ? '<span style="color:#94a3b8">-</span>' : '<strong>'+esc(host)+'</strong>') + '</td>'
+                        + '<td>' + account + '</td>'
+                        + '<td>' + dur + '</td>'
+                        + '<td><span class="badge" style="background:#ca8a04;">' + coins + '</span></td>'
+                        + '</tr>';
+                }).join('');
+            }
+
+            async function load(){
+                const d = dateInput.value || sumDateInput.value;
+                statusEl.textContent = 'Memuat data...';
+                try {
+                    const res = await fetch('/admin/timeline/data?date=' + encodeURIComponent(d), { cache: 'no-store' });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data && data.error || ('HTTP '+res.status));
+                    currentData = data;
+                    dateInput.value = data.date; sumDateInput.value = data.date;
+                    render();
+                } catch(e){
+                    statusEl.textContent = 'Gagal memuat data: ' + (e && e.message ? e.message : e);
+                    inner.innerHTML = '<div class="tl-empty">Gagal memuat data timeline.</div>';
+                }
+            }
+
+            // controls
+            document.getElementById('tl-prev').onclick = ()=> setDate(shiftDate(dateInput.value,-1));
+            document.getElementById('tl-next').onclick = ()=> setDate(shiftDate(dateInput.value,1));
+            document.getElementById('sum-prev').onclick = ()=> setDate(shiftDate(sumDateInput.value,-1));
+            document.getElementById('sum-next').onclick = ()=> setDate(shiftDate(sumDateInput.value,1));
+            document.getElementById('tl-today').onclick = ()=> setDate('{{ _today }}');
+            document.getElementById('sum-today').onclick = ()=> setDate('{{ _today }}');
+            dateInput.onchange = ()=> setDate(dateInput.value);
+            sumDateInput.onchange = ()=> setDate(sumDateInput.value);
+            document.getElementById('tl-zoom-in').onclick = ()=> { pxPerHour = Math.min(480, pxPerHour + 20); render(); };
+            document.getElementById('tl-zoom-out').onclick = ()=> { pxPerHour = Math.max(40, pxPerHour - 20); render(); };
+            document.getElementById('tl-row-up').onclick = ()=> { rowHeight = Math.min(80, rowHeight + 6); render(); };
+            document.getElementById('tl-row-down').onclick = ()=> { rowHeight = Math.max(24, rowHeight - 6); render(); };
+            document.getElementById('tl-reset').onclick = ()=> { pxPerHour = 120; rowHeight = 38; render(); };
+            document.getElementById('tl-reload').onclick = ()=> load();
+            document.getElementById('tl-detail-close').onclick = ()=> { detail.style.display = 'none'; };
+            document.addEventListener('click', (e)=>{ if (detail.style.display==='block' && !detail.contains(e.target) && !(e.target.closest && e.target.closest('.tl-bar'))) detail.style.display='none'; });
+
+            // drag to pan
+            wrap.addEventListener('mousedown', (e)=>{
+                if (e.target.closest('.tl-bar')) return;
+                drag = { x: e.clientX, y: e.clientY, sl: wrap.scrollLeft, st: wrap.scrollTop };
+                wrap.style.cursor = 'grabbing';
+            });
+            window.addEventListener('mousemove', (e)=>{
+                if (!drag) return;
+                wrap.scrollLeft = drag.sl - (e.clientX - drag.x);
+                wrap.scrollTop = drag.st - (e.clientY - drag.y);
+            });
+            window.addEventListener('mouseup', ()=>{ if (drag){ drag=null; wrap.style.cursor=''; } });
+
+            // Ctrl+wheel zoom time
+            wrap.addEventListener('wheel', (e)=>{
+                if (!e.ctrlKey) return;
+                e.preventDefault();
+                pxPerHour = Math.max(40, Math.min(480, pxPerHour + (e.deltaY < 0 ? 15 : -15)));
+                render();
+            }, { passive: false });
+
+            load();
+            // refresh now-line periodically when viewing today
+            setInterval(()=>{ if (currentData && currentData.date === currentData.today) render(); }, 60000);
+        })();
+        </script>
+    </body>
+    </html>
+    """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
+
+    today = _timeline_today_wib()
+    return render_template_string(html, date_str=date_str, _today=today)
