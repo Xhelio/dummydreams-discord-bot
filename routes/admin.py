@@ -88,10 +88,8 @@ def view_data():
         NAV_HTML_PLACEHOLDER
         
         <div class="card">
-            <h2>📌 Admin Management Menu</h2>
-            <p style="color: #94a3b8; font-size: 0.95rem; margin-bottom: 16px;">
-                Use the modules above to manage viewer and coin data, monitor realtime live sessions, or review the activity log.
-            </p>
+            <h2>📌 Admin Menu</h2>
+            <p class="muted" style="font-size:0.9rem;">Manage viewers, coins, live monitoring, and activity logs from the modules above.</p>
         </div>
 
         <div class="card">
@@ -137,32 +135,27 @@ def view_data():
             </div>
             {% if integrity.stored_total > 0 and integrity.logged_total == 0 %}
             <div class="notice-danger">
-                Stored coin total exists ({{ integrity.stored_total }} c) but the gift log is still empty.
-                This usually means historical gift details were never recorded or writes failed.
-                Jalankan <strong>Tes Tulis Gift Log</strong> untuk melihat error database, lalu
-                <strong>Backfill Gift Log Historis</strong> agar data lama ikut tampil di analytics.
+                Coin totals exist ({{ integrity.stored_total }} c) but the gift log is empty.
+                <span class="info-i" data-tip="Run 'Test Gift Log Write' to check DB errors, then 'Backfill Gift Log' so old data appears in analytics.">!</span>
             </div>
             {% elif integrity.today_log_rows == 0 and integrity.today_total > 0 %}
             <div class="notice-warning">
-                Koin today masuk ({{ integrity.today_total }} c) tapi belum ada rows gift log today.
-                Kalau gift baru saja masuk, tunggu refresh berikutnya; kalau tetap kosong, jalankan
-                <strong>Tes Tulis Gift Log</strong> dan cek Activity Log untuk pesan <strong>[GiftLog]</strong>.
+                Coins recorded today ({{ integrity.today_total }} c) but no gift log rows yet.
+                <span class="info-i" data-tip="If gifts just arrived, wait for the next refresh. Otherwise run 'Test Gift Log Write' and check Activity Log for [GiftLog] messages.">!</span>
             </div>
             {% endif %}
             {% if integrity.stored_total != integrity.logged_total %}
             <div class="notice-warning">
-                Ada selisih {{ integrity.stored_total - integrity.logged_total }} c antara total stored dan gift log.
-                Untuk data historis yang detail gift-nya tidak ada, gunakan
-                <strong>Backfill Gift Log Historis</strong>. <strong>Recalculate</strong> hanya untuk
-                menyamakan total dari gift log yang sudah ada (dan tidak akan menghapus total jika log masih kosong).
+                Difference of {{ integrity.stored_total - integrity.logged_total }} c between stored totals and gift log.
+                <span class="info-i" data-tip="Use 'Backfill Gift Log' for missing historical details. 'Recalculate' only aligns totals with existing logs and will not erase totals when the log is empty.">!</span>
             </div>
             {% else %}
-            <div class="notice-success">✅ Total koin konsisten dengan gift log.</div>
+            <div class="notice-success">✅ Coin totals match the gift log.</div>
             {% endif %}
             {% if integrity.mismatches %}
             <div class="table-scroll">
             <table>
-                <tr><th>Viewer</th><th>Tersimpan</th><th>Di gift log</th><th>Selisih</th></tr>
+                <tr><th>Viewer</th><th>Stored</th><th>Gift log</th><th>Difference</th></tr>
                 {% for m in integrity.mismatches %}
                 <tr>
                     <td><a href="/admin/viewer/{{ m.viewer }}" class="viewer-link">@{{ m.viewer }}</a></td>
@@ -175,13 +168,13 @@ def view_data():
             </div>
             {% endif %}
             <form action="/admin/gift-log-selftest" method="POST" style="display:inline-block; margin-top: 12px; margin-right: 8px;">
-                <button type="submit" class="btn-action" style="background:#7c3aed;">🧪 Tes Tulis Gift Log</button>
+                <button type="submit" class="btn-action" style="background:#7c3aed;">🧪 Test Gift Log Write</button>
             </form>
-            <form action="/admin/backfill-gift-logs" method="POST" onsubmit="return confirm('Isi gift log historis dari data harian + saldo awal stored? Baris buatan akan ditandai Backfill dan tidak menimpa detail asli.');" style="display:inline-block; margin-top: 12px; margin-right: 8px;">
-                <button type="submit" class="btn-action" style="background:#b45309;">🧩 Backfill Gift Log Historis</button>
+            <form action="/admin/backfill-gift-logs" method="POST" onsubmit="return confirm('Fill historical gift log from daily data and stored starting balances? Generated rows are marked Backfill and will not overwrite original details.');" style="display:inline-block; margin-top: 12px; margin-right: 8px;">
+                <button type="submit" class="btn-action" style="background:#b45309;">🧩 Backfill Gift Log</button>
             </form>
-            <form action="/admin/recalculate-coins" method="POST" onsubmit="return confirm('Hitung ulang SEMUA total koin dari gift log? Total yang diedit manual tanpa log akan hilang.');" style="display:inline-block; margin-top: 12px;">
-                <button type="submit" class="btn-save" style="background:#0e7490;">🔄 Recalculate Coin Totals dari Gift Log</button>
+            <form action="/admin/recalculate-coins" method="POST" onsubmit="return confirm('Recalculate ALL coin totals from the gift log? Manual totals without logs will be lost.');" style="display:inline-block; margin-top: 12px;">
+                <button type="submit" class="btn-save" style="background:#0e7490;">🔄 Recalculate Coin Totals</button>
             </form>
             {% endif %}
         </div>
@@ -204,13 +197,13 @@ def gift_log_selftest():
     columns = ", ".join(result.get("columns", []) or []) or "-"
     if result.get("ok"):
         msg = (
-            f"✅ Tes tulis gift log BERHASIL ({result.get('backend')}). "
+            f"✅ Gift log write test succeeded ({result.get('backend')}). "
             f"Kolom terpasang: {columns}"
         )
         msg_type = "success"
     else:
         msg = (
-            f"❌ Tes tulis gift log GAGAL ({result.get('backend')}): "
+            f"❌ Gift log write test failed ({result.get('backend')}): "
             f"{result.get('error')}. Kolom terpasang: {columns}"
         )
         msg_type = "danger"
@@ -237,7 +230,7 @@ def backfill_gift_logs():
     except Exception:
         pass
     msg = (
-        f"Backfill gift log selesai: {result.get('inserted_daily')} rows harian "
+        f"Gift log backfill complete: {result.get('inserted_daily')} daily rows "
         f"({result.get('daily_coins')} c) + {result.get('inserted_opening')} saldo awal "
         f"({result.get('opening_coins')} c)."
     )
@@ -259,7 +252,7 @@ def recalculate_coins():
         )
     except Exception:
         pass
-    msg = f"Coin totals dihitung ulang: {result.get('viewers')} viewer, total {result.get('total_coins')} c, today {result.get('today_coins')} c."
+    msg = f"Coin totals recalculated: {result.get('viewers')} viewers, total {result.get('total_coins')} c, today {result.get('today_coins')} c."
     return redirect("/admin/data?msg=" + quote_plus(msg) + "&msg_type=success")
 
 @admin_bp.route('/host/<host_name>', methods=['GET'])
@@ -408,10 +401,9 @@ def view_viewers():
             ORDER BY g.total_coins DESC
         """, (today_str,)).fetchall()
 
-        # "Sedang menonton stream": viewer punya aktivitas gift di sesi live yang
-        # masih berjalan (end_time IS NULL) pada akun target yang terkonfirmasi live
-        # realtime (runtime snapshot). Kita tidak punya event join/presence TikTok,
-        # jadi indikator ini berbasis aktivitas gift terbaru di stream yang sedang live.
+        # "Watching stream": viewer has gift activity in an ongoing live session
+        # (end_time IS NULL) on a target account confirmed live in the runtime snapshot.
+        # No TikTok join/presence events are available, so this is based on recent gift activity.
         live_snapshot = get_live_snapshot() or {}
         live_accounts = [str(k).lower().lstrip("@") for k in live_snapshot.keys() if k]
         watching = {}  # viewer_username -> (target_account, last_activity)
@@ -489,7 +481,7 @@ def view_viewers():
                     <th>Username (@)</th>
                     <th>Viewer Name</th>
                     <th>Total Coins</th>
-                    <th>Hari Ini (WIB)</th>
+                    <th>Today (WIB)</th>
                     <th>Realtime Live Status</th>
                     <th>Edit Coins</th>
                 </tr>
@@ -505,10 +497,9 @@ def view_viewers():
                     <td>{{ v[4] }} c</td>
                     <td>
                         {% if v[3] %}
-                        <a href="https://www.tiktok.com/@{{ v[3] }}/live" target="_blank" class="badge badge-active" title="Aktif di live (gift terakhir: {{ v[5] or '-' }})">👀 Watching @{{ v[3] }} ↗</a>
-                        <div class="field-help">Aktif di stream live (gift terakhir: {{ v[5] or '-' }})</div>
+                        <a href="https://www.tiktok.com/@{{ v[3] }}/live" target="_blank" class="badge badge-active" title="Active in live (last gift: {{ v[5] or '-' }})">👀 Watching @{{ v[3] }} ↗</a>
                         {% else %}
-                        <span class="badge badge-inactive">Tidak terdeteksi</span>
+                        <span class="badge badge-inactive">Not detected</span>
                         {% endif %}
                     </td>
                     <td>
@@ -632,18 +623,18 @@ def view_viewer_detail(tiktok_user):
                 <div class="stat-number" style="color: #22c55e;">{{ today_coins }} c</div>
             </div>
             <div class="stat-box">
-                <div style="color: #94a3b8; font-size: 0.85rem;">DARI GIFT LOG ({{ logged_gift_count }} gift)</div>
+                <div style="color: #94a3b8; font-size: 0.85rem;">FROM GIFT LOG ({{ logged_gift_count }} gifts)</div>
                 <div class="stat-number">{{ logged_total_coins }} c</div>
             </div>
         </div>
 
         {% if grand_total_coins != logged_total_coins %}
         <div class="notice-warning">
-            ⚠️ Total stored ({{ grand_total_coins }} c) berbeda dengan jumlah gift log ({{ logged_total_coins }} c).
+            ⚠️ Stored total ({{ grand_total_coins }} c) differs from gift log total ({{ logged_total_coins }} c).
             {% if logged_total_coins == 0 and grand_total_coins > 0 %}
-                Jalankan <a href="/admin/data"><strong>Backfill Gift Log Historis</strong></a> lalu <a href="/admin/data">Recalculate Coin Totals</a> di Main Menu.
+                Run <a href="/admin/data"><strong>Backfill Gift Log</strong></a> then <a href="/admin/data">Recalculate Coin Totals</a>.
             {% else %}
-                Jalankan <a href="/admin/data">Recalculate Coin Totals</a> untuk menyamakan.
+                Run <a href="/admin/data">Recalculate Coin Totals</a> to align totals.
             {% endif %}
         </div>
         {% endif %}
@@ -860,10 +851,10 @@ def view_monitor():
 
         {% if rate_limited_any %}
         <div class="notice-warning">
-            ⚠️ Satu or lebih akun sedang kena <strong>rate limit sign-server</strong> (EulerStream), jadi websocket
-            tidak bisa connect dan <code>LiveIntroEvent</code> tidak diterima. Addkan API key di
+            ⚠️ One or more accounts hit the <strong>sign-server rate limit</strong> (EulerStream), so the
+            websocket cannot connect and <code>LiveIntroEvent</code> is not received. Add an API key at
             <a href="https://www.eulerstream.com/pricing" target="_blank" rel="noopener">eulerstream.com/pricing</a>
-            or tunggu cooldown selesai. Tombol <em>Refresh/Reset</em> akan mencoba ulang sekarang (memakai kuota).
+            or wait for the cooldown. <em>Refresh/Reset</em> retries now (uses quota).
         </div>
         {% endif %}
 
@@ -1072,7 +1063,7 @@ def edit_coin():
 @admin_bp.route('/sync-hosts', methods=['POST'])
 def sync_hosts_action():
     sync_valid_hosts()
-    return redirect('/admin/monitor?msg=' + quote_plus('Sinkronisasi host selesai.') + '&msg_type=success')
+    return redirect('/admin/monitor?msg=' + quote_plus('Host sync complete.') + '&msg_type=success')
 
 @admin_bp.route('/activity', methods=['GET'])
 def view_activity():
@@ -1922,7 +1913,7 @@ def view_analytics():
                                 <td class="muted">{{ h.duration }}</td>
                             </tr>
                             {% else %}
-                            <tr><td colspan="4" class="muted">Belum ada data.</td></tr>
+                            <tr><td colspan="4" class="muted">No data.</td></tr>
                             {% endfor %}
                         </table>
                     </div>
@@ -1940,7 +1931,7 @@ def view_analytics():
                                 <td class="muted">{{ v.coins }} c</td>
                             </tr>
                             {% else %}
-                            <tr><td colspan="4" class="muted">Belum ada data.</td></tr>
+                            <tr><td colspan="4" class="muted">No data.</td></tr>
                             {% endfor %}
                         </table>
                     </div>
@@ -2635,7 +2626,7 @@ def grant_verified_role(discord_id) -> dict:
 
     loop = getattr(bot, "loop", None)
     if loop is None or not loop.is_running():
-        return {"status": "error", "error": "Event loop bot tidak berjalan."}
+        return {"status": "error", "error": "Bot event loop is not running."}
 
     try:
         future = asyncio.run_coroutine_threadsafe(_grant_role_async(bot, did_int), loop)
@@ -2643,9 +2634,9 @@ def grant_verified_role(discord_id) -> dict:
         result["discord_id"] = did_str
         return result
     except TimeoutError:
-        return {"status": "error", "error": "Discord tidak merespons dalam 20 detik. Coba lagi.", "discord_id": did_str}
+        return {"status": "error", "error": "Discord did not respond within 20 seconds. Try again.", "discord_id": did_str}
     except Exception as e:
-        return {"status": "error", "error": f"Failed memberi role: {e}", "discord_id": did_str}
+        return {"status": "error", "error": f"Failed to grant role: {e}", "discord_id": did_str}
 
 
 def _get_bot_module():
@@ -2740,7 +2731,7 @@ def view_verifications():
     except Exception as e:
         return f"<h3>Database Error: {e}</h3>", 500
 
-    # Isi otomatis rows yang never dicek, hanya dari cache bot (tanpa API).
+    # Auto-fill rows never checked, from bot cache only (no API).
     # Normalize Discord IDs to strings for consistent display/lookup.
     users = [(str(u[0]).strip(),) + tuple(u[1:]) for u in users]
     pending = [(str(p[0]).strip(),) + tuple(p[1:]) for p in pending]
@@ -2785,15 +2776,13 @@ def view_verifications():
     </head>
     <body>
         <div class="header">
-            <h1>🔐 TikTok & Discord Account Verification Management</h1>
+            <h1>🔐 Verification</h1>
         </div>
         NAV_HTML_PLACEHOLDER
 
         <div class="card">
-            <h2>⚙️ Verification Configuration</h2>
-            <p class="muted" style="margin-bottom: 10px;">
-                Verified role and verification channel settings are managed in <strong>Bot Settings</strong> to keep all bot controls in one place.
-            </p>
+            <h2>⚙️ Config</h2>
+            <span class="info-i" data-tip="Verified role and verification channel are managed in Bot Settings, so all bot controls stay in one place.">!</span>
             <div class="table-scroll">
             <table>
                 <tr><th>Setting</th><th>Value</th></tr>
@@ -2809,16 +2798,13 @@ def view_verifications():
         <div class="card">
             <h2>✅ Verified Accounts (Discord &lt;-&gt; TikTok)</h2>
             <p style="color: #94a3b8; font-size: 0.85rem; margin-bottom: 12px;">
-                Discord accounts successfully linked to a TikTok account. Each account can only be claimed by one user.
-                Kolom <strong>Role Status</strong> mengecek langsung ke Discord apakah member benar-benar masih punya role verifikasi.
-                Kolom <strong>Method</strong> menampilkan cara role diperoleh, <strong>Keterangan</strong> berisi detail
-                (jumlah koin saat coin-only, kode bio, atau pesan live yang terdeteksi), dan <strong>Verified At</strong>
-                adalah waktu role verified diberikan.
+                Linked Discord ↔ TikTok accounts (one Discord per TikTok).
+                <span class="info-i" data-tip="Role Status checks Discord directly. Method shows how the role was obtained, Note holds the detail (coins, bio code, live message), and Verified At is when the role was granted.">!</span>
             </p>
-            <form action="/admin/reverify-all" method="POST" onsubmit="return confirm('Verifikasi ulang role semua akun terverifikasi?');" style="margin-bottom: 12px; display:inline-block; margin-right:8px;">
+            <form action="/admin/reverify-all" method="POST" onsubmit="return confirm('Re-verify roles for all verified accounts?');" style="margin-bottom: 12px; display:inline-block; margin-right:8px;">
                 <button type="submit" class="btn-save" style="background:#0e7490;">🔁 Re-verify All</button>
             </form>
-            <form action="/admin/grant-role-all" method="POST" onsubmit="return confirm('Beri role verifikasi ke semua akun terverifikasi yang belum punya role?');" style="margin-bottom: 12px; display:inline-block;">
+            <form action="/admin/grant-role-all" method="POST" onsubmit="return confirm('Grant the verified role to all verified accounts that are missing it?');" style="margin-bottom: 12px; display:inline-block;">
                 <button type="submit" class="btn-save" style="background:#15803d;">🛡️ Grant Role to All</button>
             </form>
             <div class="table-scroll">
@@ -2831,7 +2817,7 @@ def view_verifications():
                     <th>Display Name</th>
                     <th>Total Coins</th>
                     <th>Method</th>
-                    <th>Keterangan</th>
+                    <th>Note</th>
                     <th>Verified At</th>
                     <th>Role Status</th>
                     <th>Action</th>
@@ -2878,7 +2864,7 @@ def view_verifications():
                         {% elif st[4] == 1 %}
                         <span class="badge" style="background:#15803d;">✅ Has role{% if st[5] %} ({{ st[5] }}){% endif %}</span>
                         {% elif st[4] == 0 %}
-                        <span class="badge" style="background:#b91c1c;">❌ Belum punya role</span>
+                        <span class="badge" style="background:#b91c1c;">❌ No role</span>
                         {% else %}
                         <span class="badge" style="background:#a16207;">⚠️ Could not check</span>
                         {% endif %}
@@ -2886,14 +2872,14 @@ def view_verifications():
                         <br><span class="muted" style="font-size: 0.75rem;">{{ st[7] }}</span>
                         {% endif %}
                         {% if st and st[6] %}
-                        <br><span class="muted" style="font-size: 0.72rem;">dicek: {{ st[6] }} WIB</span>
+                        <br><span class="muted" style="font-size: 0.72rem;">checked: {{ st[6] }} WIB</span>
                         {% endif %}
                     </td>
                     <td>
                         <form action="/admin/reverify-user/{{ u[0] }}" method="POST" style="display:inline;">
                             <button type="submit" class="btn-action" style="background:#0e7490;">🔁 Re-verify</button>
                         </form>
-                        <form action="/admin/grant-role/{{ u[0] }}" method="POST" style="display:inline;" onsubmit="return confirm('Beri role verifikasi ke Discord ID {{ u[0] }}?');">
+                        <form action="/admin/grant-role/{{ u[0] }}" method="POST" style="display:inline;" onsubmit="return confirm('Grant the verified role to Discord ID {{ u[0] }}?');">
                             <button type="submit" class="btn-action" style="background:#15803d; margin-left: 6px;">🛡️ Grant Role</button>
                         </form>
                         <form action="/admin/revoke-role/{{ u[0] }}" method="POST" onsubmit="return confirm('Revoke the verified + tier roles for Discord ID {{ u[0] }}? The TikTok link is kept.');" style="display:inline; margin-left: 6px;">
@@ -2912,7 +2898,7 @@ def view_verifications():
         </div>
 
         <div class="card">
-            <h2>⏳ Pending Verifications (In Progress)</h2>
+            <h2>⏳ Pending</h2>
             <table>
                 <tr>
                     <th>Discord ID</th>
@@ -3054,7 +3040,7 @@ def grant_role_all():
     except Exception:
         pass
 
-    msg = f"Beri role selesai: {granted} baru diberikan, {already} sudah punya role, {failed} gagal."
+    msg = f"Grant roles complete: {granted} granted, {already} already had role, {failed} failed."
     if errors:
         msg += " Contoh gagal: " + " | ".join(errors)
     msg_type = "success" if failed == 0 else ("warning" if (granted or already) else "danger")
@@ -3096,7 +3082,7 @@ def reverify_all():
     except Exception:
         pass
 
-    msg = f"Verifikasi ulang selesai: {total} akun dicek, {ok} punya role, {missing} belum punya role, {unknown} tidak bisa dicek."
+    msg = f"Re-verify complete: {total} checked, {ok} have role, {missing} missing role, {unknown} unknown."
     msg_type = "success" if missing == 0 and unknown == 0 else ("warning" if ok else "danger")
     return redirect('/admin/verifications?msg=' + quote_plus(msg) + '&msg_type=' + msg_type)
 
@@ -3364,83 +3350,83 @@ def view_timeline():
         <div class="header">
             <div>
                 <h1>🗓️ Live Timeline</h1>
-                <div class="page-subtitle">Timeline live session per host dan channel (WIB). Riwayat tercatat pada hari mulai; sesi yang lanjut melewati tengah malam tetap ditampilkan.</div>
+                <div class="page-subtitle">Live sessions by host and channel (WIB). <span class="info-i" data-tip="History is grouped by start day. Sessions crossing midnight remain visible.">!</span></div>
             </div>
         </div>
         NAV_HTML_PLACEHOLDER
 
         <div class="card">
-            <h2>Timeline Sesi Live <span id="period-label" class="period-badge clickable" role="button" tabindex="0" title="Klik untuk melihat rincian periode"></span></h2>
+            <h2>Live Sessions <span id="period-label" class="period-badge clickable" role="button" tabindex="0" title="Click for period details"></span></h2>
             <div class="tl-controls">
                 <div class="group">
                     <label for="tl-mode">Mode</label>
                     <select id="tl-mode">
-                        <option value="day">Harian</option>
-                        <option value="week">Mingguan</option>
-                        <option value="month">Bulanan</option>
+                        <option value="day">Daily</option>
+                        <option value="week">Weekly</option>
+                        <option value="month">Monthly</option>
                         <option value="custom">Custom</option>
                     </select>
                 </div>
                 <div class="group grow" id="anchor-group">
-                    <button class="tl-btn btn-secondary icon" id="tl-prev" title="Sebelumnya">◀</button>
+                    <button class="tl-btn btn-secondary icon" id="tl-prev" title="Previous">◀</button>
                     <input type="date" id="tl-date" value="{{ date_str }}">
-                    <button class="tl-btn btn-secondary icon" id="tl-next" title="Berikutnya">▶</button>
-                    <button class="tl-btn" id="tl-today">Hari ini</button>
+                    <button class="tl-btn btn-secondary icon" id="tl-next" title="Next">▶</button>
+                    <button class="tl-btn" id="tl-today">Today</button>
                 </div>
                 <div class="group grow" id="custom-group" style="display:none;">
-                    <label for="tl-start">Dari</label>
+                    <label for="tl-start">From</label>
                     <input type="date" id="tl-start" value="{{ start_str }}">
-                    <label for="tl-end">Sampai</label>
+                    <label for="tl-end">To</label>
                     <input type="date" id="tl-end" value="{{ end_str }}">
-                    <button class="tl-btn" id="tl-apply">Terapkan</button>
+                    <button class="tl-btn" id="tl-apply">Apply</button>
                 </div>
                 <div class="group half">
                     <label>Zoom</label>
-                    <button class="tl-btn btn-secondary icon" id="tl-zoom-out" title="Perkecil">−</button>
-                    <button class="tl-btn btn-secondary icon" id="tl-zoom-in" title="Perbesar">+</button>
+                    <button class="tl-btn btn-secondary icon" id="tl-zoom-out" title="Zoom out">−</button>
+                    <button class="tl-btn btn-secondary icon" id="tl-zoom-in" title="Zoom in">+</button>
                 </div>
                 <div class="group half">
-                    <label>Baris</label>
-                    <button class="tl-btn btn-secondary icon" id="tl-row-down" title="Rapatkan">−</button>
-                    <button class="tl-btn btn-secondary icon" id="tl-row-up" title="Renggangkan">+</button>
+                    <label>Rows</label>
+                    <button class="tl-btn btn-secondary icon" id="tl-row-down" title="Compact">−</button>
+                    <button class="tl-btn btn-secondary icon" id="tl-row-up" title="Expand">+</button>
                 </div>
                 <div class="group">
                     <button class="tl-btn btn-secondary" id="tl-reset">Reset</button>
-                    <button class="tl-btn" id="tl-reload">Muat ulang</button>
+                    <button class="tl-btn" id="tl-reload">Reload</button>
                 </div>
             </div>
             <details class="tl-legend-box">
-                <summary>ℹ️ Info tampilan</summary>
-                <div class="tl-legend">X: waktu (WIB). Y: host, dikelompokkan per channel target. Hanya host/akun dengan data yang ditampilkan. Sesi berdekatan (channel+host sama, selisih kecil) digabung otomatis. Klik bar untuk rincian. Garis merah = waktu sekarang (jika dalam rentang).</div>
+                <summary>ℹ️ Display info</summary>
+                <div class="tl-legend">X: time (WIB). Y: host, grouped by target channel. Only rows with data are shown. Nearby sessions (same channel+host) are merged. Click a bar for details. Red line = now (if in range).</div>
             </details>
-            <div id="tl-status" class="section-note">Memuat data...</div>
+            <div id="tl-status" class="section-note">Loading...</div>
             <div class="tl-wrap" id="tl-wrap">
                 <div class="tl-inner" id="tl-inner"></div>
             </div>
         </div>
 
         <div class="card" id="summary-card">
-            <h2 id="summary-title">Rangkuman</h2>
+            <h2 id="summary-title">Summary</h2>
             <div class="table-scroll">
                 <table id="summary-table">
                     <thead>
                         <tr>
-                            <th>Nama Host</th>
-                            <th>Akun Stream (Channel)</th>
-                            <th id="sum-dur-head">Total Durasi</th>
-                            <th id="sum-coin-head">Total Koin</th>
+                            <th>Host</th>
+                            <th>Stream account (channel)</th>
+                            <th id="sum-dur-head">Total duration</th>
+                            <th id="sum-coin-head">Total coins</th>
                         </tr>
                     </thead>
                     <tbody id="summary-body">
-                        <tr><td colspan="4" class="empty-state">Memuat...</td></tr>
+                        <tr><td colspan="4" class="empty-state">Loading...</td></tr>
                     </tbody>
                 </table>
             </div>
         </div>
 
-        <div class="tl-detail" id="tl-detail" role="dialog" aria-label="Rincian sesi">
-            <button class="close" id="tl-detail-close" title="Tutup">×</button>
-            <h3>Rincian Sesi</h3>
+        <div class="tl-detail" id="tl-detail" role="dialog" aria-label="Session details">
+            <button class="close" id="tl-detail-close" title="Close">×</button>
+            <h3>Session details</h3>
             <div id="tl-detail-body"></div>
         </div>
 
@@ -3515,9 +3501,9 @@ def view_timeline():
                 sec = Math.max(0, Math.round(Number(sec)||0));
                 const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60;
                 const parts = [];
-                if (h) parts.push(h+'j');
+                if (h) parts.push(h+'h');
                 parts.push(m+'m');
-                if (!h) parts.push(s+'d');
+                if (!h) parts.push(s+'s');
                 return parts.join(' ');
             }
             function fmtDurParts(durations){
@@ -3551,13 +3537,13 @@ def view_timeline():
                 const s = data.start, e = data.end;
                 if (data.mode === 'day') return s;
                 if (s === e) return s;
-                return s + ' s/d ' + e;
+                return s + ' to ' + e;
             }
             function modeTitle(mode){
-                if (mode === 'week') return 'Mingguan';
-                if (mode === 'month') return 'Bulanan';
-                if (mode === 'custom') return 'Periode';
-                return 'Harian';
+                if (mode === 'week') return 'Weekly';
+                if (mode === 'month') return 'Monthly';
+                if (mode === 'custom') return 'Period';
+                return 'Daily';
             }
 
             function syncUrl(){
@@ -3642,9 +3628,9 @@ def view_timeline():
 
                 periodLabel.textContent = '(' + fmtRangeLabel(data) + ')';
                 const mt = modeTitle(mode);
-                summaryTitle.textContent = 'Rangkuman ' + mt;
-                sumDurHead.textContent = 'Total Durasi (' + mt.toLowerCase() + ')';
-                sumCoinHead.textContent = 'Total Koin (' + mt.toLowerCase() + ')';
+                summaryTitle.textContent = 'Summary (' + mt + ')';
+                sumDurHead.textContent = 'Total duration (' + mt.toLowerCase() + ')';
+                sumCoinHead.textContent = 'Total coins (' + mt.toLowerCase() + ')';
 
                 if (!channels.length) {
                     const step = chooseTickStep(pxPerHour, totalHours, mode);
@@ -3653,10 +3639,10 @@ def view_timeline():
                         const left = Math.min(timelineWidth, h*pxPerHour);
                         hours += '<div class="tl-hour-mark" style="left:'+left+'px">'+esc(fmtTick(h*60, mode))+'</div>';
                     }
-                    inner.innerHTML = '<div class="tl-header"><div class="tl-corner">Channel / Host</div><div class="tl-hours" style="width:'+timelineWidth+'px">'+hours+'</div></div><div class="tl-empty">Tidak ada sesi live dengan host terdeteksi pada periode ini.</div>';
+                    inner.innerHTML = '<div class="tl-header"><div class="tl-corner">Channel / Host</div><div class="tl-hours" style="width:'+timelineWidth+'px">'+hours+'</div></div><div class="tl-empty">No live sessions with a detected host in this period.</div>';
                     renderSummary(data.summary||[], mode);
                     const wibNowE = nowWibLabel();
-                    statusEl.textContent = 'Periode ' + fmtRangeLabel(data) + ' · tidak ada data.' + (wibNowE ? (' Waktu sekarang: ' + wibNowE + '.') : '');
+                    statusEl.textContent = 'Period ' + fmtRangeLabel(data) + ' · no data.' + (wibNowE ? (' Now: ' + wibNowE + '.') : '');
                     return;
                 }
 
@@ -3738,7 +3724,7 @@ def view_timeline():
                 const totalSessions = (data.sessions||[]).length;
                 const totalParts = (data.sessions||[]).reduce((a,s)=>a+(Number(s.merged_count)||1),0);
                 const wibNow = nowWibLabel();
-                statusEl.textContent = 'Periode ' + fmtRangeLabel(data) + ' · ' + channels.length + ' channel, ' + totalSessions + ' bar' + (totalParts!==totalSessions ? (' ('+totalParts+' sesi digabung)') : '') + '.' + (wibNow ? (' Waktu sekarang: ' + wibNow + '.') : '');
+                statusEl.textContent = 'Period ' + fmtRangeLabel(data) + ' · ' + channels.length + ' channels, ' + totalSessions + ' bars' + (totalParts!==totalSessions ? (' ('+totalParts+' sessions merged)') : '') + '.' + (wibNow ? (' Now: ' + wibNow + '.') : '');
             }
 
             function shortLabel(s, mode){
@@ -3772,20 +3758,20 @@ def view_timeline():
             }
 
             function showDetail(s){
-                if (detailTitle) detailTitle.textContent = 'Rincian Sesi';
+                if (detailTitle) detailTitle.textContent = 'Session details';
                 const merged = (Number(s.merged_count)||1) > 1;
                 const rows = [
-                    ['Channel Target', (s.channel_name||'-') + (s.tiktok_username? ' (@'+s.tiktok_username+')':'')],
-                    ['Host Terdeteksi', s.host_name || '-'],
-                    ['Mulai', s.start_time || '-'],
-                    ['Selesai', s.end_time || (s.is_open ? 'Masih live / belum ditutup' : '-')],
-                    ['Durasi total', fmtDur(s.duration_seconds||0)],
-                    ['Total koin (sesi gabungan)', (Number(s.total_coins)||0).toLocaleString('id-ID') + ' c'],
-                    ['Status', s.is_open ? 'Sedang berlangsung' : 'Selesai'],
+                    ['Target channel', (s.channel_name||'-') + (s.tiktok_username? ' (@'+s.tiktok_username+')':'')],
+                    ['Detected host', s.host_name || '-'],
+                    ['Start', s.start_time || '-'],
+                    ['End', s.end_time || (s.is_open ? 'Live (not closed)' : '-')],
+                    ['Total duration', fmtDur(s.duration_seconds||0)],
+                    ['Total coins', (Number(s.total_coins)||0).toLocaleString('id-ID') + ' c'],
+                    ['Status', s.is_open ? 'Live' : 'Ended'],
                 ];
                 if (merged) {
-                    rows.splice(4, 0, ['Penggabungan', 'Gabungan ' + s.merged_count + ' sesi berdekatan (toleransi deteksi bot). ID: ' + esc((s.session_ids||[]).join(', '))]);
-                    rows.push(['Rincian durasi bagian', (s.part_durations||[]).map(d=>fmtDur(d)).join(' + ') || '-']);
+                    rows.splice(4, 0, ['Merged', s.merged_count + ' nearby sessions merged. ID: ' + esc((s.session_ids||[]).join(', '))]);
+                    rows.push(['Part durations', (s.part_durations||[]).map(d=>fmtDur(d)).join(' + ') || '-']);
                 } else {
                     rows.splice(4, 0, ['Session ID', (s.session_ids||[s.session_id]).join(', ')]);
                 }
@@ -3798,12 +3784,12 @@ def view_timeline():
 
             function showPeriodDetail(){
                 if (!currentData) return;
-                if (detailTitle) detailTitle.textContent = 'Rincian Periode';
+                if (detailTitle) detailTitle.textContent = 'Period details';
                 const sessions = (currentData.sessions || []).slice().sort((a,b)=>{
                     return String(a.start_time||'').localeCompare(String(b.start_time||''));
                 });
                 if (!sessions.length) {
-                    detailBody.innerHTML = '<div class="empty-state">Tidak ada sesi pada periode ini.</div>';
+                    detailBody.innerHTML = '<div class="empty-state">No sessions in this period.</div>';
                     detail.style.display = 'block';
                     return;
                 }
@@ -3822,12 +3808,12 @@ def view_timeline():
                         + '<td>'+((Number(s.total_coins)||0).toLocaleString('id-ID'))+' c</td>'
                         + '</tr>';
                 }).join('');
-                detailBody.innerHTML = '<div class="muted" style="margin-bottom:8px;">Periode <strong>'
-                    + esc(fmtRangeLabel(currentData)) + '</strong> · ' + sessions.length + ' sesi · total '
+                detailBody.innerHTML = '<div class="muted" style="margin-bottom:8px;">Period <strong>'
+                    + esc(fmtRangeLabel(currentData)) + '</strong> · ' + sessions.length + ' sessions · total '
                     + esc(fmtDur(totalDuration)) + ' · ' + totalCoins.toLocaleString('id-ID') + ' c</div>'
-                    + '<table><thead><tr><th>Mulai</th><th>Host</th><th>Channel</th><th>Durasi</th><th>Koin</th></tr></thead><tbody>'
+                    + '<table><thead><tr><th>Start</th><th>Host</th><th>Channel</th><th>Duration</th><th>Coins</th></tr></thead><tbody>'
                     + rows + '</tbody></table>'
-                    + '<div class="field-help" style="margin-top:6px;">Klik baris untuk melihat rincian sesi.</div>';
+                    + '<div class="field-help" style="margin-top:6px;">Click a row for session details.</div>';
                 detailBody.querySelectorAll('tr[data-idx]').forEach(tr => {
                     tr.style.cursor = 'pointer';
                     tr.addEventListener('click', () => {
@@ -3841,7 +3827,7 @@ def view_timeline():
             function renderSummary(summary, mode){
                 const tbody = document.getElementById('summary-body');
                 if (!summary || !summary.length) {
-                    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">Tidak ada data untuk periode ini.</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No data for this period.</td></tr>';
                     return;
                 }
                 tbody.innerHTML = summary.map(r => {
@@ -3865,7 +3851,7 @@ def view_timeline():
                 params.set('date', dateInput.value);
                 if (mode === 'custom') { params.set('start', startInput.value); params.set('end', endInput.value); }
                 syncUrl();
-                statusEl.textContent = 'Memuat data...';
+                statusEl.textContent = 'Loading...';
                 try {
                     const res = await fetch('/admin/timeline/data?' + params.toString(), { cache: 'no-store' });
                     const data = await res.json();
@@ -3882,9 +3868,9 @@ def view_timeline():
                     resetScroll = true;
                     render();
                 } catch(e){
-                    statusEl.textContent = 'Gagal memuat data: ' + (e && e.message ? e.message : e);
-                    inner.innerHTML = '<div class="tl-empty">Gagal memuat data timeline.</div>';
-                    document.getElementById('summary-body').innerHTML = '<tr><td colspan="4" class="empty-state">Gagal memuat data.</td></tr>';
+                    statusEl.textContent = 'Failed to load data: ' + (e && e.message ? e.message : e);
+                    inner.innerHTML = '<div class="tl-empty">Failed to load timeline.</div>';
+                    document.getElementById('summary-body').innerHTML = '<tr><td colspan="4" class="empty-state">Failed to load data.</td></tr>';
                 }
             }
 

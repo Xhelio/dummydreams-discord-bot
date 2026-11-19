@@ -371,32 +371,29 @@ def view_settings():
         </div>
 
         <div class="card">
-            <h2>🎯 Target Hosts & Prioritas Koneksi</h2>
+            <h2>🎯 Target Hosts & Connection Priority</h2>
             <div class="{{ 'notice-success' if signer_configured else 'notice-warning' }}">
                 {% if signer_configured %}
-                ✅ EulerStream sign API key terdeteksi (<code>SIGN_API_KEY</code>). Rate limit per akun harian lebih tinggi.
+                ✅ EulerStream sign API key detected (<code>SIGN_API_KEY</code>).
                 {% else %}
-                ⚠️ <strong>Belum ada EulerStream API key.</strong> Free tier membatasi koneksi per akun per hari
-                (<code>rate_limit_account_day</code>) sehingga websocket bisa gagal connect dan host tidak terdeteksi.
-                Set environment variable <code>SIGN_API_KEY</code> di Render (key dari
-                <a href="https://www.eulerstream.com/pricing" target="_blank" rel="noopener">eulerstream.com/pricing</a>),
-                lalu redeploy. Bot otomatis memakainya.
+                ⚠️ <strong>EulerStream API key missing.</strong>
+                <span class="info-i" data-tip="Free tier limits daily connections per account, so websockets may fail and hosts may not be detected. Set SIGN_API_KEY (from eulerstream.com/pricing) on Render, then redeploy.">!</span>
                 {% endif %}
             </div>
-            <p class="muted">Pilih akun prioritas untuk koneksi/deteksi rate normal. Akun non-prioritas akan mengikuti mode di bawah (lambat/non-aktif) untuk mengurangi beban/rate limit.</p>
+            <p class="muted" style="margin-top:8px;">Priority accounts use normal detection. Others follow the mode below. <span class="info-i" data-tip="Non-priority accounts can run slow or be disabled to reduce rate limits/load.">!</span></p>
             <form action="/admin/settings/host-priority-mode" method="POST" class="form-grid" style="grid-template-columns: 1fr 1fr auto; margin-bottom: 14px; align-items:end;">
                 <div>
-                    <label for="non_priority_mode" class="muted" style="display:block; margin-bottom:4px;">Mode akun non-prioritas</label>
+                    <label for="non_priority_mode" class="muted" style="display:block; margin-bottom:4px;">Non-priority mode</label>
                     <select id="non_priority_mode" name="non_priority_mode">
-                        <option value="slow" {% if non_priority_mode == 'slow' %}selected{% endif %}>Lambat (slow rate)</option>
-                        <option value="off" {% if non_priority_mode == 'off' %}selected{% endif %}>Non-aktif (tidak di-detect/connect)</option>
+                        <option value="slow" {% if non_priority_mode == 'slow' %}selected{% endif %}>Slow</option>
+                        <option value="off" {% if non_priority_mode == 'off' %}selected{% endif %}>Off (no detect/connect)</option>
                     </select>
                 </div>
                 <div>
-                    <label for="non_priority_slow_seconds" class="muted" style="display:block; margin-bottom:4px;">Interval lambat (detik)</label>
+                    <label for="non_priority_slow_seconds" class="muted" style="display:block; margin-bottom:4px;">Slow interval (s)</label>
                     <input id="non_priority_slow_seconds" type="number" name="non_priority_slow_seconds" min="60" step="10" value="{{ non_priority_slow_seconds }}">
                 </div>
-                <button type="submit">Save Mode Prioritas</button>
+                <button type="submit">Save Mode</button>
             </form>
             <form action="/admin/settings/host/add" method="POST" class="form-grid" style="grid-template-columns: 1fr auto; margin-bottom: 12px;">
                 <input type="text" name="tiktok_username" placeholder="TikTok username (@...) — channel name is fetched automatically" required>
@@ -405,7 +402,7 @@ def view_settings():
             <form action="/admin/settings/hosts/save" method="POST">
                 <div class="table-scroll">
                     <table>
-                        <tr><th>ID</th><th>Username</th><th>Channel Name</th><th style="text-align:center;">Active</th><th style="text-align:center;">Prioritas</th><th>Delete</th></tr>
+                        <tr><th>ID</th><th>Username</th><th>Channel Name</th><th style="text-align:center;">Active</th><th style="text-align:center;">Priority</th><th>Delete</th></tr>
                         {% for h in hosts %}
                         <tr>
                             <td>{{ h[0] }}</td>
@@ -429,11 +426,11 @@ def view_settings():
                     </table>
                 </div>
                 <div style="margin-top:12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-                    <button type="submit">Save Perubahan Host (Active/Prioritas/Delete)</button>
-                    <span class="muted">Ubah banyak host sekaligus lalu klik simpan sekali (tanpa toggle satu-satu).</span>
+                    <button type="submit">Save Host Changes</button>
+                    <span class="info-i" data-tip="Change multiple hosts (Active/Priority/Delete), then save once.">!</span>
                 </div>
             </form>
-            <p class="muted" style="margin-top:8px;">Akun prioritas: connect/deteksi rate normal. Non-prioritas: <strong>{{ 'lambat (' ~ non_priority_slow_seconds ~ 's)' if non_priority_mode == 'slow' else 'non-aktif' }}</strong>.</p>
+            <p class="muted" style="margin-top:8px;">Non-priority: <strong>{{ 'slow (' ~ non_priority_slow_seconds ~ 's)' if non_priority_mode == 'slow' else 'off' }}</strong>.</p>
         </div>
 
         <div class="card">
@@ -616,7 +613,7 @@ def save_settings():
         except Exception as e:
             print(f"[Settings] Presence refresh failed: {e}")
 
-    return redirect("/admin/settings?msg=" + _url_q("✅ Settings disimpan. Perubahan diterapkan.") + "&msg_type=success")
+    return redirect("/admin/settings?msg=" + _url_q("Settings saved.") + "&msg_type=success")
 
 
 @settings_bp.route("/settings/tier/add", methods=["POST"])
@@ -629,14 +626,14 @@ def add_tier():
         min_coins = 0
     if role_id.isdigit():
         add_role_tier(group_key, role_id, min_coins)
-        return redirect("/admin/settings?msg=" + _url_q("Tier ditambahkan.") + "&msg_type=success")
+        return redirect("/admin/settings?msg=" + _url_q("Tier added.") + "&msg_type=success")
     return redirect("/admin/settings?msg=" + _url_q("Invalid role ID.") + "&msg_type=warning")
 
 
 @settings_bp.route("/settings/tier/delete/<int:tier_id>", methods=["POST"])
 def remove_tier(tier_id):
     delete_role_tier(tier_id)
-    return redirect("/admin/settings?msg=" + _url_q("Tier dihapus.") + "&msg_type=success")
+    return redirect("/admin/settings?msg=" + _url_q("Tier deleted.") + "&msg_type=success")
 
 
 @settings_bp.route("/settings/host/add", methods=["POST"])
@@ -656,7 +653,7 @@ def add_target_host():
             conn.commit()
         finally:
             conn.close()
-    return redirect("/admin/settings?msg=" + _url_q("Host ditambahkan/diperbarui.") + "&msg_type=success")
+    return redirect("/admin/settings?msg=" + _url_q("Host added/updated.") + "&msg_type=success")
 
 
 @settings_bp.route("/settings/host/delete/<int:host_id>", methods=["POST"])
@@ -682,7 +679,7 @@ def save_host_priority_mode():
     set_setting("non_priority_mode", mode)
     set_setting("non_priority_slow_seconds", str(slow_seconds))
     log_activity_event("system", f"Host priority mode updated: non-priority={mode}, slow_seconds={slow_seconds}.", "")
-    return redirect("/admin/settings?msg=" + _url_q("Mode prioritas host disimpan.") + "&msg_type=success")
+    return redirect("/admin/settings?msg=" + _url_q("Host priority mode saved.") + "&msg_type=success")
 
 
 @settings_bp.route("/settings/hosts/save", methods=["POST"])
@@ -711,7 +708,7 @@ def save_hosts_batch():
     finally:
         conn.close()
     log_activity_event("system", f"Batch host settings saved (changed={changed}, deleted={deleted}).", "")
-    return redirect("/admin/settings?msg=" + _url_q(f"Perubahan host disimpan (changed={changed}, deleted={deleted}).") + "&msg_type=success")
+    return redirect("/admin/settings?msg=" + _url_q(f"Host changes saved (changed={changed}, deleted={deleted}).") + "&msg_type=success")
 
 
 @settings_bp.route("/toggle-host-priority/<int:host_id>", methods=["GET", "POST"])
@@ -728,16 +725,16 @@ def toggle_host_priority_route(host_id):
             log_activity_event("system", f"Host @{(row[0] or '').lower()} set to {state}.", (row[0] or "").lower())
     finally:
         conn.close()
-    return redirect("/admin/settings?msg=" + _url_q("Prioritas host diperbarui.") + "&msg_type=success")
+    return redirect("/admin/settings?msg=" + _url_q("Host priority updated.") + "&msg_type=success")
 
 
 @settings_bp.route("/settings/alias/add", methods=["POST"])
 def add_alias():
     add_host_alias(request.form.get("alias", ""), request.form.get("host_name", ""))
-    return redirect("/admin/settings?msg=" + _url_q("Alias disimpan.") + "&msg_type=success")
+    return redirect("/admin/settings?msg=" + _url_q("Alias saved.") + "&msg_type=success")
 
 
 @settings_bp.route("/settings/alias/delete", methods=["POST"])
 def remove_alias():
     delete_host_alias(request.form.get("alias", ""))
-    return redirect("/admin/settings?msg=" + _url_q("Alias dihapus.") + "&msg_type=success")
+    return redirect("/admin/settings?msg=" + _url_q("Alias deleted.") + "&msg_type=success")

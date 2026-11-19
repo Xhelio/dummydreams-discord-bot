@@ -203,7 +203,7 @@ NAV_HTML = """
             <span id="discord-status-text">Discord Bot</span>
             <span id="discord-ping-badge" class="ping-badge">&bull; Checking...</span>
         </div>
-        <div id="build-status-box" class="status-indicator-pill status-neutral" title="Kode build Git yang sedang berjalan">
+        <div id="build-status-box" class="status-indicator-pill status-neutral" title="Running Git build code">
             <span id="build-status-text">Build</span>
             <span id="build-badge" class="ping-badge">&bull; ...</span>
         </div>
@@ -334,16 +334,16 @@ AUTO_REFRESH_JS = r"""
                     return info.host || u || 'Host';
                 });
                 const uniqueHosts = [...new Set(liveHosts.filter(Boolean))];
-                const liveText = uniqueHosts.length ? ('Live: ' + uniqueHosts.join(', ')) : 'Live: tidak ada';
+                const liveText = uniqueHosts.length ? ('Live: ' + uniqueHosts.join(', ')) : 'Live: none';
                 setStatusPill(
                     'tiktok',
                     count > 0 ? 'ok' : 'neutral',
                     liveText,
-                    count > 0 ? ('• ' + count + ' akun') : '• 0 akun'
+                    count > 0 ? ('• ' + count + ' accounts') : '• 0 accounts'
                 );
                 const tiktokPill = document.getElementById('tiktok-status-box');
                 if (tiktokPill) {
-                    tiktokPill.title = names.length ? ('Akun live: ' + names.join(', ')) : 'Tidak ada akun live';
+                    tiktokPill.title = names.length ? ('Live accounts: ' + names.join(', ')) : 'No live accounts';
                 }
             })
             .catch(() => {
@@ -502,10 +502,10 @@ AUTO_REFRESH_JS = r"""
             var bar = document.createElement('div');
             bar.className = 'tt-bar';
             bar.innerHTML = '<span class="tt-count"></span>'
-                + '<label>Baris <select></select></label>'
-                + '<span class="tt-pager"><button type="button" data-tt-prev title="Sebelumnya">\u2039</button>'
+                + '<label>Rows <select></select></label>'
+                + '<span class="tt-pager"><button type="button" data-tt-prev title="Previous">\u2039</button>'
                 + '<span class="tt-page-label"></span>'
-                + '<button type="button" data-tt-next title="Berikutnya">\u203A</button></span>';
+                + '<button type="button" data-tt-next title="Next">\u203A</button></span>';
             var sel = bar.querySelector('select');
             SIZES.forEach(function (s) {
                 var opt = document.createElement('option');
