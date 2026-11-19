@@ -2938,6 +2938,8 @@ def view_timeline():
             .tl-detail table { min-width: 0; width: 100%; }
             .tl-detail th, .tl-detail td { white-space: normal; font-size: 0.82rem; padding: 6px 8px; vertical-align: top; }
             .period-badge { display: inline-block; margin-left: 8px; font-size: 0.78rem; color: #94a3b8; font-weight: 500; }
+            .period-badge.clickable { cursor: pointer; border-bottom: 1px dotted #7dd3fc; color: #7dd3fc; }
+            .period-badge.clickable:hover, .period-badge.clickable:focus-visible { color: #bae6fd; border-bottom-color: #bae6fd; }
             @media (max-width: 760px) {
               .tl-controls { gap: 6px; }
               .tl-controls .group { flex: 1 1 100%; }
@@ -2946,7 +2948,7 @@ def view_timeline():
               .tl-corner, .tl-label { width: 118px; min-width: 118px; }
               .tl-corner { padding: 8px 8px; font-size: 0.78rem; }
               .tl-label { padding: 2px 7px; }
-              .tl-inner { min-width: 560px; }
+              .tl-inner { min-width: 100%; }
               .tl-legend { font-size: 0.74rem; }
               #summary-table th, #summary-table td { white-space: normal; }
             }
@@ -2976,7 +2978,7 @@ def view_timeline():
         NAV_HTML_PLACEHOLDER
 
         <div class="card">
-            <h2>Timeline Sesi Live <span id="period-label" class="period-badge"></span></h2>
+            <h2>Timeline Sesi Live <span id="period-label" class="period-badge clickable" role="button" tabindex="0" title="Klik untuk melihat rincian periode"></span></h2>
             <div class="tl-controls">
                 <div class="group">
                     <label for="tl-mode">Mode</label>
@@ -3064,11 +3066,14 @@ def view_timeline():
             const statusEl = document.getElementById('tl-status');
             const detail = document.getElementById('tl-detail');
             const detailBody = document.getElementById('tl-detail-body');
+            const detailTitle = detail.querySelector('h3');
             const periodLabel = document.getElementById('period-label');
             const summaryTitle = document.getElementById('summary-title');
             const sumDurHead = document.getElementById('sum-dur-head');
             const sumCoinHead = document.getElementById('sum-coin-head');
             let pxPerHour = 90;
+            let autoFit = true;
+            let resetScroll = true;
             let rowHeight = 30;
             let currentData = null;
             let drag = null;
@@ -3223,12 +3228,22 @@ def view_timeline():
                 return stepsHour[stepsHour.length-1];
             }
 
+            function fitPxPerHour(totalHours){
+                // Fit the whole period into the visible chart width so all bars
+                // are visible by default. The user can still zoom in manually.
+                const labelW = window.matchMedia('(max-width: 760px)').matches ? 118 : 200;
+                const avail = Math.max(160, (wrap.clientWidth || 0) - labelW - 4);
+                const raw = avail / Math.max(1, totalHours);
+                return Math.max(1.5, Math.min(120, raw));
+            }
+
             function render(){
                 if (!currentData) return;
                 const data = currentData;
                 const channels = buildModel(data);
                 const totalMin = Math.max(1, Number(data.range_total_min)||1440);
                 const totalHours = totalMin / 60.0;
+                if (autoFit) pxPerHour = fitPxPerHour(totalHours);
                 const timelineWidth = Math.max(200, totalHours * pxPerHour);
                 const labelW = 200;
                 const mode = data.mode || 'day';
@@ -3312,6 +3327,12 @@ def view_timeline():
                     }
                 }
 
+                if (resetScroll) {
+                    wrap.scrollLeft = 0;
+                    wrap.scrollTop = 0;
+                    resetScroll = false;
+                }
+
                 inner.querySelectorAll('.tl-bar').forEach(el => {
                     el.addEventListener('click', (e) => {
                         e.stopPropagation();
@@ -3359,6 +3380,7 @@ def view_timeline():
             }
 
             function showDetail(s){
+                if (detailTitle) detailTitle.textContent = 'Rincian Sesi';
                 const merged = (Number(s.merged_count)||1) > 1;
                 const rows = [
                     ['Channel Target', (s.channel_name||'-') + (s.tiktok_username? ' (@'+s.tiktok_username+')':'')],
@@ -3379,6 +3401,48 @@ def view_timeline():
                 rows.forEach(r => { html += '<tr><th style="width:42%">'+esc(String(r[0]))+'</th><td>'+String(r[1]).replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</td></tr>'; });
                 html += '</tbody></table>';
                 detailBody.innerHTML = html;
+                detail.style.display = 'block';
+            }
+
+            function showPeriodDetail(){
+                if (!currentData) return;
+                if (detailTitle) detailTitle.textContent = 'Rincian Periode';
+                const sessions = (currentData.sessions || []).slice().sort((a,b)=>{
+                    return String(a.start_time||'').localeCompare(String(b.start_time||''));
+                });
+                if (!sessions.length) {
+                    detailBody.innerHTML = '<div class="empty-state">Tidak ada sesi pada periode ini.</div>';
+                    detail.style.display = 'block';
+                    return;
+                }
+                let totalDuration = 0, totalCoins = 0;
+                const rows = sessions.map((s, idx) => {
+                    totalDuration += Number(s.duration_seconds) || 0;
+                    totalCoins += Number(s.total_coins) || 0;
+                    const start = (s.start_time || '').slice(0,16);
+                    const end = s.is_open ? 'live' : ((s.end_time || '').slice(11,16) || '-');
+                    const channel = (s.channel_name || '-') + (s.tiktok_username ? ' (@'+s.tiktok_username+')' : '');
+                    return '<tr data-idx="'+idx+'">'
+                        + '<td>'+esc(start)+'<br><small style="color:#94a3b8">s/d '+esc(end)+'</small></td>'
+                        + '<td><strong>'+esc(s.host_name || '-')+'</strong></td>'
+                        + '<td>'+esc(channel)+'</td>'
+                        + '<td>'+esc(fmtDur(s.duration_seconds||0))+'</td>'
+                        + '<td>'+((Number(s.total_coins)||0).toLocaleString('id-ID'))+' c</td>'
+                        + '</tr>';
+                }).join('');
+                detailBody.innerHTML = '<div class="muted" style="margin-bottom:8px;">Periode <strong>'
+                    + esc(fmtRangeLabel(currentData)) + '</strong> · ' + sessions.length + ' sesi · total '
+                    + esc(fmtDur(totalDuration)) + ' · ' + totalCoins.toLocaleString('id-ID') + ' c</div>'
+                    + '<table><thead><tr><th>Mulai</th><th>Host</th><th>Channel</th><th>Durasi</th><th>Koin</th></tr></thead><tbody>'
+                    + rows + '</tbody></table>'
+                    + '<div class="field-help" style="margin-top:6px;">Klik baris untuk melihat rincian sesi.</div>';
+                detailBody.querySelectorAll('tr[data-idx]').forEach(tr => {
+                    tr.style.cursor = 'pointer';
+                    tr.addEventListener('click', () => {
+                        const s = sessions[Number(tr.getAttribute('data-idx'))];
+                        if (s) showDetail(s);
+                    });
+                });
                 detail.style.display = 'block';
             }
 
@@ -3423,6 +3487,7 @@ def view_timeline():
                     nowBaseMs = Date.now();
                     rangeStartMs = Date.parse(data.range_start || '');
                     if (isNaN(rangeStartMs)) rangeStartMs = NaN;
+                    resetScroll = true;
                     render();
                 } catch(e){
                     statusEl.textContent = 'Gagal memuat data: ' + (e && e.message ? e.message : e);
@@ -3432,21 +3497,35 @@ def view_timeline():
             }
 
             // controls
-            modeSel.onchange = ()=> { updateModeUI(); syncUrl(); load(); };
+            modeSel.onchange = ()=> { autoFit = true; resetScroll = true; updateModeUI(); syncUrl(); load(); };
             dateInput.onchange = ()=> { syncUrl(); load(); };
             document.getElementById('tl-prev').onclick = ()=> navigate(-1);
             document.getElementById('tl-next').onclick = ()=> navigate(1);
             document.getElementById('tl-today').onclick = ()=> { dateInput.value = '{{ _today }}'; startInput.value = '{{ _today }}'; endInput.value = '{{ _today }}'; syncUrl(); load(); };
             document.getElementById('tl-apply').onclick = ()=> { if (endInput.value < startInput.value) endInput.value = startInput.value; syncUrl(); load(); };
             startInput.onchange = ()=> { if (endInput.value < startInput.value) endInput.value = startInput.value; };
-            document.getElementById('tl-zoom-in').onclick = ()=> { pxPerHour = Math.min(600, pxPerHour + 15); render(); };
-            document.getElementById('tl-zoom-out').onclick = ()=> { pxPerHour = Math.max(8, pxPerHour - 15); render(); };
+            document.getElementById('tl-zoom-in').onclick = ()=> { autoFit = false; pxPerHour = Math.min(600, pxPerHour + 15); render(); };
+            document.getElementById('tl-zoom-out').onclick = ()=> { autoFit = false; pxPerHour = Math.max(2, pxPerHour - 15); render(); };
             document.getElementById('tl-row-up').onclick = ()=> { rowHeight = Math.min(80, rowHeight + 4); render(); };
             document.getElementById('tl-row-down').onclick = ()=> { rowHeight = Math.max(18, rowHeight - 4); render(); };
-            document.getElementById('tl-reset').onclick = ()=> { pxPerHour = 90; rowHeight = 30; render(); };
+            document.getElementById('tl-reset').onclick = ()=> { autoFit = true; resetScroll = true; pxPerHour = 90; rowHeight = 30; render(); };
             document.getElementById('tl-reload').onclick = ()=> load();
             document.getElementById('tl-detail-close').onclick = ()=> { detail.style.display = 'none'; };
-            document.addEventListener('click', (e)=>{ if (detail.style.display==='block' && !detail.contains(e.target) && !(e.target.closest && e.target.closest('.tl-bar'))) detail.style.display='none'; });
+            document.addEventListener('click', (e)=>{ if (detail.style.display==='block' && !detail.contains(e.target) && !(e.target.closest && (e.target.closest('.tl-bar') || e.target.closest('#period-label')))) detail.style.display='none'; });
+
+            // Clicking the period label opens a full detail list for the period.
+            periodLabel.onclick = (e)=>{ e.stopPropagation(); showPeriodDetail(); };
+            periodLabel.onkeydown = (e)=>{
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); showPeriodDetail(); }
+            };
+
+            // Keep the fit-to-width view in sync when the window grows/shrinks.
+            let resizeTimer = null;
+            window.addEventListener('resize', ()=>{
+                if (!autoFit || !currentData) return;
+                if (resizeTimer) clearTimeout(resizeTimer);
+                resizeTimer = setTimeout(()=>{ render(); }, 150);
+            });
 
             // drag to pan
             wrap.addEventListener('mousedown', (e)=>{
@@ -3465,7 +3544,8 @@ def view_timeline():
             wrap.addEventListener('wheel', (e)=>{
                 if (!e.ctrlKey) return;
                 e.preventDefault();
-                pxPerHour = Math.max(8, Math.min(600, pxPerHour + (e.deltaY < 0 ? 10 : -10)));
+                autoFit = false;
+                pxPerHour = Math.max(2, Math.min(600, pxPerHour + (e.deltaY < 0 ? 10 : -10)));
                 render();
             }, { passive: false });
 
