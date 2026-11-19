@@ -3860,7 +3860,7 @@ def view_timeline():
                     const end = s.is_open ? 'live' : ((s.end_time || '').slice(11,16) || '-');
                     const channel = (s.channel_name || '-') + (s.tiktok_username ? ' (@'+s.tiktok_username+')' : '');
                     return '<tr data-idx="'+idx+'">'
-                        + '<td>'+esc(start)+'<br><small style="color:#94a3b8">s/d '+esc(end)+'</small></td>'
+                        + '<td>'+esc(start)+'<br><small style="color:#94a3b8">to '+esc(end)+'</small></td>'
                         + '<td><strong>'+esc(s.host_name || '-')+'</strong></td>'
                         + '<td>'+esc(channel)+'</td>'
                         + '<td>'+esc(fmtDur(s.duration_seconds||0))+'</td>'

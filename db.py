@@ -995,27 +995,40 @@ def get_analytics_top_gift_items(start_date, end_date, host=None, account=None, 
                                  limit=12) -> list:
     """Top gift objects by coins spent in the selected range.
 
-    Returns rows: (gift_name, unit_coins, item_count, total_coins, transactions).
+    Returns rows: (gift_name, unit_coins, item_count, total_coins, transactions, top_sender).
     unit_coins = average coin value per item (total coins / total item count).
+    top_sender = top sender for this gift object in the range (by coins).
     """
     where, params = _analytics_gift_where(start_date, end_date, host, account, viewer)
+    where2 = where.replace('g.', 'g2.')
+    gift_name_expr = "COALESCE(NULLIF(g.gift_name, ''), 'Unknown')"
+    gift_name_expr2 = "COALESCE(NULLIF(g2.gift_name, ''), 'Unknown')"
     conn = get_db_connection()
     try:
         cur = conn.cursor()
         return cur.execute(f"""
-            SELECT COALESCE(NULLIF(g.gift_name, ''), 'Unknown') AS gift_name,
+            SELECT {gift_name_expr} AS gift_name,
                    CASE WHEN COALESCE(SUM(g.gift_count), 0) > 0
                         THEN CAST(ROUND(SUM(g.coins) * 1.0 / SUM(g.gift_count)) AS INTEGER)
                         ELSE 0 END AS unit_coins,
                    COALESCE(SUM(g.gift_count), 0) AS item_count,
                    COALESCE(SUM(g.coins), 0) AS total_coins,
-                   COUNT(*) AS transactions
+                   COUNT(*) AS transactions,
+                   (
+                       SELECT COALESCE(NULLIF(TRIM(g2.viewer_display_name), ''), '@' || LOWER(g2.viewer_username))
+                       FROM gift_logs g2
+                       WHERE {where2}
+                         AND {gift_name_expr2} = {gift_name_expr}
+                       GROUP BY LOWER(COALESCE(NULLIF(g2.viewer_username, ''), ''))
+                       ORDER BY SUM(g2.coins) DESC, SUM(g2.gift_count) DESC
+                       LIMIT 1
+                   ) AS top_sender
             FROM gift_logs g
             WHERE {where}
-            GROUP BY gift_name
+            GROUP BY {gift_name_expr}
             ORDER BY total_coins DESC, item_count DESC
             LIMIT ?
-        """, tuple(params) + (int(limit or 12),)).fetchall()
+        """, tuple(params) + tuple(params) + (int(limit or 12),)).fetchall()
     except Exception as e:
         print(f"[Analytics] top gift items failed: {e}")
         return []
