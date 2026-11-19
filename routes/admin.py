@@ -2923,8 +2923,13 @@ def view_timeline():
             let drag = null;
             let nowBaseMin = null;
             let nowBaseMs = 0;
+            let rangeStartMs = NaN;
 
             function currentNowMin(){
+                // Prefer device clock relative to range_start (accurate even if server clock is off).
+                if (!isNaN(rangeStartMs)) {
+                    return (Date.now() - rangeStartMs) / 60000.0;
+                }
                 if (nowBaseMin === null) return NaN;
                 return nowBaseMin + (Date.now() - nowBaseMs) / 60000.0;
             }
@@ -3229,6 +3234,8 @@ def view_timeline():
                     nowBaseMin = Number(data.now_min);
                     if (isNaN(nowBaseMin)) nowBaseMin = null;
                     nowBaseMs = Date.now();
+                    rangeStartMs = Date.parse(data.range_start || '');
+                    if (isNaN(rangeStartMs)) rangeStartMs = NaN;
                     render();
                 } catch(e){
                     statusEl.textContent = 'Gagal memuat data: ' + (e && e.message ? e.message : e);
