@@ -516,9 +516,44 @@ def _record_gift_event_db(session_id, username_clean, user, display_name, gift_n
     )
     if log_status is False:
         return {"status": "duplicate"}
+    if log_status is None:
+        # The detailed log could not be written. Do not update coin aggregates
+        # afterwards: coins without a matching gift log row cause permanent
+        # stored-vs-log drift. The event is reported so it can be investigated.
+        print(
+            f"[GiftLog] Skipping coin totals for @{user} ({gift_name}, {coins}c, "
+            f"msg_id={msg_id or 'n/a'}) because the gift log write failed."
+        )
+        try:
+            log_activity_event(
+                "system",
+                f"[GiftLog] Koin TIDAK ditambahkan untuk @{user} ({gift_name}, {coins}c, "
+                f"msg_id={msg_id or 'n/a'}) karena gift log gagal ditulis.",
+                username_clean,
+            )
+        except Exception:
+            pass
+        return {"status": "log_failed"}
 
-    total_coins = save_gift_data(user, display_name, coins)
-    save_daily_gift_data(user, display_name, coins)
+    try:
+        total_coins = save_gift_data(user, display_name, coins)
+        save_daily_gift_data(user, display_name, coins)
+    except Exception as aggregate_error:
+        print(
+            f"[GiftLog] Gift log stored but coin totals failed for @{user} "
+            f"({gift_name}, {coins}c, msg_id={msg_id or 'n/a'}): "
+            f"{type(aggregate_error).__name__}: {aggregate_error}"
+        )
+        try:
+            log_activity_event(
+                "system",
+                f"[GiftLog] Gift log tersimpan tetapi update total koin GAGAL untuk @{user} "
+                f"({gift_name}, {coins}c, msg_id={msg_id or 'n/a'}): {aggregate_error}",
+                username_clean,
+            )
+        except Exception:
+            pass
+        return {"status": "aggregate_failed"}
 
     wib = pytz.timezone('Asia/Jakarta')
     now_wib = datetime.now(wib)
@@ -538,7 +573,7 @@ def _record_gift_event_db(session_id, username_clean, user, display_name, gift_n
     )
     log_activity_event("gift", gift_msg, username_clean)
     return {
-        "status": "ok" if log_status else "log_failed",
+        "status": "ok",
         "total_coins": total_coins,
         "message": gift_msg,
     }
@@ -1223,8 +1258,15 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     if result["status"] == "log_failed":
                         print(
                             f"[{username_clean}] WARNING: gift log write failed for @{user} "
-                            f"({gift_name}, {coins}c); coin totals will still be updated."
+                            f"({gift_name}, {coins}c); coin totals were NOT updated to avoid drift."
                         )
+                        return
+                    if result["status"] == "aggregate_failed":
+                        print(
+                            f"[{username_clean}] WARNING: gift log stored but coin totals update failed "
+                            f"for @{user} ({gift_name}, {coins}c); check the gift log vs stored total."
+                        )
+                        return
 
                     total_coins = result["total_coins"]
                     print(f"[Activity] {result['message']}")
