@@ -1861,7 +1861,7 @@ def view_analytics():
                         <td class="share-pill">{{ v.pct }}%</td>
                         <td>{{ v.gifts }}</td>
                         <td>{{ v.hosts }}</td>
-                        <td class="muted" style="font-size:0.78rem;">{{ v.last_at }}</td>
+                        <td class="muted">{{ v.last_at }}</td>
                     </tr>
                     {% else %}
                     <tr><td colspan="7" class="muted">Belum ada data viewer pada rentang ini.</td></tr>
