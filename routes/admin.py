@@ -38,6 +38,7 @@ from db import (
     get_analytics_viewer_host_spend,
     get_analytics_host_options,
     get_analytics_account_options,
+    get_timeline_data,
     get_timeline_sessions_for_date,
     get_timeline_daily_summary,
 )
@@ -2732,36 +2733,38 @@ def _timeline_today_wib() -> str:
     return datetime.now(wib).strftime("%Y-%m-%d")
 
 
+def _parse_date_arg(value, default):
+    try:
+        return datetime.strptime(str(value or default)[:10], "%Y-%m-%d").strftime("%Y-%m-%d")
+    except Exception:
+        return default
+
+
 @admin_bp.route('/timeline/data', methods=['GET'])
 def timeline_data():
-    date_str = (request.args.get("date") or _timeline_today_wib()).strip()
+    today = _timeline_today_wib()
+    mode = (request.args.get("mode") or "day").strip().lower()
+    if mode not in ("day", "week", "month", "custom"):
+        mode = "day"
+    date_str = _parse_date_arg(request.args.get("date"), today)
+    start = _parse_date_arg(request.args.get("start"), date_str)
+    end = _parse_date_arg(request.args.get("end"), start)
     try:
-        datetime.strptime(date_str[:10], "%Y-%m-%d")
-        date_str = date_str[:10]
-    except Exception:
-        date_str = _timeline_today_wib()
-
-    sessions = get_timeline_sessions_for_date(date_str)
-    summary = get_timeline_daily_summary(date_str)
-    wib = pytz.timezone("Asia/Jakarta")
-    now = datetime.now(wib)
-    return jsonify({
-        "date": date_str,
-        "today": now.strftime("%Y-%m-%d"),
-        "now_min": round((now.hour * 60) + now.minute + (now.second / 60.0), 3),
-        "sessions": sessions,
-        "summary": summary,
-    })
+        data = get_timeline_data(date_str=date_str, mode=mode, start=start, end=end)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify(data)
 
 
 @admin_bp.route('/timeline', methods=['GET'])
 def view_timeline():
-    date_str = (request.args.get("date") or _timeline_today_wib()).strip()
-    try:
-        datetime.strptime(date_str[:10], "%Y-%m-%d")
-        date_str = date_str[:10]
-    except Exception:
-        date_str = _timeline_today_wib()
+    today = _timeline_today_wib()
+    mode = (request.args.get("mode") or "day").strip().lower()
+    if mode not in ("day", "week", "month", "custom"):
+        mode = "day"
+    date_str = _parse_date_arg(request.args.get("date"), today)
+    start = _parse_date_arg(request.args.get("start"), date_str)
+    end = _parse_date_arg(request.args.get("end"), start)
 
     html = r"""
     <!DOCTYPE html>
@@ -2775,40 +2778,41 @@ def view_timeline():
             .tl-controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px; }
             .tl-controls .group { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
             .tl-controls label { font-size: 0.82rem; color: #94a3b8; font-weight: 600; }
-            .tl-controls input[type="date"] { min-width: 160px; }
+            .tl-controls input[type="date"], .tl-controls select { min-width: 150px; }
             .tl-btn { padding: 7px 10px; font-size: 0.8rem; border-radius: 8px; }
             .tl-legend { color: #94a3b8; font-size: 0.8rem; margin: 6px 0 10px; }
-            .tl-wrap { position: relative; border: 1px solid #334155; border-radius: 10px; background: #0b1220; overflow: auto; max-height: 70vh; }
+            .tl-wrap { position: relative; border: 1px solid #334155; border-radius: 10px; background: #0b1220; overflow: auto; max-height: 70vh; cursor: grab; }
             .tl-inner { position: relative; min-width: 900px; }
             .tl-header { position: sticky; top: 0; z-index: 5; display: flex; background: #0f172a; border-bottom: 1px solid #334155; }
             .tl-corner { position: sticky; left: 0; z-index: 6; width: 240px; min-width: 240px; padding: 10px 12px; font-weight: 700; color: #7dd3fc; background: #0f172a; border-right: 1px solid #334155; }
             .tl-hours { position: relative; height: 40px; flex: 1; }
-            .tl-hour-mark { position: absolute; top: 0; bottom: 0; border-left: 1px solid #1e293b; font-size: 0.7rem; color: #64748b; padding: 10px 0 0 4px; }
+            .tl-hour-mark { position: absolute; top: 0; bottom: 0; border-left: 1px solid #1e293b; font-size: 0.68rem; color: #64748b; padding: 8px 0 0 3px; white-space: nowrap; }
             .tl-body { position: relative; }
-            .tl-row { display: flex; border-bottom: 1px solid #1e293b; min-height: 34px; }
+            .tl-row { display: flex; border-bottom: 1px solid #1e293b; min-height: 24px; }
             .tl-row.group-row { background: rgba(2,132,199,0.08); }
-            .tl-label { position: sticky; left: 0; z-index: 4; width: 240px; min-width: 240px; padding: 8px 12px; background: #0b1220; border-right: 1px solid #334155; display: flex; flex-direction: column; justify-content: center; gap: 2px; }
+            .tl-label { position: sticky; left: 0; z-index: 4; width: 240px; min-width: 240px; padding: 4px 10px; background: #0b1220; border-right: 1px solid #334155; display: flex; flex-direction: column; justify-content: center; gap: 1px; overflow: hidden; }
             .tl-row.group-row .tl-label { background: #0f172a; font-weight: 700; color: #e2e8f0; }
-            .tl-label .sub { font-size: 0.74rem; color: #94a3b8; font-weight: 500; }
-            .tl-track { position: relative; flex: 1; min-height: 34px; }
+            .tl-label .sub { font-size: 0.72rem; color: #94a3b8; font-weight: 500; }
+            .tl-track { position: relative; flex: 1; min-height: 24px; }
             .tl-gridline { position: absolute; top: 0; bottom: 0; border-left: 1px solid #111827; }
             .tl-gridline.major { border-left-color: #1e293b; }
-            .tl-bar { position: absolute; top: 4px; height: calc(100% - 8px); min-width: 3px; border-radius: 6px; background: linear-gradient(90deg, #0284c7, #38bdf8); border: 1px solid rgba(125,211,252,0.35); cursor: pointer; overflow: hidden; }
+            .tl-gridline.day { border-left-color: #334155; border-left-width: 2px; }
+            .tl-bar { position: absolute; top: 2px; height: calc(100% - 4px); min-width: 2px; border-radius: 5px; background: linear-gradient(90deg, #0284c7, #38bdf8); border: 1px solid rgba(125,211,252,0.35); cursor: pointer; overflow: hidden; }
+            .tl-bar.merged { background: linear-gradient(90deg, #0f766e, #2dd4bf); border-color: rgba(94,234,212,0.35); }
             .tl-bar:hover { filter: brightness(1.15); box-shadow: 0 0 0 1px rgba(125,211,252,0.5); }
-            .tl-bar .txt { font-size: 0.7rem; color: #e0f2fe; padding: 2px 6px; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; line-height: 1.2; }
+            .tl-bar .txt { font-size: 0.66rem; color: #e0f2fe; padding: 1px 4px; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; line-height: 1.15; }
             .tl-now { position: absolute; top: 0; bottom: 0; width: 2px; background: #ef4444; z-index: 3; pointer-events: none; }
             .tl-now::before { content: 'now'; position: absolute; top: -2px; left: 4px; font-size: 0.65rem; color: #fca5a5; background: rgba(127,29,29,0.7); padding: 1px 4px; border-radius: 4px; }
             .tl-empty { padding: 24px; text-align: center; color: #64748b; font-style: italic; }
-            .tl-detail { position: fixed; right: 18px; bottom: 18px; width: min(420px, calc(100vw - 36px)); max-height: 70vh; overflow: auto; background: #111827; border: 1px solid #334155; border-radius: 12px; box-shadow: 0 16px 40px rgba(0,0,0,0.45); padding: 14px 16px; z-index: 50; display: none; }
+            .tl-detail { position: fixed; right: 18px; bottom: 18px; width: min(440px, calc(100vw - 36px)); max-height: 72vh; overflow: auto; background: #111827; border: 1px solid #334155; border-radius: 12px; box-shadow: 0 16px 40px rgba(0,0,0,0.45); padding: 14px 16px; z-index: 50; display: none; }
             .tl-detail h3 { margin-bottom: 8px; color: #7dd3fc; font-size: 1rem; }
             .tl-detail .close { float: right; background: #334155; border: none; color: #e2e8f0; width: 28px; height: 28px; border-radius: 6px; cursor: pointer; font-size: 16px; line-height: 1; }
             .tl-detail table { min-width: 0; width: 100%; }
-            .tl-detail th, .tl-detail td { white-space: normal; font-size: 0.82rem; padding: 6px 8px; }
-            .summary-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 18px 0 10px; }
-            .summary-bar input[type="date"] { min-width: 160px; }
+            .tl-detail th, .tl-detail td { white-space: normal; font-size: 0.82rem; padding: 6px 8px; vertical-align: top; }
+            .period-badge { display: inline-block; margin-left: 8px; font-size: 0.78rem; color: #94a3b8; font-weight: 500; }
             @media (max-width: 760px) {
-              .tl-corner, .tl-label { width: 170px; min-width: 170px; }
-              .tl-inner { min-width: 720px; }
+              .tl-corner, .tl-label { width: 160px; min-width: 160px; }
+              .tl-inner { min-width: 680px; }
             }
         </style>
     </head>
@@ -2816,37 +2820,54 @@ def view_timeline():
         <div class="header">
             <div>
                 <h1>🗓️ Live Timeline</h1>
-                <div class="page-subtitle">Gantt timeline live session per host dan jam (WIB), dikelompokkan per channel target.</div>
+                <div class="page-subtitle">Timeline live session per host dan channel (WIB). Riwayat tercatat pada hari mulai; sesi yang lanjut melewati tengah malam tetap ditampilkan.</div>
             </div>
         </div>
         NAV_HTML_PLACEHOLDER
 
         <div class="card">
-            <h2>Timeline Sesi Live</h2>
+            <h2>Timeline Sesi Live <span id="period-label" class="period-badge"></span></h2>
             <div class="tl-controls">
                 <div class="group">
-                    <label for="tl-date">Tanggal</label>
-                    <button class="tl-btn btn-secondary" id="tl-prev" title="Hari sebelumnya">◀</button>
+                    <label for="tl-mode">Mode</label>
+                    <select id="tl-mode">
+                        <option value="day">Harian</option>
+                        <option value="week">Mingguan</option>
+                        <option value="month">Bulanan</option>
+                        <option value="custom">Custom</option>
+                    </select>
+                </div>
+                <div class="group" id="anchor-group">
+                    <button class="tl-btn btn-secondary" id="tl-prev" title="Sebelumnya">◀</button>
                     <input type="date" id="tl-date" value="{{ date_str }}">
-                    <button class="tl-btn btn-secondary" id="tl-next" title="Hari berikutnya">▶</button>
+                    <button class="tl-btn btn-secondary" id="tl-next" title="Berikutnya">▶</button>
+                </div>
+                <div class="group" id="custom-group" style="display:none;">
+                    <label for="tl-start">Dari</label>
+                    <input type="date" id="tl-start" value="{{ start_str }}">
+                    <label for="tl-end">Sampai</label>
+                    <input type="date" id="tl-end" value="{{ end_str }}">
+                    <button class="tl-btn" id="tl-apply">Terapkan</button>
+                </div>
+                <div class="group">
                     <button class="tl-btn" id="tl-today">Hari ini</button>
                 </div>
                 <div class="group">
-                    <label>Zoom waktu</label>
+                    <label>Zoom</label>
                     <button class="tl-btn btn-secondary" id="tl-zoom-out" title="Perkecil">−</button>
                     <button class="tl-btn btn-secondary" id="tl-zoom-in" title="Perbesar">+</button>
                 </div>
                 <div class="group">
-                    <label>Kerapatan baris</label>
+                    <label>Baris</label>
                     <button class="tl-btn btn-secondary" id="tl-row-down" title="Rapatkan">−</button>
                     <button class="tl-btn btn-secondary" id="tl-row-up" title="Renggangkan">+</button>
                 </div>
                 <div class="group">
-                    <button class="tl-btn btn-secondary" id="tl-reset">Reset tampilan</button>
+                    <button class="tl-btn btn-secondary" id="tl-reset">Reset</button>
                     <button class="tl-btn" id="tl-reload">Muat ulang</button>
                 </div>
             </div>
-            <div class="tl-legend">Sumbu X: waktu (00:00–24:00 WIB) · Sumbu Y: host · Kategori: channel target. Hanya akun/host yang punya data pada hari ini yang ditampilkan. Klik bar untuk rincian. Geser area timeline untuk melihat jam lain; garis merah = waktu sekarang (jika hari ini).</div>
+            <div class="tl-legend">X: waktu (WIB). Y: host, dikelompokkan per channel target. Hanya host/akun dengan data yang ditampilkan. Sesi berdekatan (channel+host sama, selisih kecil) digabung otomatis. Klik bar untuk rincian. Garis merah = waktu sekarang (jika dalam rentang).</div>
             <div id="tl-status" class="section-note">Memuat data...</div>
             <div class="tl-wrap" id="tl-wrap">
                 <div class="tl-inner" id="tl-inner"></div>
@@ -2854,21 +2875,15 @@ def view_timeline():
         </div>
 
         <div class="card" id="summary-card">
-            <h2>Rangkuman Harian</h2>
-            <div class="summary-bar">
-                <button class="tl-btn btn-secondary" id="sum-prev" title="Hari sebelumnya">◀</button>
-                <input type="date" id="sum-date" value="{{ date_str }}">
-                <button class="tl-btn btn-secondary" id="sum-next" title="Hari berikutnya">▶</button>
-                <button class="tl-btn" id="sum-today">Hari ini</button>
-            </div>
+            <h2 id="summary-title">Rangkuman</h2>
             <div class="table-scroll">
                 <table id="summary-table">
                     <thead>
                         <tr>
                             <th>Nama Host</th>
                             <th>Akun Stream (Channel)</th>
-                            <th>Total Durasi (hari ini)</th>
-                            <th>Total Koin (hari ini)</th>
+                            <th id="sum-dur-head">Total Durasi</th>
+                            <th id="sum-coin-head">Total Koin</th>
                         </tr>
                     </thead>
                     <tbody id="summary-body">
@@ -2887,77 +2902,123 @@ def view_timeline():
         AUTO_REFRESH_JS_PLACEHOLDER
         <script>
         (function(){
+            const modeSel = document.getElementById('tl-mode');
             const dateInput = document.getElementById('tl-date');
-            const sumDateInput = document.getElementById('sum-date');
+            const startInput = document.getElementById('tl-start');
+            const endInput = document.getElementById('tl-end');
+            const customGroup = document.getElementById('custom-group');
+            const anchorGroup = document.getElementById('anchor-group');
             const inner = document.getElementById('tl-inner');
             const wrap = document.getElementById('tl-wrap');
             const statusEl = document.getElementById('tl-status');
             const detail = document.getElementById('tl-detail');
             const detailBody = document.getElementById('tl-detail-body');
-            let pxPerHour = 120;
-            let rowHeight = 38;
+            const periodLabel = document.getElementById('period-label');
+            const summaryTitle = document.getElementById('summary-title');
+            const sumDurHead = document.getElementById('sum-dur-head');
+            const sumCoinHead = document.getElementById('sum-coin-head');
+            let pxPerHour = 90;
+            let rowHeight = 30;
             let currentData = null;
             let drag = null;
 
             function pad(n){ return String(n).padStart(2,'0'); }
-            function fmtClock(mins){
-                mins = Math.max(0, Math.min(1440, mins));
-                const h = Math.floor(mins/60); const m = Math.round(mins%60);
-                return pad(h%24)+':'+pad(m===60?0:m);
-            }
+            function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+            function toDateStr(d){ return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate()); }
+            function parseDate(str){ const d=new Date((str||'')+'T00:00:00'); return isNaN(d)?null:d; }
+            function shiftDateStr(str, delta){ const d=parseDate(str); if(!d) return str; d.setDate(d.getDate()+delta); return toDateStr(d); }
+            function shiftMonthStr(str, delta){ const d=parseDate(str); if(!d) return str; const day=d.getDate(); d.setMonth(d.getMonth()+delta,1); const last=new Date(d.getFullYear(), d.getMonth()+1, 0).getDate(); d.setDate(Math.min(day,last)); return toDateStr(d); }
+
             function fmtDur(sec){
                 sec = Math.max(0, Math.round(Number(sec)||0));
                 const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60;
                 const parts = [];
                 if (h) parts.push(h+'j');
-                if (m || h) parts.push(m+'m');
-                parts.push(s+'d');
+                parts.push(m+'m');
+                if (!h) parts.push(s+'d');
                 return parts.join(' ');
             }
             function fmtDurParts(durations){
-                const total = durations.reduce((a,b)=>a+(Number(b)||0),0);
+                const arr = (durations && durations.length) ? durations : [0];
+                const total = arr.reduce((a,b)=>a+(Number(b)||0),0);
                 let text = fmtDur(total);
-                if (durations.length > 1) {
-                    const parts = durations.map(d=>fmtDur(d)).join(' + ');
-                    text += ' <small style="color:#94a3b8">(' + parts + ')</small>';
+                if (arr.length > 1) {
+                    text += ' <small style="color:#94a3b8">(' + arr.map(d=>fmtDur(d)).join(' + ') + ')</small>';
                 }
                 return text;
             }
-            function esc(s){
-                return String(s==null?'':s).replace(/[&<>"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+            function fmtTick(mins, mode){
+                const m = Math.round(Number(mins)||0);
+                const day = Math.floor(m/1440);
+                const mm = ((m%1440)+1440)%1440;
+                const hh = Math.floor(mm/60), mi = mm%60;
+                if (mode === 'day') {
+                    if (day > 0) return '+'+day+'d '+pad(hh)+':'+pad(mi);
+                    return pad(hh)+':'+pad(mi);
+                } else {
+                    const rs = currentData && currentData.range_start ? new Date(currentData.range_start) : null;
+                    if (rs && !isNaN(rs)) {
+                        const d = new Date(rs.getTime() + m*60000);
+                        return pad(d.getDate())+'/'+pad(d.getMonth()+1)+' '+pad(d.getHours())+':00';
+                    }
+                    return pad(hh)+':00';
+                }
             }
-            function shiftDate(str, delta){
-                const d = new Date(str+'T00:00:00');
-                if (isNaN(d)) return str;
-                d.setDate(d.getDate()+delta);
-                return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate());
+            function fmtRangeLabel(data){
+                if (!data) return '';
+                const s = data.start, e = data.end;
+                if (data.mode === 'day') return s;
+                if (s === e) return s;
+                return s + ' s/d ' + e;
             }
-            function setDate(str, reload){
-                dateInput.value = str; sumDateInput.value = str;
+            function modeTitle(mode){
+                if (mode === 'week') return 'Mingguan';
+                if (mode === 'month') return 'Bulanan';
+                if (mode === 'custom') return 'Periode';
+                return 'Harian';
+            }
+
+            function syncUrl(){
+                const params = new URLSearchParams();
+                params.set('mode', modeSel.value);
+                params.set('date', dateInput.value);
+                if (modeSel.value === 'custom') { params.set('start', startInput.value); params.set('end', endInput.value); }
                 const url = new URL(window.location.href);
-                url.searchParams.set('date', str);
+                url.search = params.toString();
                 window.history.replaceState({}, '', url.toString());
+            }
+
+            function updateModeUI(){
+                const m = modeSel.value;
+                customGroup.style.display = (m === 'custom') ? 'inline-flex' : 'none';
+                anchorGroup.style.display = (m === 'custom') ? 'none' : 'inline-flex';
+            }
+
+            function setMode(mode, reload){
+                modeSel.value = mode;
+                updateModeUI();
+                syncUrl();
                 if (reload !== false) load();
             }
-            function getNowMinJakarta(){
-                try {
-                    const parts = new Intl.DateTimeFormat('en-GB', { timeZone:'Asia/Jakarta', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false }).formatToParts(new Date());
-                    const get = t => Number((parts.find(p=>p.type===t)||{}).value||0);
-                    let h=get('hour'); if(h===24) h=0;
-                    return h*60 + get('minute') + get('second')/60;
-                } catch(e){
-                    const d = new Date();
-                    return d.getHours()*60 + d.getMinutes() + d.getSeconds()/60;
-                }
+
+            function navigate(delta){
+                const m = modeSel.value;
+                if (m === 'custom') return;
+                let d = dateInput.value;
+                if (m === 'day') d = shiftDateStr(d, delta);
+                else if (m === 'week') d = shiftDateStr(d, delta*7);
+                else if (m === 'month') d = shiftMonthStr(d, delta);
+                dateInput.value = d;
+                syncUrl();
+                load();
             }
 
             function buildModel(data){
                 const sessions = Array.isArray(data.sessions)?data.sessions:[];
-                // Group: channel (target) -> host -> sessions
                 const chanMap = new Map();
                 sessions.forEach(s => {
                     const host = (s.host_name && s.host_name !== '-') ? s.host_name : null;
-                    if (!host) return; // hide items without detected host value
+                    if (!host) return;
                     const chKey = (s.tiktok_username||'').toLowerCase() || ('ch:'+s.channel_name);
                     if (!chanMap.has(chKey)) chanMap.set(chKey, { key: chKey, name: s.channel_name || s.tiktok_username || '-', account: s.tiktok_username || '', hosts: new Map() });
                     const ch = chanMap.get(chKey);
@@ -2966,127 +3027,171 @@ def view_timeline():
                     ch.hosts.get(hKey).sessions.push(s);
                 });
                 const channels = Array.from(chanMap.values()).sort((a,b)=> (a.name||'').localeCompare(b.name||''));
-                channels.forEach(ch => {
-                    ch.hostRows = Array.from(ch.hosts.values()).sort((a,b)=> (a.name||'').localeCompare(b.name||''));
-                });
+                channels.forEach(ch => { ch.hostRows = Array.from(ch.hosts.values()).sort((a,b)=> (a.name||'').localeCompare(b.name||'')); });
                 return channels;
+            }
+
+            function chooseTickStep(pxPerHour, totalHours, mode){
+                const targetPx = mode === 'day' ? 70 : 90;
+                const stepsHour = mode === 'day' ? [1,2,3,4,6,8,12] : [6,12,24,48,72,168];
+                for (let i=0;i<stepsHour.length;i++){ if (stepsHour[i]*pxPerHour >= targetPx) return stepsHour[i]; }
+                return stepsHour[stepsHour.length-1];
             }
 
             function render(){
                 if (!currentData) return;
-                const channels = buildModel(currentData);
-                const timelineWidth = 24 * pxPerHour;
+                const data = currentData;
+                const channels = buildModel(data);
+                const totalMin = Math.max(1, Number(data.range_total_min)||1440);
+                const totalHours = totalMin / 60.0;
+                const timelineWidth = Math.max(200, totalHours * pxPerHour);
                 const labelW = 240;
-                let rowsHtml = '';
-                let barHtml = '';
+                const mode = data.mode || 'day';
+
+                periodLabel.textContent = '(' + fmtRangeLabel(data) + ')';
+                const mt = modeTitle(mode);
+                summaryTitle.textContent = 'Rangkuman ' + mt;
+                sumDurHead.textContent = 'Total Durasi (' + mt.toLowerCase() + ')';
+                sumCoinHead.textContent = 'Total Koin (' + mt.toLowerCase() + ')';
 
                 if (!channels.length) {
-                    inner.innerHTML = '<div class="tl-header"><div class="tl-corner">Channel / Host</div><div class="tl-hours" style="width:'+timelineWidth+'px"></div></div><div class="tl-empty">Tidak ada sesi live dengan host terdeteksi pada tanggal ini.</div>';
-                    renderSummary(currentData.summary||[]);
-                    statusEl.textContent = 'Tidak ada data timeline untuk ' + (currentData.date||'');
+                    const step = chooseTickStep(pxPerHour, totalHours, mode);
+                    let hours = '';
+                    for (let h=0; h<=Math.ceil(totalHours); h+=step) {
+                        const left = Math.min(timelineWidth, h*pxPerHour);
+                        hours += '<div class="tl-hour-mark" style="left:'+left+'px">'+esc(fmtTick(h*60, mode))+'</div>';
+                    }
+                    inner.innerHTML = '<div class="tl-header"><div class="tl-corner">Channel / Host</div><div class="tl-hours" style="width:'+timelineWidth+'px">'+hours+'</div></div><div class="tl-empty">Tidak ada sesi live dengan host terdeteksi pada periode ini.</div>';
+                    renderSummary(data.summary||[], mode);
+                    statusEl.textContent = 'Periode ' + fmtRangeLabel(data) + ' · tidak ada data.';
                     return;
                 }
 
-                // hour header
+                const step = chooseTickStep(pxPerHour, totalHours, mode);
                 let hours = '';
-                for (let h=0; h<=24; h++) {
-                    const left = h*pxPerHour;
-                    if (h < 24) hours += '<div class="tl-hour-mark" style="left:'+left+'px;width:'+pxPerHour+'px">'+pad(h)+':00</div>';
-                    else hours += '<div class="tl-hour-mark" style="left:'+left+'px;border-left-color:#334155"></div>';
+                for (let h=0; h<=Math.ceil(totalHours)+0.001; h+=step) {
+                    if (h*60 > totalMin + 0.01) break;
+                    const left = Math.min(timelineWidth, h*pxPerHour);
+                    hours += '<div class="tl-hour-mark" style="left:'+left+'px">'+esc(fmtTick(h*60, mode))+'</div>';
                 }
 
                 let body = '';
                 let rowIndex = 0;
                 channels.forEach(ch => {
-                    // category header row
-                    const gTop = rowIndex * rowHeight;
                     body += '<div class="tl-row group-row" style="height:'+rowHeight+'px">'
                          +  '<div class="tl-label"><div>'+esc(ch.name)+'</div><div class="sub">@'+esc(ch.account)+'</div></div>'
                          +  '<div class="tl-track" style="width:'+timelineWidth+'px;height:'+rowHeight+'px">'
-                         +    gridLines(timelineWidth, rowHeight)
+                         +    gridLines(totalMin, rowHeight, mode)
                          +  '</div></div>';
                     rowIndex++;
                     ch.hostRows.forEach(hr => {
-                        const top = rowIndex * rowHeight;
-                        let bars = gridLines(timelineWidth, rowHeight);
-                        hr.sessions.forEach((s, idx) => {
+                        let bars = gridLines(totalMin, rowHeight, mode);
+                        hr.sessions.forEach((s) => {
                             const left = (Number(s.seg_start_min)||0)/60*pxPerHour;
                             const right = (Number(s.seg_end_min)||0)/60*pxPerHour;
-                            const w = Math.max(3, right-left);
-                            const label = fmtClock(s.seg_start_min)+'–'+fmtClock(s.seg_end_min);
-                            bars += '<div class="tl-bar" data-sid="'+esc(s.session_id)+'" data-idx="'+rowIndex+'" data-si="'+idx+'" '
+                            const w = Math.max(2, right-left);
+                            const merged = (Number(s.merged_count)||1) > 1;
+                            const label = shortLabel(s, mode);
+                            bars += '<div class="tl-bar '+(merged?'merged':'')+'" data-sid="'+esc(String((s.session_ids||[s.session_id]).join(',')))+'" '
                                  +  'style="left:'+left+'px;width:'+w+'px" title="'+esc(label+' · '+(s.channel_name||'')+' · '+(s.host_name||''))+'">'
                                  +  '<div class="txt">'+esc(label)+'</div></div>';
                         });
                         body += '<div class="tl-row" style="height:'+rowHeight+'px">'
                              +  '<div class="tl-label"><div>'+esc(hr.name)+'</div><div class="sub">Host</div></div>'
-                             +  '<div class="tl-track" data-row="'+rowIndex+'" style="width:'+timelineWidth+'px;height:'+rowHeight+'px">'+bars+'</div></div>';
+                             +  '<div class="tl-track" style="width:'+timelineWidth+'px;height:'+rowHeight+'px">'+bars+'</div></div>';
                         rowIndex++;
                     });
                 });
 
                 // now line
                 let nowLine = '';
-                if (currentData.date === currentData.today) {
-                    const nm = getNowMinJakarta();
-                    nowLine = '<div class="tl-now" style="left:'+(nm/60*pxPerHour)+'px;height:'+ (rowIndex*rowHeight) +'px"></div>';
+                const nowMin = Number(data.now_min);
+                if (!isNaN(nowMin) && nowMin >= 0 && nowMin <= totalMin) {
+                    nowLine = '<div class="tl-now" style="left:'+(nowMin/60*pxPerHour)+'px;height:'+ (rowIndex*rowHeight) +'px"></div>';
                 }
 
                 inner.innerHTML = ''
                   + '<div class="tl-header"><div class="tl-corner">Channel / Host</div><div class="tl-hours" style="width:'+timelineWidth+'px">'+hours+'</div></div>'
                   + '<div class="tl-body" style="height:'+ (rowIndex*rowHeight) +'px;width:'+ (labelW+timelineWidth) +'px">'+body+nowLine+'</div>';
 
-                // click handlers
                 inner.querySelectorAll('.tl-bar').forEach(el => {
                     el.addEventListener('click', (e) => {
                         e.stopPropagation();
-                        const sid = Number(el.getAttribute('data-sid'));
-                        const s = (currentData.sessions||[]).find(x=>Number(x.session_id)===sid);
+                        const sid = (el.getAttribute('data-sid')||'').split(',')[0];
+                        const s = (data.sessions||[]).find(x => String((x.session_ids||[x.session_id])[0]) === String(sid));
                         if (s) showDetail(s);
                     });
                 });
 
-                renderSummary(currentData.summary||[]);
-                statusEl.textContent = 'Tanggal ' + esc(currentData.date) + ' · ' + channels.length + ' channel, ' + (currentData.sessions||[]).length + ' sesi (host terdeteksi).';
+                renderSummary(data.summary||[], mode);
+                const totalSessions = (data.sessions||[]).length;
+                const totalParts = (data.sessions||[]).reduce((a,s)=>a+(Number(s.merged_count)||1),0);
+                statusEl.textContent = 'Periode ' + fmtRangeLabel(data) + ' · ' + channels.length + ' channel, ' + totalSessions + ' bar' + (totalParts!==totalSessions ? (' ('+totalParts+' sesi digabung)') : '') + '.';
             }
 
-            function gridLines(width, height){
+            function shortLabel(s, mode){
+                const st = (s.start_time||'').slice(11,16) || '';
+                const et = s.is_open ? 'now' : ((s.end_time||'').slice(11,16) || '');
+                if (mode === 'day') return st+'–'+et;
+                const sd = (s.start_time||'').slice(5,10).replace('-','/');
+                const ed = s.is_open ? '' : ((s.end_time||'').slice(5,10).replace('-','/'));
+                if (!s.is_open && ed && ed !== sd) return sd+' '+st+'–'+ed+' '+et;
+                return sd+' '+st+'–'+et;
+            }
+
+            function gridLines(totalMin, height, mode){
+                const totalHours = totalMin/60.0;
+                const step = chooseTickStep(pxPerHour, totalHours, mode);
                 let g = '';
-                for (let h=0; h<=24; h++) {
+                for (let h=0; h<=Math.ceil(totalHours)+0.001; h+=step) {
+                    if (h*60 > totalMin + 0.01) break;
                     const left = h*pxPerHour;
-                    g += '<div class="tl-gridline '+(h%6===0?'major':'')+'" style="left:'+left+'px;height:'+height+'px"></div>';
+                    let cls = 'tl-gridline';
+                    if (mode === 'day') {
+                        if (h % 24 === 0) cls += ' day';
+                        else if (h % 6 === 0) cls += ' major';
+                    } else {
+                        if (h % 24 === 0) cls += ' day';
+                        else if (h % 12 === 0) cls += ' major';
+                    }
+                    g += '<div class="'+cls+'" style="left:'+left+'px;height:'+height+'px"></div>';
                 }
                 return g;
             }
 
             function showDetail(s){
+                const merged = (Number(s.merged_count)||1) > 1;
                 const rows = [
-                    ['Session ID', s.session_id],
                     ['Channel Target', (s.channel_name||'-') + (s.tiktok_username? ' (@'+s.tiktok_username+')':'')],
                     ['Host Terdeteksi', s.host_name || '-'],
                     ['Mulai', s.start_time || '-'],
                     ['Selesai', s.end_time || (s.is_open ? 'Masih live / belum ditutup' : '-')],
-                    ['Durasi sesi', fmtDur(s.duration_seconds||0)],
-                    ['Durasi pada hari ini', fmtDur(s.day_seconds||0)],
-                    ['Total koin (sesi)', (Number(s.total_coins)||0).toLocaleString('id-ID') + ' c'],
-                    ['Rentang tampil', fmtClock(s.seg_start_min)+' – '+fmtClock(s.seg_end_min) + ' WIB'],
+                    ['Durasi total', fmtDur(s.duration_seconds||0)],
+                    ['Total koin (sesi gabungan)', (Number(s.total_coins)||0).toLocaleString('id-ID') + ' c'],
+                    ['Status', s.is_open ? 'Sedang berlangsung' : 'Selesai'],
                 ];
+                if (merged) {
+                    rows.splice(4, 0, ['Penggabungan', 'Gabungan ' + s.merged_count + ' sesi berdekatan (toleransi deteksi bot). ID: ' + esc((s.session_ids||[]).join(', '))]);
+                    rows.push(['Rincian durasi bagian', (s.part_durations||[]).map(d=>fmtDur(d)).join(' + ') || '-']);
+                } else {
+                    rows.splice(4, 0, ['Session ID', (s.session_ids||[s.session_id]).join(', ')]);
+                }
                 let html = '<table><tbody>';
-                rows.forEach(r => { html += '<tr><th style="width:42%">'+esc(r[0])+'</th><td>'+esc(String(r[1]))+'</td></tr>'; });
+                rows.forEach(r => { html += '<tr><th style="width:42%">'+esc(String(r[0]))+'</th><td>'+String(r[1]).replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</td></tr>'; });
                 html += '</tbody></table>';
                 detailBody.innerHTML = html;
                 detail.style.display = 'block';
             }
 
-            function renderSummary(summary){
+            function renderSummary(summary, mode){
                 const tbody = document.getElementById('summary-body');
                 if (!summary || !summary.length) {
-                    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">Tidak ada data untuk tanggal ini.</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">Tidak ada data untuk periode ini.</td></tr>';
                     return;
                 }
                 tbody.innerHTML = summary.map(r => {
                     const host = r.host_name && r.host_name !== '-' ? r.host_name : '-';
-                    const account = (r.channel_name || r.account || '-') + (r.account ? ' <small style="color:#94a3b8">@'+esc(r.account)+'</small>' : '');
+                    const account = esc(r.channel_name || r.account || '-') + (r.account ? ' <small style="color:#94a3b8">@'+esc(r.account)+'</small>' : '');
                     const dur = fmtDurParts(r.session_durations && r.session_durations.length ? r.session_durations : [r.total_duration||0]);
                     const coins = (Number(r.total_coins)||0).toLocaleString('id-ID') + ' c';
                     return '<tr>'
@@ -3099,35 +3204,42 @@ def view_timeline():
             }
 
             async function load(){
-                const d = dateInput.value || sumDateInput.value;
+                const mode = modeSel.value;
+                const params = new URLSearchParams();
+                params.set('mode', mode);
+                params.set('date', dateInput.value);
+                if (mode === 'custom') { params.set('start', startInput.value); params.set('end', endInput.value); }
+                syncUrl();
                 statusEl.textContent = 'Memuat data...';
                 try {
-                    const res = await fetch('/admin/timeline/data?date=' + encodeURIComponent(d), { cache: 'no-store' });
+                    const res = await fetch('/admin/timeline/data?' + params.toString(), { cache: 'no-store' });
                     const data = await res.json();
                     if (!res.ok) throw new Error(data && data.error || ('HTTP '+res.status));
                     currentData = data;
-                    dateInput.value = data.date; sumDateInput.value = data.date;
+                    if (data.date) dateInput.value = data.date;
+                    if (data.start) startInput.value = data.start;
+                    if (data.end) endInput.value = data.end;
                     render();
                 } catch(e){
                     statusEl.textContent = 'Gagal memuat data: ' + (e && e.message ? e.message : e);
                     inner.innerHTML = '<div class="tl-empty">Gagal memuat data timeline.</div>';
+                    document.getElementById('summary-body').innerHTML = '<tr><td colspan="4" class="empty-state">Gagal memuat data.</td></tr>';
                 }
             }
 
             // controls
-            document.getElementById('tl-prev').onclick = ()=> setDate(shiftDate(dateInput.value,-1));
-            document.getElementById('tl-next').onclick = ()=> setDate(shiftDate(dateInput.value,1));
-            document.getElementById('sum-prev').onclick = ()=> setDate(shiftDate(sumDateInput.value,-1));
-            document.getElementById('sum-next').onclick = ()=> setDate(shiftDate(sumDateInput.value,1));
-            document.getElementById('tl-today').onclick = ()=> setDate('{{ _today }}');
-            document.getElementById('sum-today').onclick = ()=> setDate('{{ _today }}');
-            dateInput.onchange = ()=> setDate(dateInput.value);
-            sumDateInput.onchange = ()=> setDate(sumDateInput.value);
-            document.getElementById('tl-zoom-in').onclick = ()=> { pxPerHour = Math.min(480, pxPerHour + 20); render(); };
-            document.getElementById('tl-zoom-out').onclick = ()=> { pxPerHour = Math.max(40, pxPerHour - 20); render(); };
-            document.getElementById('tl-row-up').onclick = ()=> { rowHeight = Math.min(80, rowHeight + 6); render(); };
-            document.getElementById('tl-row-down').onclick = ()=> { rowHeight = Math.max(24, rowHeight - 6); render(); };
-            document.getElementById('tl-reset').onclick = ()=> { pxPerHour = 120; rowHeight = 38; render(); };
+            modeSel.onchange = ()=> { updateModeUI(); syncUrl(); load(); };
+            dateInput.onchange = ()=> { syncUrl(); load(); };
+            document.getElementById('tl-prev').onclick = ()=> navigate(-1);
+            document.getElementById('tl-next').onclick = ()=> navigate(1);
+            document.getElementById('tl-today').onclick = ()=> { dateInput.value = '{{ _today }}'; startInput.value = '{{ _today }}'; endInput.value = '{{ _today }}'; syncUrl(); load(); };
+            document.getElementById('tl-apply').onclick = ()=> { if (endInput.value < startInput.value) endInput.value = startInput.value; syncUrl(); load(); };
+            startInput.onchange = ()=> { if (endInput.value < startInput.value) endInput.value = startInput.value; };
+            document.getElementById('tl-zoom-in').onclick = ()=> { pxPerHour = Math.min(600, pxPerHour + 15); render(); };
+            document.getElementById('tl-zoom-out').onclick = ()=> { pxPerHour = Math.max(8, pxPerHour - 15); render(); };
+            document.getElementById('tl-row-up').onclick = ()=> { rowHeight = Math.min(80, rowHeight + 4); render(); };
+            document.getElementById('tl-row-down').onclick = ()=> { rowHeight = Math.max(18, rowHeight - 4); render(); };
+            document.getElementById('tl-reset').onclick = ()=> { pxPerHour = 90; rowHeight = 30; render(); };
             document.getElementById('tl-reload').onclick = ()=> load();
             document.getElementById('tl-detail-close').onclick = ()=> { detail.style.display = 'none'; };
             document.addEventListener('click', (e)=>{ if (detail.style.display==='block' && !detail.contains(e.target) && !(e.target.closest && e.target.closest('.tl-bar'))) detail.style.display='none'; });
@@ -3149,18 +3261,33 @@ def view_timeline():
             wrap.addEventListener('wheel', (e)=>{
                 if (!e.ctrlKey) return;
                 e.preventDefault();
-                pxPerHour = Math.max(40, Math.min(480, pxPerHour + (e.deltaY < 0 ? 15 : -15)));
+                pxPerHour = Math.max(8, Math.min(600, pxPerHour + (e.deltaY < 0 ? 10 : -10)));
                 render();
             }, { passive: false });
 
+            // init from server
+            modeSel.value = {{ mode_json|safe }};
+            dateInput.value = {{ date_json|safe }};
+            startInput.value = {{ start_json|safe }};
+            endInput.value = {{ end_json|safe }};
+            updateModeUI();
             load();
-            // refresh now-line periodically when viewing today
-            setInterval(()=>{ if (currentData && currentData.date === currentData.today) render(); }, 60000);
+            setInterval(()=>{ if (currentData) { currentData.now_min = (Number(currentData.now_min)||0) + 1; render(); } }, 60000);
         })();
         </script>
     </body>
     </html>
     """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
 
-    today = _timeline_today_wib()
-    return render_template_string(html, date_str=date_str, _today=today)
+    import json as _json
+    return render_template_string(
+        html,
+        date_str=date_str,
+        start_str=start,
+        end_str=end,
+        _today=today,
+        mode_json=_json.dumps(mode),
+        date_json=_json.dumps(date_str),
+        start_json=_json.dumps(start),
+        end_json=_json.dumps(end),
+    )

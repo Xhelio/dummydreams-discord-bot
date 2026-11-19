@@ -3541,6 +3541,10 @@ def cancel_pending_verification(discord_id):
 # ----------------------------- Timeline -----------------------------
 
 
+# Gap tolerance for merging adjacent live sessions (bot detection glitches).
+TIMELINE_MERGE_GAP_SECONDS = 600
+
+
 def _wib_localize(dt_naive, wib=None):
     wib = wib or pytz.timezone("Asia/Jakarta")
     try:
@@ -3567,21 +3571,143 @@ def _parse_wib_dt(value, wib=None):
     return None
 
 
-def get_timeline_sessions_for_date(date_str: str) -> list:
-    """Live sessions that overlap the given WIB date (YYYY-MM-DD).
+def _normalize_timeline_host(host_name):
+    h = str(host_name or "").strip()
+    if h in ("", "Host", "-"):
+        return "-"
+    return h
 
-    Returns dicts with session, host, stream account/channel, and times
-    clamped to the day window for Gantt rendering.
+
+def _merge_timeline_sessions(raw_sessions, tolerance_seconds=None):
+    """Merge adjacent sessions for the same channel+host when the gap is small.
+
+    Sessions are merged when next.start - prev.end <= tolerance (including
+    overlaps). Durations and coins are summed; the merged span runs from the
+    earliest start to the latest end. View-time only (DB untouched).
     """
-    wib = pytz.timezone("Asia/Jakarta")
-    try:
-        day = datetime.strptime(str(date_str)[:10], "%Y-%m-%d").date()
-    except Exception:
-        day = datetime.now(wib).date()
-    day_start = _wib_localize(datetime.combine(day, datetime.min.time()), wib)
-    day_end = day_start + timedelta(days=1)
-    now = datetime.now(wib)
+    tol = TIMELINE_MERGE_GAP_SECONDS if tolerance_seconds is None else int(tolerance_seconds)
+    groups = {}
+    for s in raw_sessions:
+        key = (str(s.get("tiktok_username") or "").lower(), str(s.get("host_key") or ""))
+        groups.setdefault(key, []).append(s)
 
+    merged = []
+    for _key, items in groups.items():
+        items = sorted(items, key=lambda x: (x.get("start_dt"), int(x.get("session_id") or 0)))
+        cur = None
+        for s in items:
+            if cur is None:
+                cur = {
+                    "session_ids": [s["session_id"]],
+                    "parts": [s],
+                    "tiktok_username": s["tiktok_username"],
+                    "channel_name": s.get("channel_name") or s["tiktok_username"],
+                    "host_name": s.get("host_name") or "-",
+                    "host_key": s.get("host_key") or "",
+                    "start_dt": s["start_dt"],
+                    "end_dt": s["end_dt"],
+                    "duration_seconds": int(s.get("duration_seconds") or 0),
+                    "total_coins": int(s.get("total_coins") or 0),
+                    "is_open": bool(s.get("is_open")),
+                }
+                continue
+            gap = (s["start_dt"] - cur["end_dt"]).total_seconds()
+            if gap <= tol:
+                cur["session_ids"].append(s["session_id"])
+                cur["parts"].append(s)
+                if s["end_dt"] > cur["end_dt"]:
+                    cur["end_dt"] = s["end_dt"]
+                if s["start_dt"] < cur["start_dt"]:
+                    cur["start_dt"] = s["start_dt"]
+                cur["duration_seconds"] += int(s.get("duration_seconds") or 0)
+                cur["total_coins"] += int(s.get("total_coins") or 0)
+                cur["is_open"] = bool(cur["is_open"] or s.get("is_open"))
+                if (not cur["channel_name"] or cur["channel_name"] == cur["tiktok_username"]) and s.get("channel_name"):
+                    cur["channel_name"] = s["channel_name"]
+                if cur["host_name"] in ("", "-") and s.get("host_name") not in ("", "-", None):
+                    cur["host_name"] = s["host_name"]
+                    cur["host_key"] = s.get("host_key") or ""
+            else:
+                merged.append(cur)
+                cur = {
+                    "session_ids": [s["session_id"]],
+                    "parts": [s],
+                    "tiktok_username": s["tiktok_username"],
+                    "channel_name": s.get("channel_name") or s["tiktok_username"],
+                    "host_name": s.get("host_name") or "-",
+                    "host_key": s.get("host_key") or "",
+                    "start_dt": s["start_dt"],
+                    "end_dt": s["end_dt"],
+                    "duration_seconds": int(s.get("duration_seconds") or 0),
+                    "total_coins": int(s.get("total_coins") or 0),
+                    "is_open": bool(s.get("is_open")),
+                }
+        if cur is not None:
+            merged.append(cur)
+
+    merged.sort(key=lambda x: (x.get("start_dt"), str(x.get("channel_name") or ""), str(x.get("host_name") or "")))
+    return merged
+
+
+def _timeline_period(date_str=None, mode="day", start=None, end=None):
+    """Resolve mode/date into (mode, anchor_date, period_start_date, period_end_date, wib)."""
+    wib = pytz.timezone("Asia/Jakarta")
+    today = datetime.now(wib).date()
+    try:
+        anchor = datetime.strptime(str(date_str or today.isoformat())[:10], "%Y-%m-%d").date()
+    except Exception:
+        anchor = today
+    mode = str(mode or "day").lower()
+    if mode not in ("day", "week", "month", "custom"):
+        mode = "day"
+
+    if mode == "week":
+        p_start = anchor - timedelta(days=anchor.weekday())  # Monday
+        p_end = p_start + timedelta(days=6)
+    elif mode == "month":
+        p_start = anchor.replace(day=1)
+        if p_start.month == 12:
+            next_month = p_start.replace(year=p_start.year + 1, month=1, day=1)
+        else:
+            next_month = p_start.replace(month=p_start.month + 1, day=1)
+        p_end = next_month - timedelta(days=1)
+    elif mode == "custom":
+        try:
+            p_start = datetime.strptime(str(start or anchor.isoformat())[:10], "%Y-%m-%d").date()
+        except Exception:
+            p_start = anchor
+        try:
+            p_end = datetime.strptime(str(end or anchor.isoformat())[:10], "%Y-%m-%d").date()
+        except Exception:
+            p_end = p_start
+        if p_end < p_start:
+            p_start, p_end = p_end, p_start
+        # Safety cap.
+        if (p_end - p_start).days > 62:
+            p_end = p_start + timedelta(days=62)
+    else:
+        mode = "day"
+        p_start = anchor
+        p_end = anchor
+
+    return mode, anchor, p_start, p_end, wib
+
+
+def get_timeline_data(date_str=None, mode="day", start=None, end=None):
+    """Timeline sessions + summary for day/week/month/custom periods.
+
+    - day: sessions attributed to the day they started; axis may extend past
+      24:00 if a session continues into the next day.
+    - week/month/custom: sessions attributed to the period by start date.
+    Adjacent same-channel+host sessions within the merge tolerance are combined.
+    """
+    mode, anchor, p_start, p_end, wib = _timeline_period(date_str, mode, start, end)
+    now = datetime.now(wib)
+    range_start_dt = _wib_localize(datetime.combine(p_start, datetime.min.time()), wib)
+    range_end_dt = _wib_localize(datetime.combine(p_end + timedelta(days=1), datetime.min.time()), wib)
+
+    fetch_start = (p_start - timedelta(days=1)).isoformat()
+    fetch_end = p_end.isoformat()
     conn = get_db_connection()
     try:
         cur = conn.cursor()
@@ -3594,74 +3720,101 @@ def get_timeline_sessions_for_date(date_str: str) -> list:
                    s.total_coins
             FROM live_sessions s
             LEFT JOIN hosts h ON LOWER(h.tiktok_username) = LOWER(s.tiktok_username)
-            WHERE substr(s.start_time, 1, 10) <= ?
-              AND substr(COALESCE(NULLIF(s.end_time, ''), ?), 1, 10) >= ?
+            WHERE substr(s.start_time, 1, 10) BETWEEN ? AND ?
             ORDER BY s.start_time ASC, s.session_id ASC
             """,
-            (day.isoformat(), now.strftime("%Y-%m-%d %H:%M:%S"), day.isoformat()),
+            (fetch_start, fetch_end),
         ).fetchall()
     finally:
         conn.close()
 
-    out = []
+    raw = []
     for r in rows:
         start_dt = _parse_wib_dt(r[4], wib)
         if not start_dt:
             continue
+        # Attribute by start date falling in the requested period.
+        if not (p_start <= start_dt.date() <= p_end):
+            continue
         end_dt = _parse_wib_dt(r[5], wib)
         if end_dt is None:
-            # Ongoing session: clamp to now (or end of day for past days).
-            end_dt = now if now < day_end else day_end
-        # Ignore inverted/empty intervals.
+            end_dt = now
         if end_dt <= start_dt:
             continue
-        seg_start = max(start_dt, day_start)
-        seg_end = min(end_dt, day_end)
-        if seg_end <= seg_start:
-            continue
-        host_name = str(r[3] or "").strip()
-        if host_name in ("", "Host", "-"):
-            host_name = "-"
-        # Portion within the selected day (seconds), for per-day totals.
-        day_seconds = int((seg_end - seg_start).total_seconds())
-        out.append({
+        host_name = _normalize_timeline_host(r[3])
+        raw.append({
             "session_id": int(r[0]),
             "tiktok_username": str(r[1] or "").lower().lstrip("@"),
             "channel_name": str(r[2] or r[1] or "").strip(),
             "host_name": host_name,
-            "host_key": (host_name if host_name != "-" else "").strip().lower(),
+            "host_key": "" if host_name == "-" else host_name.lower(),
             "start_time": str(r[4] or ""),
             "end_time": str(r[5] or "") if r[5] else None,
-            "seg_start": seg_start.isoformat(),
-            "seg_end": seg_end.isoformat(),
-            "seg_start_min": round((seg_start - day_start).total_seconds() / 60.0, 3),
-            "seg_end_min": round((seg_end - day_start).total_seconds() / 60.0, 3),
             "duration_seconds": int(r[6] or 0),
-            "day_seconds": max(0, day_seconds),
             "total_coins": int(r[8] or 0),
             "is_open": r[5] in (None, ""),
+            "start_dt": start_dt,
+            "end_dt": end_dt,
         })
-    return out
 
+    merged = _merge_timeline_sessions(raw)
 
-def get_timeline_daily_summary(date_str: str) -> list:
-    """Per (host, stream account) summary for a WIB day.
+    # Determine axis range.
+    axis_start = range_start_dt
+    axis_end = range_end_dt
+    if mode == "day":
+        # Allow extension past midnight for sessions started on this day.
+        min_end = range_start_dt + timedelta(days=1)
+        max_end = min_end
+        for s in merged:
+            if s["end_dt"] > max_end:
+                max_end = s["end_dt"]
+        axis_end = max(min_end, max_end)
+        cap = range_start_dt + timedelta(days=3)
+        if axis_end > cap:
+            axis_end = cap
+    else:
+        # For ranges, allow a session that ends after the period to extend the axis.
+        for s in merged:
+            if s["end_dt"] > axis_end:
+                axis_end = s["end_dt"]
+        cap = range_end_dt + timedelta(days=2)
+        if axis_end > cap:
+            axis_end = cap
 
-    Duration comes from live sessions overlapping the day; coins come from
-    gift_logs on that log_date attributed to the same host+account.
-    """
-    wib = pytz.timezone("Asia/Jakarta")
-    try:
-        day = datetime.strptime(str(date_str)[:10], "%Y-%m-%d").date()
-    except Exception:
-        day = datetime.now(wib).date()
-    day_str = day.isoformat()
+    total_min = max(1.0, (axis_end - axis_start).total_seconds() / 60.0)
 
-    sessions = get_timeline_sessions_for_date(day_str)
+    sessions_out = []
+    for s in merged:
+        seg_start = max(s["start_dt"], axis_start)
+        seg_end = min(s["end_dt"], axis_end)
+        if seg_end <= seg_start:
+            continue
+        part_durations = [int(p.get("duration_seconds") or 0) for p in s.get("parts", [])]
+        sessions_out.append({
+            "session_ids": s["session_ids"],
+            "session_id": s["session_ids"][0] if s["session_ids"] else None,
+            "merged_count": len(s["session_ids"]),
+            "tiktok_username": s["tiktok_username"],
+            "channel_name": s["channel_name"],
+            "host_name": s["host_name"],
+            "host_key": s["host_key"],
+            "start_time": s["start_dt"].strftime("%Y-%m-%d %H:%M:%S"),
+            "end_time": (None if s["is_open"] else s["end_dt"].strftime("%Y-%m-%d %H:%M:%S")),
+            "seg_start": seg_start.isoformat(),
+            "seg_end": seg_end.isoformat(),
+            "seg_start_min": round((seg_start - axis_start).total_seconds() / 60.0, 3),
+            "seg_end_min": round((seg_end - axis_start).total_seconds() / 60.0, 3),
+            "duration_seconds": int(s["duration_seconds"] or 0),
+            "part_durations": part_durations,
+            "total_coins": int(s["total_coins"] or 0),
+            "is_open": bool(s["is_open"]),
+        })
 
-    # Aggregate duration by (host_key, account_key). Keep display names.
+    # Summary over the period: duration from (merged) sessions started in period,
+    # coins from gift_logs in period.
     dur_map = {}
-    for s in sessions:
+    for s in sessions_out:
         host_disp = s["host_name"] if s["host_name"] != "-" else "-"
         account = s["tiktok_username"]
         key = (host_disp.lower() if host_disp != "-" else "-", account)
@@ -3674,16 +3827,14 @@ def get_timeline_daily_summary(date_str: str) -> list:
             "session_durations": [],
             "session_count": 0,
         })
-        ds = int(s.get("day_seconds") or 0)
-        entry["total_duration"] += ds
-        entry["session_durations"].append(ds)
-        entry["session_count"] += 1
-        # Prefer a real host label if we only had '-'.
+        entry["total_duration"] += int(s.get("duration_seconds") or 0)
+        parts = s.get("part_durations") or [int(s.get("duration_seconds") or 0)]
+        entry["session_durations"].extend([int(x or 0) for x in parts])
+        entry["session_count"] += int(s.get("merged_count") or 1)
         if entry["host_name"] == "-" and host_disp != "-":
             entry["host_name"] = host_disp
             entry["host_key"] = s["host_key"]
 
-    # Coins from gift_logs for that day, grouped by host+target account.
     coin_map = {}
     conn = get_db_connection()
     try:
@@ -3696,18 +3847,16 @@ def get_timeline_daily_summary(date_str: str) -> list:
                    COALESCE(SUM(g.coins), 0) AS coins
             FROM gift_logs g
             LEFT JOIN hosts h ON LOWER(h.tiktok_username) = LOWER(g.target_username)
-            WHERE substr(g.log_date, 1, 10) = ?
+            WHERE substr(g.log_date, 1, 10) BETWEEN ? AND ?
             GROUP BY 1, 2
             """,
-            (day_str,),
+            (p_start.isoformat(), p_end.isoformat()),
         ).fetchall()
     finally:
         conn.close()
 
     for host_name, account, channel_name, coins in rows:
-        host_disp = str(host_name or "-").strip() or "-"
-        if host_disp == "Host":
-            host_disp = "-"
+        host_disp = _normalize_timeline_host(host_name)
         acct = str(account or "").lower().lstrip("@")
         key = (host_disp.lower() if host_disp != "-" else "-", acct)
         entry = coin_map.setdefault(key, {
@@ -3724,9 +3873,8 @@ def get_timeline_daily_summary(date_str: str) -> list:
         if (not entry["channel_name"] or entry["channel_name"] == acct) and channel_name:
             entry["channel_name"] = str(channel_name)
 
-    # Merge: include any key that has duration or coins.
     keys = set(dur_map.keys()) | set(coin_map.keys())
-    out = []
+    summary = []
     for key in keys:
         d = dur_map.get(key, {})
         c = coin_map.get(key, {})
@@ -3737,10 +3885,9 @@ def get_timeline_daily_summary(date_str: str) -> list:
         coins = int(c.get("coins") or 0)
         session_durations = list(d.get("session_durations") or [])
         session_count = int(d.get("session_count") or len(session_durations))
-        # Skip completely empty rows.
         if total_duration <= 0 and coins <= 0 and session_count <= 0:
             continue
-        out.append({
+        summary.append({
             "host_name": host_name,
             "host_key": "" if host_name == "-" else host_name.lower(),
             "account": account,
@@ -3750,7 +3897,30 @@ def get_timeline_daily_summary(date_str: str) -> list:
             "session_count": session_count,
             "total_coins": coins,
         })
+    summary.sort(key=lambda x: ((x["host_name"] or "").lower(), (x["channel_name"] or "").lower(), x["account"]))
 
-    # Sort: host name, then channel/account.
-    out.sort(key=lambda x: ((x["host_name"] or "").lower(), (x["channel_name"] or "").lower(), x["account"]))
-    return out
+    now_min = (now - axis_start).total_seconds() / 60.0
+    return {
+        "mode": mode,
+        "date": anchor.isoformat(),
+        "start": p_start.isoformat(),
+        "end": p_end.isoformat(),
+        "today": now.date().isoformat(),
+        "now_iso": now.isoformat(),
+        "range_start": axis_start.isoformat(),
+        "range_end": axis_end.isoformat(),
+        "range_total_min": round(total_min, 3),
+        "now_min": round(now_min, 3),
+        "merge_gap_seconds": TIMELINE_MERGE_GAP_SECONDS,
+        "sessions": sessions_out,
+        "summary": summary,
+    }
+
+
+# Backward-compatible wrappers (older route shape).
+def get_timeline_sessions_for_date(date_str: str) -> list:
+    return get_timeline_data(date_str, mode="day").get("sessions", [])
+
+
+def get_timeline_daily_summary(date_str: str) -> list:
+    return get_timeline_data(date_str, mode="day").get("summary", [])
