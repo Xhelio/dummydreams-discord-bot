@@ -2925,10 +2925,32 @@ def view_timeline():
             let nowBaseMs = 0;
             let rangeStartMs = NaN;
 
+            function nowWibParts(){
+                try {
+                    const parts = new Intl.DateTimeFormat('en-GB', { timeZone:'Asia/Jakarta', year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false }).formatToParts(new Date());
+                    const get = t => (parts.find(p=>p.type===t)||{}).value || '';
+                    let h = parseInt(get('hour'), 10); if (isNaN(h)) h = 0; if (h === 24) h = 0;
+                    return { y:+get('year'), mo:+get('month'), d:+get('day'), h:h, mi:+(get('minute')||0), s:+(get('second')||0) };
+                } catch(e) { return null; }
+            }
+            function nowWibLabel(){
+                const p = nowWibParts(); if (!p) return '';
+                return pad(p.y)+'-'+pad(p.mo)+'-'+pad(p.d)+' '+pad(p.h)+':'+pad(p.mi)+' WIB';
+            }
+
             function currentNowMin(){
                 // Prefer device clock relative to range_start (accurate even if server clock is off).
                 if (!isNaN(rangeStartMs)) {
                     return (Date.now() - rangeStartMs) / 60000.0;
+                }
+                // Fallback: derive from current WIB clock if range_start unavailable.
+                const p = nowWibParts();
+                if (p && currentData && currentData.range_start) {
+                    const rs = Date.parse(currentData.range_start);
+                    if (!isNaN(rs)) {
+                        rangeStartMs = rs;
+                        return (Date.now() - rangeStartMs) / 60000.0;
+                    }
                 }
                 if (nowBaseMin === null) return NaN;
                 return nowBaseMin + (Date.now() - nowBaseMs) / 60000.0;
@@ -3075,7 +3097,8 @@ def view_timeline():
                     }
                     inner.innerHTML = '<div class="tl-header"><div class="tl-corner">Channel / Host</div><div class="tl-hours" style="width:'+timelineWidth+'px">'+hours+'</div></div><div class="tl-empty">Tidak ada sesi live dengan host terdeteksi pada periode ini.</div>';
                     renderSummary(data.summary||[], mode);
-                    statusEl.textContent = 'Periode ' + fmtRangeLabel(data) + ' · tidak ada data.';
+                    const wibNowE = nowWibLabel();
+                    statusEl.textContent = 'Periode ' + fmtRangeLabel(data) + ' · tidak ada data.' + (wibNowE ? (' Waktu sekarang: ' + wibNowE + '.') : '');
                     return;
                 }
 
@@ -3138,7 +3161,8 @@ def view_timeline():
                 renderSummary(data.summary||[], mode);
                 const totalSessions = (data.sessions||[]).length;
                 const totalParts = (data.sessions||[]).reduce((a,s)=>a+(Number(s.merged_count)||1),0);
-                statusEl.textContent = 'Periode ' + fmtRangeLabel(data) + ' · ' + channels.length + ' channel, ' + totalSessions + ' bar' + (totalParts!==totalSessions ? (' ('+totalParts+' sesi digabung)') : '') + '.';
+                const wibNow = nowWibLabel();
+                statusEl.textContent = 'Periode ' + fmtRangeLabel(data) + ' · ' + channels.length + ' channel, ' + totalSessions + ' bar' + (totalParts!==totalSessions ? (' ('+totalParts+' sesi digabung)') : '') + '.' + (wibNow ? (' Waktu sekarang: ' + wibNow + '.') : '');
             }
 
             function shortLabel(s, mode){
