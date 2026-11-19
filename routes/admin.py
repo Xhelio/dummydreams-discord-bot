@@ -3391,13 +3391,17 @@ def view_timeline():
                     <button class="tl-btn btn-secondary icon" id="tl-row-up" title="Expand">+</button>
                 </div>
                 <div class="group">
+                    <label class="inline-check" style="margin:0; font-size:0.78rem; font-weight:600; color:#e2e8f0; text-transform:none; letter-spacing:0;"><input type="checkbox" id="tl-hide-details"> Hide details <span class="info-i" data-tip="Hide bar time labels and duration breakdowns.">!</span></label>
+                    <label class="inline-check" style="margin:0; font-size:0.78rem; font-weight:600; color:#e2e8f0; text-transform:none; letter-spacing:0;"><input type="checkbox" id="tl-merge-hosts"> Merge hosts <span class="info-i" data-tip="Combine the same host across channels into one row (hours summed).">!</span></label>
+                </div>
+                <div class="group">
                     <button class="tl-btn btn-secondary" id="tl-reset">Reset</button>
                     <button class="tl-btn" id="tl-reload">Reload</button>
                 </div>
             </div>
             <details class="tl-legend-box">
                 <summary>ℹ️ Display info</summary>
-                <div class="tl-legend">X: time (WIB). Y: host, grouped by target channel. Only rows with data are shown. Nearby sessions (same channel+host) are merged. Click a bar for details. Red line = now (if in range).</div>
+                <div class="tl-legend">X: time (WIB). Y: host (grouped by channel, or merged by host). Each host has its own color. Nearby sessions are merged. Red line = now.</div>
             </details>
             <div id="tl-status" class="section-note">Loading...</div>
             <div class="tl-wrap" id="tl-wrap">
@@ -3458,6 +3462,8 @@ def view_timeline():
             let nowBaseMin = null;
             let nowBaseMs = 0;
             let rangeStartMs = NaN;
+            let hideDetails = false;
+            let mergeHosts = false;
 
             function nowWibParts(){
                 try {
@@ -3510,7 +3516,7 @@ def view_timeline():
                 const arr = (durations && durations.length) ? durations : [0];
                 const total = arr.reduce((a,b)=>a+(Number(b)||0),0);
                 let text = fmtDur(total);
-                if (arr.length > 1) {
+                if (!hideDetails && arr.length > 1) {
                     text += ' <small style="color:#94a3b8">(' + arr.map(d=>fmtDur(d)).join(' + ') + ')</small>';
                 }
                 return text;
@@ -3581,8 +3587,36 @@ def view_timeline():
                 load();
             }
 
+            function hostColor(key, merged){
+                key = String(key || '');
+                let h = 0;
+                for (let i = 0; i < key.length; i++) h = ((h * 31) + key.charCodeAt(i)) >>> 0;
+                const hue = h % 360;
+                const sat = 62;
+                const light = merged ? 48 : 40;
+                const bg = 'hsl(' + hue + ',' + sat + '%,' + light + '%)';
+                const border = 'hsla(' + hue + ',' + Math.min(85, sat + 18) + '%,' + Math.min(78, light + 28) + '%,' + (merged ? 0.55 : 0.45) + ')';
+                return { bg: bg, border: border };
+            }
+
             function buildModel(data){
                 const sessions = Array.isArray(data.sessions)?data.sessions:[];
+                if (mergeHosts) {
+                    const hostMap = new Map();
+                    sessions.forEach(s => {
+                        const host = (s.host_name && s.host_name !== '-') ? s.host_name : null;
+                        if (!host) return;
+                        const hKey = (s.host_key || host.toLowerCase());
+                        if (!hostMap.has(hKey)) hostMap.set(hKey, { key: hKey, name: host, sessions: [], channels: new Set(), accounts: new Set() });
+                        const hr = hostMap.get(hKey);
+                        hr.sessions.push(s);
+                        if (s.channel_name) hr.channels.add(s.channel_name);
+                        if (s.tiktok_username) hr.accounts.add(s.tiktok_username);
+                    });
+                    const rows = Array.from(hostMap.values()).sort((a,b)=> (a.name||'').localeCompare(b.name||''));
+                    rows.forEach(r => { r.channelCount = r.channels.size; r.accountCount = r.accounts.size; });
+                    return { mergedHosts: true, rows: rows };
+                }
                 const chanMap = new Map();
                 sessions.forEach(s => {
                     const host = (s.host_name && s.host_name !== '-') ? s.host_name : null;
@@ -3590,13 +3624,13 @@ def view_timeline():
                     const chKey = (s.tiktok_username||'').toLowerCase() || ('ch:'+s.channel_name);
                     if (!chanMap.has(chKey)) chanMap.set(chKey, { key: chKey, name: s.channel_name || s.tiktok_username || '-', account: s.tiktok_username || '', hosts: new Map() });
                     const ch = chanMap.get(chKey);
-                    const hKey = host.toLowerCase();
-                    if (!ch.hosts.has(hKey)) ch.hosts.set(hKey, { name: host, sessions: [] });
+                    const hKey = (s.host_key || host.toLowerCase());
+                    if (!ch.hosts.has(hKey)) ch.hosts.set(hKey, { key: hKey, name: host, sessions: [] });
                     ch.hosts.get(hKey).sessions.push(s);
                 });
                 const channels = Array.from(chanMap.values()).sort((a,b)=> (a.name||'').localeCompare(b.name||''));
                 channels.forEach(ch => { ch.hostRows = Array.from(ch.hosts.values()).sort((a,b)=> (a.name||'').localeCompare(b.name||'')); });
-                return channels;
+                return { mergedHosts: false, channels: channels };
             }
 
             function chooseTickStep(pxPerHour, totalHours, mode){
@@ -3618,7 +3652,8 @@ def view_timeline():
             function render(){
                 if (!currentData) return;
                 const data = currentData;
-                const channels = buildModel(data);
+                const model = buildModel(data);
+                const isMergedView = !!model.mergedHosts;
                 const totalMin = Math.max(1, Number(data.range_total_min)||1440);
                 const totalHours = totalMin / 60.0;
                 if (autoFit) pxPerHour = fitPxPerHour(totalHours);
@@ -3628,18 +3663,20 @@ def view_timeline():
 
                 periodLabel.textContent = '(' + fmtRangeLabel(data) + ')';
                 const mt = modeTitle(mode);
-                summaryTitle.textContent = 'Summary (' + mt + ')';
+                summaryTitle.textContent = 'Summary (' + mt + ')' + (isMergedView ? ' · hosts merged' : '');
                 sumDurHead.textContent = 'Total duration (' + mt.toLowerCase() + ')';
                 sumCoinHead.textContent = 'Total coins (' + mt.toLowerCase() + ')';
 
-                if (!channels.length) {
+                const empty = isMergedView ? (!(model.rows && model.rows.length)) : (!(model.channels && model.channels.length));
+                const cornerLabel = isMergedView ? 'Host' : 'Channel / Host';
+                if (empty) {
                     const step = chooseTickStep(pxPerHour, totalHours, mode);
                     let hours = '';
                     for (let h=0; h<=Math.ceil(totalHours); h+=step) {
                         const left = Math.min(timelineWidth, h*pxPerHour);
                         hours += '<div class="tl-hour-mark" style="left:'+left+'px">'+esc(fmtTick(h*60, mode))+'</div>';
                     }
-                    inner.innerHTML = '<div class="tl-header"><div class="tl-corner">Channel / Host</div><div class="tl-hours" style="width:'+timelineWidth+'px">'+hours+'</div></div><div class="tl-empty">No live sessions with a detected host in this period.</div>';
+                    inner.innerHTML = '<div class="tl-header"><div class="tl-corner">'+cornerLabel+'</div><div class="tl-hours" style="width:'+timelineWidth+'px">'+hours+'</div></div><div class="tl-empty">No live sessions with a detected host in this period.</div>';
                     renderSummary(data.summary||[], mode);
                     const wibNowE = nowWibLabel();
                     statusEl.textContent = 'Period ' + fmtRangeLabel(data) + ' · no data.' + (wibNowE ? (' Now: ' + wibNowE + '.') : '');
@@ -3654,33 +3691,49 @@ def view_timeline():
                     hours += '<div class="tl-hour-mark" style="left:'+left+'px">'+esc(fmtTick(h*60, mode))+'</div>';
                 }
 
+                function renderBar(s, hostKey){
+                    const left = (Number(s.seg_start_min)||0)/60*pxPerHour;
+                    const right = (Number(s.seg_end_min)||0)/60*pxPerHour;
+                    const w = Math.max(2, right-left);
+                    const merged = (Number(s.merged_count)||1) > 1;
+                    const label = shortLabel(s, mode);
+                    const c = hostColor(hostKey || s.host_key || s.host_name, merged);
+                    const txt = hideDetails ? '' : '<div class="txt">'+esc(label)+'</div>';
+                    return '<div class="tl-bar '+(merged?'merged':'')+'" data-sid="'+esc(String((s.session_ids||[s.session_id]).join(',')))+'" '
+                         + 'style="left:'+left+'px;width:'+w+'px;background:'+c.bg+';border-color:'+c.border+'" '
+                         + 'title="'+esc(label+' · '+(s.channel_name||'')+' · '+(s.host_name||''))+'">'+txt+'</div>';
+                }
+
                 let body = '';
                 let rowIndex = 0;
-                channels.forEach(ch => {
-                    body += '<div class="tl-row group-row" style="height:'+rowHeight+'px">'
-                         +  '<div class="tl-label"><div>'+esc(ch.name)+'</div><div class="sub">@'+esc(ch.account)+'</div></div>'
-                         +  '<div class="tl-track" style="width:'+timelineWidth+'px;height:'+rowHeight+'px">'
-                         +    gridLines(totalMin, rowHeight, mode)
-                         +  '</div></div>';
-                    rowIndex++;
-                    ch.hostRows.forEach(hr => {
+                if (isMergedView) {
+                    (model.rows || []).forEach(hr => {
                         let bars = gridLines(totalMin, rowHeight, mode);
-                        hr.sessions.forEach((s) => {
-                            const left = (Number(s.seg_start_min)||0)/60*pxPerHour;
-                            const right = (Number(s.seg_end_min)||0)/60*pxPerHour;
-                            const w = Math.max(2, right-left);
-                            const merged = (Number(s.merged_count)||1) > 1;
-                            const label = shortLabel(s, mode);
-                            bars += '<div class="tl-bar '+(merged?'merged':'')+'" data-sid="'+esc(String((s.session_ids||[s.session_id]).join(',')))+'" '
-                                 +  'style="left:'+left+'px;width:'+w+'px" title="'+esc(label+' · '+(s.channel_name||'')+' · '+(s.host_name||''))+'">'
-                                 +  '<div class="txt">'+esc(label)+'</div></div>';
-                        });
+                        (hr.sessions || []).forEach((s) => { bars += renderBar(s, hr.key); });
+                        const sub = (hr.channelCount || 0) > 1 ? (hr.channelCount + ' channels') : ((hr.channelCount || 0) === 1 ? '1 channel' : 'Host');
                         body += '<div class="tl-row" style="height:'+rowHeight+'px">'
-                             +  '<div class="tl-label"><div>'+esc(hr.name)+'</div><div class="sub">Host</div></div>'
+                             +  '<div class="tl-label"><div>'+esc(hr.name)+'</div><div class="sub">'+esc(sub)+'</div></div>'
                              +  '<div class="tl-track" style="width:'+timelineWidth+'px;height:'+rowHeight+'px">'+bars+'</div></div>';
                         rowIndex++;
                     });
-                });
+                } else {
+                    (model.channels || []).forEach(ch => {
+                        body += '<div class="tl-row group-row" style="height:'+rowHeight+'px">'
+                             +  '<div class="tl-label"><div>'+esc(ch.name)+'</div><div class="sub">@'+esc(ch.account)+'</div></div>'
+                             +  '<div class="tl-track" style="width:'+timelineWidth+'px;height:'+rowHeight+'px">'
+                             +    gridLines(totalMin, rowHeight, mode)
+                             +  '</div></div>';
+                        rowIndex++;
+                        (ch.hostRows || []).forEach(hr => {
+                            let bars = gridLines(totalMin, rowHeight, mode);
+                            (hr.sessions || []).forEach((s) => { bars += renderBar(s, hr.key); });
+                            body += '<div class="tl-row" style="height:'+rowHeight+'px">'
+                                 +  '<div class="tl-label"><div>'+esc(hr.name)+'</div><div class="sub">Host</div></div>'
+                                 +  '<div class="tl-track" style="width:'+timelineWidth+'px;height:'+rowHeight+'px">'+bars+'</div></div>';
+                            rowIndex++;
+                        });
+                    });
+                }
 
                 // now line (real-time position within range)
                 let nowLine = '';
@@ -3691,7 +3744,7 @@ def view_timeline():
                 }
 
                 inner.innerHTML = ''
-                  + '<div class="tl-header"><div class="tl-corner">Channel / Host</div><div class="tl-hours" style="width:'+timelineWidth+'px">'+hours+'</div></div>'
+                  + '<div class="tl-header"><div class="tl-corner">'+cornerLabel+'</div><div class="tl-hours" style="width:'+timelineWidth+'px">'+hours+'</div></div>'
                   + '<div class="tl-body" style="height:'+ (rowIndex*rowHeight) +'px">'+body+nowLine+'</div>';
 
                 // Position the now line relative to the track area (after the sticky label
@@ -3724,7 +3777,13 @@ def view_timeline():
                 const totalSessions = (data.sessions||[]).length;
                 const totalParts = (data.sessions||[]).reduce((a,s)=>a+(Number(s.merged_count)||1),0);
                 const wibNow = nowWibLabel();
-                statusEl.textContent = 'Period ' + fmtRangeLabel(data) + ' · ' + channels.length + ' channels, ' + totalSessions + ' bars' + (totalParts!==totalSessions ? (' ('+totalParts+' sessions merged)') : '') + '.' + (wibNow ? (' Now: ' + wibNow + '.') : '');
+                if (isMergedView) {
+                    const hostCount = (model.rows || []).length;
+                    statusEl.textContent = 'Period ' + fmtRangeLabel(data) + ' · ' + hostCount + ' hosts, ' + totalSessions + ' bars' + (totalParts!==totalSessions ? (' ('+totalParts+' sessions merged)') : '') + '. Hosts merged across channels.' + (wibNow ? (' Now: ' + wibNow + '.') : '');
+                } else {
+                    const chanCount = (model.channels || []).length;
+                    statusEl.textContent = 'Period ' + fmtRangeLabel(data) + ' · ' + chanCount + ' channels, ' + totalSessions + ' bars' + (totalParts!==totalSessions ? (' ('+totalParts+' sessions merged)') : '') + '.' + (wibNow ? (' Now: ' + wibNow + '.') : '');
+                }
             }
 
             function shortLabel(s, mode){
@@ -3824,20 +3883,74 @@ def view_timeline():
                 detail.style.display = 'block';
             }
 
+            function displaySummary(summary){
+                if (!mergeHosts) return Array.isArray(summary) ? summary : [];
+                const byHost = new Map();
+                (summary || []).forEach(r => {
+                    const hostName = r.host_name && r.host_name !== '-' ? r.host_name : '-';
+                    const key = (r.host_key || (hostName !== '-' ? hostName.toLowerCase() : ('__' + (r.account || ''))));
+                    if (!byHost.has(key)) {
+                        byHost.set(key, {
+                            host_name: hostName,
+                            host_key: r.host_key || '',
+                            accounts: new Set(),
+                            channels: new Set(),
+                            total_duration: 0,
+                            session_durations: [],
+                            session_count: 0,
+                            total_coins: 0,
+                        });
+                    }
+                    const e = byHost.get(key);
+                    if (e.host_name === '-' && hostName !== '-') e.host_name = hostName;
+                    if (r.account) e.accounts.add(r.account);
+                    if (r.channel_name) e.channels.add(r.channel_name);
+                    e.total_duration += Number(r.total_duration) || 0;
+                    const parts = (r.session_durations && r.session_durations.length) ? r.session_durations : (r.total_duration ? [r.total_duration] : []);
+                    parts.forEach(p => e.session_durations.push(Number(p) || 0));
+                    e.session_count += Number(r.session_count) || 0;
+                    e.total_coins += Number(r.total_coins) || 0;
+                });
+                return Array.from(byHost.values()).map(e => {
+                    const accArr = Array.from(e.accounts);
+                    const chArr = Array.from(e.channels);
+                    let channel_name = '—', account = '';
+                    if (accArr.length === 1) { account = accArr[0]; channel_name = chArr[0] || accArr[0]; }
+                    else if (accArr.length > 1) { channel_name = accArr.length + ' accounts'; account = ''; }
+                    return {
+                        host_name: e.host_name,
+                        host_key: e.host_key,
+                        account: account,
+                        channel_name: channel_name,
+                        total_duration: e.total_duration,
+                        session_durations: e.session_durations,
+                        session_count: e.session_count,
+                        total_coins: e.total_coins,
+                        merged_host: true,
+                    };
+                }).sort((a,b)=> ((a.host_name||'').toLowerCase().localeCompare((b.host_name||'').toLowerCase())));
+            }
+
             function renderSummary(summary, mode){
                 const tbody = document.getElementById('summary-body');
-                if (!summary || !summary.length) {
+                const rows = displaySummary(summary);
+                if (!rows.length) {
                     tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No data for this period.</td></tr>';
                     return;
                 }
-                tbody.innerHTML = summary.map(r => {
+                tbody.innerHTML = rows.map(r => {
                     const host = r.host_name && r.host_name !== '-' ? r.host_name : '-';
-                    const account = esc(r.channel_name || r.account || '-') + (r.account ? ' <small style="color:#94a3b8">@'+esc(r.account)+'</small>' : '');
+                    let accountHtml = '';
+                    if (r.merged_host && !r.account) {
+                        accountHtml = esc(r.channel_name || '—') + ' <span class="info-i" data-tip="Combined across channels/accounts.">!</span>';
+                    } else {
+                        accountHtml = esc(r.channel_name || r.account || '-') + (r.account ? ' <small style="color:#94a3b8">@'+esc(r.account)+'</small>' : '');
+                    }
                     const dur = fmtDurParts(r.session_durations && r.session_durations.length ? r.session_durations : [r.total_duration||0]);
                     const coins = (Number(r.total_coins)||0).toLocaleString('id-ID') + ' c';
                     return '<tr>'
                         + '<td>' + (host === '-' ? '<span style="color:#94a3b8">-</span>' : '<strong>'+esc(host)+'</strong>') + '</td>'
-                        + '<td>' + account + '</td>'
+                        + '<td>' + accountHtml + '</td>'
                         + '<td>' + dur + '</td>'
                         + '<td><span class="badge" style="background:#ca8a04;">' + coins + '</span></td>'
                         + '</tr>';
@@ -3886,7 +3999,11 @@ def view_timeline():
             document.getElementById('tl-zoom-out').onclick = ()=> { autoFit = false; pxPerHour = Math.max(2, pxPerHour - 15); render(); };
             document.getElementById('tl-row-up').onclick = ()=> { rowHeight = Math.min(80, rowHeight + 4); render(); };
             document.getElementById('tl-row-down').onclick = ()=> { rowHeight = Math.max(18, rowHeight - 4); render(); };
-            document.getElementById('tl-reset').onclick = ()=> { autoFit = true; resetScroll = true; pxPerHour = 90; rowHeight = 30; render(); };
+            const hideDetailsEl = document.getElementById('tl-hide-details');
+            const mergeHostsEl = document.getElementById('tl-merge-hosts');
+            if (hideDetailsEl) hideDetailsEl.onchange = function(){ hideDetails = !!hideDetailsEl.checked; render(); };
+            if (mergeHostsEl) mergeHostsEl.onchange = function(){ mergeHosts = !!mergeHostsEl.checked; render(); };
+            document.getElementById('tl-reset').onclick = ()=> { autoFit = true; resetScroll = true; pxPerHour = 90; rowHeight = 30; if (hideDetailsEl) { hideDetailsEl.checked = false; hideDetails = false; } if (mergeHostsEl) { mergeHostsEl.checked = false; mergeHosts = false; } render(); };
             document.getElementById('tl-reload').onclick = ()=> load();
             document.getElementById('tl-detail-close').onclick = ()=> { detail.style.display = 'none'; };
             document.addEventListener('click', (e)=>{ if (detail.style.display==='block' && !detail.contains(e.target) && !(e.target.closest && (e.target.closest('.tl-bar') || e.target.closest('#period-label')))) detail.style.display='none'; });
