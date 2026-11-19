@@ -136,7 +136,9 @@ textarea { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px soli
   .status-cluster { flex-direction: column; width: 100%; }
   .status-indicator-pill { width: 100%; justify-content: center; }
   .card { padding: 14px; border-radius: 10px; margin-bottom: 14px; }
-  .stat-grid { grid-template-columns: 1fr; gap: 10px; }
+  .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .stat-box { padding: 10px 8px; }
+  .stat-number { font-size: 1.15rem; margin-top: 2px; word-break: break-word; }
   .form-grid, .form-grid.two-col, .tier-form, .host-form, .alias-form { grid-template-columns: 1fr; }
   .switch-row { flex-direction: column; gap: 6px; }
   .switch-help { text-align: left; max-width: none; }
@@ -152,6 +154,9 @@ textarea { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px soli
   .terminal-row { flex-direction: column; gap: 4px; }
   .edit-form { flex-wrap: wrap; }
   .edit-form input, .edit-form select { width: 100%; }
+}
+@media (min-width: 520px) and (max-width: 760px) {
+  .stat-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 """
 

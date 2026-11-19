@@ -1603,8 +1603,14 @@ def view_analytics():
         <style>
             .analytics-form label { display: flex; flex-direction: column; gap: 4px; font-size: 0.78rem; color: #94a3b8; font-weight: 600; }
             .analytics-form select, .analytics-form input { width: 100%; }
-            .analytics-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
-            .analytics-chips .nav-btn { padding: 6px 10px; font-size: 0.78rem; }
+            .analytics-chips { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-bottom: 10px; }
+            .analytics-chips .nav-btn { padding: 6px 6px; font-size: 0.76rem; justify-content: center; width: auto; }
+            @media (max-width: 760px) {
+                .analytics-form .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+                .analytics-form .form-grid > label:last-child { grid-column: 1 / -1; }
+                .analytics-form .btn-save { margin-bottom: 0; padding: 10px 12px; }
+                .analytics-chips { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+            }
             .chart-wrap { background: #0b1220; border: 1px solid var(--border); border-radius: 10px; padding: 10px; overflow: hidden; }
             .chart-toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
             .chart-toolbar label { color: #94a3b8; font-size: 0.78rem; font-weight: 600; display: flex; align-items: center; gap: 6px; }
