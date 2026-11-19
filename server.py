@@ -1,4 +1,4 @@
-from flask import Flask, redirect, request, Response, jsonify, g
+from flask import Flask, redirect, request, Response, jsonify, g, send_from_directory
 from threading import Thread
 from werkzeug.exceptions import HTTPException
 import logging
@@ -12,6 +12,7 @@ from routes.settings import settings_bp
 import log_setup
 
 app = Flask(__name__)
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
 log = log_setup.get_logger("bot.web")
 
 # Optional basic auth for admin panel (recommended for production/public hosting).
@@ -135,6 +136,33 @@ def _fast_head_probe():
     if request.method == "HEAD" and (request.path or "") in ("/", "/admin", "/admin/data"):
         return Response("", 200)
     return None
+
+
+
+# PWA assets (served without admin auth)
+@app.route('/manifest.webmanifest')
+def pwa_manifest():
+    return send_from_directory(STATIC_DIR, 'manifest.webmanifest', mimetype='application/manifest+json')
+
+
+@app.route('/sw.js')
+def pwa_service_worker():
+    resp = send_from_directory(STATIC_DIR, 'sw.js', mimetype='application/javascript')
+    # Allow the service worker to control the full origin scope.
+    resp.headers['Service-Worker-Allowed'] = '/'
+    resp.headers['Cache-Control'] = 'no-cache'
+    return resp
+
+
+@app.route('/static/<path:filename>')
+def pwa_static(filename):
+    resp = send_from_directory(STATIC_DIR, filename)
+    # Cache static assets, but not the service worker/manifest.
+    if filename.endswith('sw.js') or filename.endswith('manifest.webmanifest'):
+        resp.headers['Cache-Control'] = 'no-cache'
+    else:
+        resp.headers.setdefault('Cache-Control', 'public, max-age=604800')
+    return resp
 
 
 # Register Blueprints

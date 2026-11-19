@@ -64,6 +64,20 @@ def view_data():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Database Admin Panel</title>
         <style>BASE_CSS_PLACEHOLDER</style>
+        <link rel="manifest" href="/manifest.webmanifest">
+        <meta name="theme-color" content="#0284c7">
+        <meta name="mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta name="apple-mobile-web-app-title" content="DD Admin">
+        <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+        <script>
+        if ('serviceWorker' in navigator) {
+          window.addEventListener('load', function() {
+            navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function(){});
+          });
+        }
+        </script>
     </head>
     <body>
         <div class="header">
@@ -291,6 +305,20 @@ def view_host_detail(host_name):
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Host Shift History: {{ host_name }}</title>
         <style>BASE_CSS_PLACEHOLDER</style>
+        <link rel="manifest" href="/manifest.webmanifest">
+        <meta name="theme-color" content="#0284c7">
+        <meta name="mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta name="apple-mobile-web-app-title" content="DD Admin">
+        <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+        <script>
+        if ('serviceWorker' in navigator) {
+          window.addEventListener('load', function() {
+            navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function(){});
+          });
+        }
+        </script>
     </head>
     <body>
         <div class="header">
@@ -430,6 +458,20 @@ def view_viewers():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Viewer & Coin List</title>
         <style>BASE_CSS_PLACEHOLDER</style>
+        <link rel="manifest" href="/manifest.webmanifest">
+        <meta name="theme-color" content="#0284c7">
+        <meta name="mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta name="apple-mobile-web-app-title" content="DD Admin">
+        <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+        <script>
+        if ('serviceWorker' in navigator) {
+          window.addEventListener('load', function() {
+            navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function(){});
+          });
+        }
+        </script>
     </head>
     <body>
         <div class="header">
@@ -556,6 +598,20 @@ def view_viewer_detail(tiktok_user):
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Viewer Details: @{{ username }}</title>
         <style>BASE_CSS_PLACEHOLDER</style>
+        <link rel="manifest" href="/manifest.webmanifest">
+        <meta name="theme-color" content="#0284c7">
+        <meta name="mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta name="apple-mobile-web-app-title" content="DD Admin">
+        <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+        <script>
+        if ('serviceWorker' in navigator) {
+          window.addEventListener('load', function() {
+            navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function(){});
+          });
+        }
+        </script>
     </head>
     <body>
         <div class="header">
@@ -779,6 +835,20 @@ def view_monitor():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Realtime Live Monitor</title>
         <style>BASE_CSS_PLACEHOLDER</style>
+        <link rel="manifest" href="/manifest.webmanifest">
+        <meta name="theme-color" content="#0284c7">
+        <meta name="mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta name="apple-mobile-web-app-title" content="DD Admin">
+        <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+        <script>
+        if ('serviceWorker' in navigator) {
+          window.addEventListener('load', function() {
+            navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function(){});
+          });
+        }
+        </script>
     </head>
     <body>
         <div class="header">
@@ -1027,6 +1097,20 @@ def view_activity():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Log Activity Realtime</title>
         <style>BASE_CSS_PLACEHOLDER</style>
+        <link rel="manifest" href="/manifest.webmanifest">
+        <meta name="theme-color" content="#0284c7">
+        <meta name="mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta name="apple-mobile-web-app-title" content="DD Admin">
+        <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+        <script>
+        if ('serviceWorker' in navigator) {
+          window.addEventListener('load', function() {
+            navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function(){});
+          });
+        }
+        </script>
     </head>
     <body>
         <div class="header">
@@ -1530,6 +1614,20 @@ def view_analytics():
             .muted { color: #94a3b8; }
             .share-pill { color: #7dd3fc; font-weight: 700; }
         </style>
+        <link rel="manifest" href="/manifest.webmanifest">
+        <meta name="theme-color" content="#0284c7">
+        <meta name="mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta name="apple-mobile-web-app-title" content="DD Admin">
+        <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+        <script>
+        if ('serviceWorker' in navigator) {
+          window.addEventListener('load', function() {
+            navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function(){});
+          });
+        }
+        </script>
     </head>
     <body>
         <div class="header">
@@ -2287,6 +2385,20 @@ def view_verifications():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Manage TikTok Account Verification</title>
         <style>BASE_CSS_PLACEHOLDER</style>
+        <link rel="manifest" href="/manifest.webmanifest">
+        <meta name="theme-color" content="#0284c7">
+        <meta name="mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta name="apple-mobile-web-app-title" content="DD Admin">
+        <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+        <script>
+        if ('serviceWorker' in navigator) {
+          window.addEventListener('load', function() {
+            navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function(){});
+          });
+        }
+        </script>
     </head>
     <body>
         <div class="header">
@@ -2815,6 +2927,20 @@ def view_timeline():
               .tl-inner { min-width: 680px; }
             }
         </style>
+        <link rel="manifest" href="/manifest.webmanifest">
+        <meta name="theme-color" content="#0284c7">
+        <meta name="mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta name="apple-mobile-web-app-title" content="DD Admin">
+        <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+        <script>
+        if ('serviceWorker' in navigator) {
+          window.addEventListener('load', function() {
+            navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function(){});
+          });
+        }
+        </script>
     </head>
     <body>
         <div class="header">
