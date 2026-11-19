@@ -259,11 +259,22 @@ def is_any_host_live() -> bool:
     return len(runtime_status.get_live_usernames()) > 0
 
 
-async def probe_priority_targets_once():
+_PRIORITY_PROBE_TTL_SECONDS = 45
+_priority_probe_cache = {"at": 0.0, "targets": (), "results": []}
+_priority_probe_lock = None
+
+
+async def probe_priority_targets_once(force: bool = False):
     """Probe active priority targets once to verify live accessibility.
 
-    Returns a list of {"username": str, "live": bool|None} in priority-target order.
+    Uses a short TTL cache and skips network probing for hosts already known live
+    in runtime status to avoid unnecessary requests. Returns a list of
+    {"username": str, "live": bool|None} in priority-target order.
     """
+    global _priority_probe_lock
+    if _priority_probe_lock is None:
+        _priority_probe_lock = asyncio.Lock()
+
     try:
         targets = get_observable_hosts() or []
     except Exception:
@@ -278,17 +289,53 @@ async def probe_priority_targets_once():
             continue
         seen.add(username)
         usernames.append(username)
-    if not usernames:
-        return []
-    results = await asyncio.gather(*(probe_room_live(u) for u in usernames), return_exceptions=True)
-    out = []
-    for username, result in zip(usernames, results):
-        if isinstance(result, Exception):
-            print(f"[{username}] Priority probe exception: {result}")
-            out.append({"username": username, "live": None})
-        else:
-            out.append({"username": username, "live": result})
-    return out
+    target_tuple = tuple(usernames)
+
+    async with _priority_probe_lock:
+        now = time.time()
+        if (
+            not force
+            and target_tuple == _priority_probe_cache.get("targets")
+            and (now - float(_priority_probe_cache.get("at") or 0.0)) < _PRIORITY_PROBE_TTL_SECONDS
+        ):
+            cached = _priority_probe_cache.get("results") or []
+            return [dict(item) for item in cached]
+
+        if not usernames:
+            _priority_probe_cache["at"] = now
+            _priority_probe_cache["targets"] = target_tuple
+            _priority_probe_cache["results"] = []
+            return []
+
+        try:
+            live_now = set(get_current_live_hosts() or [])
+        except Exception:
+            live_now = set()
+
+        out = [None] * len(usernames)
+        to_probe = []
+        probe_indices = []
+        for idx, username in enumerate(usernames):
+            if username in live_now:
+                out[idx] = {"username": username, "live": True}
+            else:
+                to_probe.append(username)
+                probe_indices.append(idx)
+
+        if to_probe:
+            results = await asyncio.gather(*(probe_room_live(u) for u in to_probe), return_exceptions=True)
+            for idx, username, result in zip(probe_indices, to_probe, results):
+                if isinstance(result, Exception):
+                    print(f"[{username}] Priority probe exception: {result}")
+                    out[idx] = {"username": username, "live": None}
+                else:
+                    out[idx] = {"username": username, "live": result}
+
+        final = [item for item in out if item is not None]
+        _priority_probe_cache["at"] = time.time()
+        _priority_probe_cache["targets"] = target_tuple
+        _priority_probe_cache["results"] = [dict(item) for item in final]
+        return final
 
 async def _trigger_announcement(announcement_callback, username: str, is_live: bool, host_name: str = None):
     if not announcement_callback:
