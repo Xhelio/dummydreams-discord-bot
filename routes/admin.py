@@ -2907,7 +2907,7 @@ def view_timeline():
             .tl-legend-box > summary::before { content: '▸ '; }
             .tl-legend-box[open] > summary::before { content: '▾ '; }
             .tl-legend { color: #94a3b8; font-size: 0.78rem; margin: 4px 0 6px; line-height: 1.4; }
-            .tl-wrap { position: relative; border: 1px solid #334155; border-radius: 10px; background: #0b1220; overflow: auto; max-height: 70vh; cursor: grab; }
+            .tl-wrap { position: relative; border: 1px solid #334155; border-radius: 10px; background: #0b1220; overflow: auto; height: 76vh; min-height: 360px; cursor: grab; }
             .tl-inner { position: relative; min-width: 900px; }
             .tl-header { position: sticky; top: 0; z-index: 5; display: flex; background: #0f172a; border-bottom: 1px solid #334155; }
             .tl-corner { position: sticky; left: 0; z-index: 6; width: 200px; min-width: 200px; padding: 8px 10px; font-weight: 700; color: #7dd3fc; background: #0f172a; border-right: 1px solid #334155; font-size: 0.82rem; }
