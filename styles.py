@@ -102,6 +102,21 @@ button:disabled, .btn:disabled { opacity: 0.55; cursor: not-allowed; transform: 
 .btn-save { width: 100%; padding: 13px 16px; font-size: 0.98rem; background: #15803d; border-radius: 10px; margin-bottom: 18px; }
 .btn-save:hover { background: #166534; }
 .table-scroll { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: 8px; }
+.tt-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; justify-content: flex-end; margin: 0 0 8px; font-size: 0.78rem; color: #94a3b8; }
+.tt-bar .tt-count { margin-right: auto; color: #94a3b8; }
+.tt-bar .tt-pager { display: inline-flex; align-items: center; gap: 6px; }
+.tt-bar button { padding: 4px 9px; font-size: 0.76rem; border-radius: 6px; background: #334155; border: 1px solid #475569; color: #e2e8f0; width: auto; }
+.tt-bar button:hover { background: #475569; transform: none; }
+.tt-bar button:disabled { opacity: 0.45; cursor: not-allowed; }
+.tt-bar select { width: auto; padding: 4px 8px; font-size: 0.76rem; background: #0b1220; }
+.tt-bar label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.tt-page-label { min-width: 54px; text-align: center; color: #cbd5e1; font-variant-numeric: tabular-nums; }
+th.tt-sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+th.tt-sortable:hover { background: #075985; }
+th.tt-sortable::after { content: ' \21C5'; opacity: 0.45; font-size: 0.72em; }
+th.tt-sortable[data-tt-dir="asc"]::after { content: ' \25B2'; opacity: 0.95; }
+th.tt-sortable[data-tt-dir="desc"]::after { content: ' \25BC'; opacity: 0.95; }
+tr.tt-hidden { display: none !important; }
 .tier-form, .host-form, .alias-form { grid-template-columns: minmax(130px, 1fr) minmax(120px, 1fr) auto; align-items: end; }
 textarea { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: #0b1220; color: white; font-size: 0.87rem; resize: vertical; font-family: inherit; }
 .toolbar { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom: 12px; }
@@ -130,6 +145,10 @@ textarea { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px soli
   .btn-action { padding: 7px 9px; }
   th, td { padding: 8px 9px; font-size: 0.79rem; white-space: nowrap; }
   table { min-width: 560px; }
+  .tt-bar { justify-content: space-between; }
+  .tt-bar .tt-count { width: 100%; }
+  #summary-table { min-width: 100%; }
+  #summary-table th, #summary-table td { white-space: normal; }
   .terminal-row { flex-direction: column; gap: 4px; }
   .edit-form { flex-wrap: wrap; }
   .edit-form input, .edit-form select { width: 100%; }
@@ -214,7 +233,7 @@ NAV_HTML = """
 </script>
 """
 
-AUTO_REFRESH_JS = """
+AUTO_REFRESH_JS = r"""
 <script>
     function setStatusPill(prefix, state, text, detail) {
         const pill = document.getElementById(prefix + '-status-box');
@@ -335,5 +354,196 @@ AUTO_REFRESH_JS = """
             })
             .catch(err => console.log('Realtime sync error:', err));
     }, 15000);
+
+    // ---------------------------------------------------------------
+    // Table tools: sortable columns + page size (10 / 50 / 100 / All).
+    // Safe with live refresh: re-applied when a table's content changes.
+    // ---------------------------------------------------------------
+    (function () {
+        if (window.__ttReady) return;
+        window.__ttReady = true;
+        var SIZES = ['10', '50', '100', 'all'];
+        var states = new WeakMap();
+        var seq = 0;
+
+        function headerRow(table) {
+            if (table.tHead && table.tHead.rows.length) return table.tHead.rows[0];
+            var rows = table.rows || [];
+            for (var i = 0; i < rows.length; i++) {
+                var cells = rows[i].cells ? Array.prototype.slice.call(rows[i].cells) : [];
+                if (cells.length && cells.every(function (c) { return c.tagName === 'TH'; })) return rows[i];
+            }
+            return null;
+        }
+
+        function bodyRows(table, head) {
+            var rows = table.rows || [];
+            var out = [];
+            for (var i = 0; i < rows.length; i++) {
+                var r = rows[i];
+                if (r === head) continue;
+                if (r.cells && r.cells.length === 1 && r.cells[0].colSpan > 1) continue;
+                out.push(r);
+            }
+            return out;
+        }
+
+        function cellValue(cell) {
+            var raw = (cell && (cell.getAttribute('data-sort') || cell.textContent) || '').trim();
+            var compact = raw.replace(/\s+/g, '');
+            if (/^[+-]?\d+(?:[.,]\d+)*$/.test(compact)) {
+                var n = parseFloat(compact.replace(/,/g, ''));
+                if (!isNaN(n)) return n;
+            }
+            return raw.toLowerCase();
+        }
+
+        function applySort(table, st) {
+            if (st.col < 0) return;
+            var head = headerRow(table);
+            if (!head) return;
+            var rows = bodyRows(table, head);
+            if (rows.length < 2) return;
+            var dir = st.dir;
+            var sorted = rows.slice().sort(function (a, b) {
+                var av = cellValue(a.cells[st.col]);
+                var bv = cellValue(b.cells[st.col]);
+                if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir;
+                return String(av).localeCompare(String(bv), undefined, { numeric: true, sensitivity: 'base' }) * dir;
+            });
+            var changed = false;
+            for (var i = 0; i < sorted.length; i++) { if (sorted[i] !== rows[i]) { changed = true; break; } }
+            if (!changed) return;
+            var parent = rows[0].parentNode;
+            var frag = document.createDocumentFragment();
+            sorted.forEach(function (r) { frag.appendChild(r); });
+            parent.appendChild(frag);
+        }
+
+        function applyPage(table, st) {
+            var head = headerRow(table);
+            if (!head) return;
+            var rows = bodyRows(table, head);
+            var size = st.size === 'all' ? (rows.length || 1) : (parseInt(st.size, 10) || 10);
+            var pages = Math.max(1, Math.ceil(rows.length / size));
+            if (st.page > pages - 1) st.page = pages - 1;
+            if (st.page < 0) st.page = 0;
+            rows.forEach(function (r, i) {
+                var hide = st.size !== 'all' && (i < st.page * size || i >= (st.page + 1) * size);
+                if (hide) r.classList.add('tt-hidden');
+                else r.classList.remove('tt-hidden');
+            });
+            updateBar(st, rows.length, pages);
+        }
+
+        function updateBar(st, count, pages) {
+            if (!st.bar) return;
+            st.bar.style.display = '';
+            var countEl = st.bar.querySelector('.tt-count');
+            var pager = st.bar.querySelector('.tt-pager');
+            var label = st.bar.querySelector('.tt-page-label');
+            var prev = st.bar.querySelector('[data-tt-prev]');
+            var next = st.bar.querySelector('[data-tt-next]');
+            if (countEl) countEl.textContent = count + ' baris';
+            if (!pager) return;
+            if (st.size === 'all' || pages <= 1) { pager.style.display = 'none'; return; }
+            pager.style.display = '';
+            if (label) label.textContent = (st.page + 1) + ' / ' + pages;
+            if (prev) prev.disabled = st.page <= 0;
+            if (next) next.disabled = st.page >= pages - 1;
+        }
+
+        function ensureBar(table, st) {
+            if (st.bar && st.bar.isConnected) return;
+            var wrap = table.closest ? table.closest('.table-scroll') : null;
+            if (!wrap) {
+                wrap = document.createElement('div');
+                wrap.className = 'table-scroll';
+                table.parentNode.insertBefore(wrap, table);
+                wrap.appendChild(table);
+            }
+            var bar = document.createElement('div');
+            bar.className = 'tt-bar';
+            bar.innerHTML = '<span class="tt-count"></span>'
+                + '<label>Baris <select></select></label>'
+                + '<span class="tt-pager"><button type="button" data-tt-prev title="Sebelumnya">\u2039</button>'
+                + '<span class="tt-page-label"></span>'
+                + '<button type="button" data-tt-next title="Berikutnya">\u203A</button></span>';
+            var sel = bar.querySelector('select');
+            SIZES.forEach(function (s) {
+                var opt = document.createElement('option');
+                opt.value = s;
+                opt.textContent = (s === 'all') ? 'All' : s;
+                sel.appendChild(opt);
+            });
+            sel.value = st.size;
+            sel.addEventListener('change', function () {
+                st.size = sel.value;
+                st.page = 0;
+                applyPage(table, st);
+            });
+            bar.querySelector('[data-tt-prev]').addEventListener('click', function () {
+                st.page = Math.max(0, st.page - 1);
+                applyPage(table, st);
+            });
+            bar.querySelector('[data-tt-next]').addEventListener('click', function () {
+                st.page = st.page + 1;
+                applyPage(table, st);
+            });
+            wrap.parentNode.insertBefore(bar, wrap);
+            st.bar = bar;
+        }
+
+        function attach(table) {
+            if (!table || table.tagName !== 'TABLE') return;
+            if (table.classList && table.classList.contains('no-table-tools')) return;
+            if (table.closest && table.closest('.tl-detail')) return;
+            var st = states.get(table);
+            if (!st) { st = { page: 0, size: '10', col: -1, dir: 1, id: ++seq }; states.set(table, st); }
+            var head = headerRow(table);
+            if (!head) return;
+            var rows = bodyRows(table, head);
+            if (!rows.length) { if (st.bar) st.bar.style.display = 'none'; return; }
+            ensureBar(table, st);
+            var ths = Array.prototype.slice.call(head.cells);
+            ths.forEach(function (th, idx) {
+                if (!th.textContent.trim()) return;
+                th.classList.add('tt-sortable');
+                if (th.dataset.ttBound === '1') return;
+                th.dataset.ttBound = '1';
+                th.addEventListener('click', function () {
+                    if (st.col === idx) st.dir = (st.dir === 1 ? -1 : 1);
+                    else { st.col = idx; st.dir = 1; }
+                    ths.forEach(function (h) { delete h.dataset.ttDir; });
+                    th.dataset.ttDir = st.dir === 1 ? 'asc' : 'desc';
+                    st.page = 0;
+                    applySort(table, st);
+                    applyPage(table, st);
+                });
+            });
+            if (st.col >= 0 && ths[st.col]) ths[st.col].dataset.ttDir = (st.dir === 1 ? 'asc' : 'desc');
+            applySort(table, st);
+            applyPage(table, st);
+        }
+
+        function attachAll() {
+            var tables = document.querySelectorAll('table');
+            for (var i = 0; i < tables.length; i++) {
+                try { attach(tables[i]); } catch (e) {}
+            }
+        }
+
+        var timer = null;
+        var obs = new MutationObserver(function () {
+            if (timer) return;
+            timer = setTimeout(function () { timer = null; attachAll(); }, 120);
+        });
+        function start() {
+            attachAll();
+            obs.observe(document.body, { childList: true, subtree: true });
+        }
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+        else start();
+    })();
 </script>
 """

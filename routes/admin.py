@@ -2887,24 +2887,34 @@ def view_timeline():
         <title>Live Timeline</title>
         <style>BASE_CSS_PLACEHOLDER</style>
         <style>
-            .tl-controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px; }
-            .tl-controls .group { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-            .tl-controls label { font-size: 0.82rem; color: #94a3b8; font-weight: 600; }
-            .tl-controls input[type="date"], .tl-controls select { min-width: 150px; }
-            .tl-btn { padding: 7px 10px; font-size: 0.8rem; border-radius: 8px; }
-            .tl-legend { color: #94a3b8; font-size: 0.8rem; margin: 6px 0 10px; }
+            .tl-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; margin-bottom: 10px; }
+            .tl-controls .group { display: inline-flex; align-items: center; gap: 6px; flex-wrap: nowrap; background: #0b1220; border: 1px solid #334155; border-radius: 10px; padding: 5px 8px; }
+            .tl-controls .group.grow { flex: 1 1 300px; }
+            .tl-controls label { font-size: 0.7rem; color: #94a3b8; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
+            .tl-controls input[type="date"], .tl-controls select { min-width: 0; width: auto; flex: 0 1 150px; padding: 6px 8px; font-size: 0.8rem; background: #111827; }
+            .tl-controls input[type="date"] { flex: 1 1 130px; }
+            .tl-btn { padding: 6px 10px; font-size: 0.78rem; border-radius: 8px; width: auto; }
+            .tl-btn.icon { padding: 6px 9px; min-width: 32px; text-align: center; }
+            .tl-legend-box { margin: 2px 0 10px; }
+            .tl-legend-box > summary { cursor: pointer; color: #7dd3fc; font-size: 0.78rem; font-weight: 600; list-style: none; padding: 4px 0; }
+            .tl-legend-box > summary::-webkit-details-marker { display: none; }
+            .tl-legend-box > summary::before { content: '▸ '; }
+            .tl-legend-box[open] > summary::before { content: '▾ '; }
+            .tl-legend { color: #94a3b8; font-size: 0.78rem; margin: 4px 0 6px; line-height: 1.4; }
             .tl-wrap { position: relative; border: 1px solid #334155; border-radius: 10px; background: #0b1220; overflow: auto; max-height: 70vh; cursor: grab; }
             .tl-inner { position: relative; min-width: 900px; }
             .tl-header { position: sticky; top: 0; z-index: 5; display: flex; background: #0f172a; border-bottom: 1px solid #334155; }
-            .tl-corner { position: sticky; left: 0; z-index: 6; width: 240px; min-width: 240px; padding: 10px 12px; font-weight: 700; color: #7dd3fc; background: #0f172a; border-right: 1px solid #334155; }
+            .tl-corner { position: sticky; left: 0; z-index: 6; width: 200px; min-width: 200px; padding: 8px 10px; font-weight: 700; color: #7dd3fc; background: #0f172a; border-right: 1px solid #334155; font-size: 0.82rem; }
             .tl-hours { position: relative; height: 40px; flex: 1; }
             .tl-hour-mark { position: absolute; top: 0; bottom: 0; border-left: 1px solid #1e293b; font-size: 0.68rem; color: #64748b; padding: 8px 0 0 3px; white-space: nowrap; }
             .tl-body { position: relative; }
-            .tl-row { display: flex; border-bottom: 1px solid #1e293b; min-height: 24px; }
+            .tl-row { display: flex; border-bottom: 1px solid #1e293b; min-height: 22px; overflow: hidden; }
             .tl-row.group-row { background: rgba(2,132,199,0.08); }
-            .tl-label { position: sticky; left: 0; z-index: 4; width: 240px; min-width: 240px; padding: 4px 10px; background: #0b1220; border-right: 1px solid #334155; display: flex; flex-direction: column; justify-content: center; gap: 1px; overflow: hidden; }
+            .tl-label { position: sticky; left: 0; z-index: 4; width: 200px; min-width: 200px; padding: 2px 10px; background: #0b1220; border-right: 1px solid #334155; display: flex; flex-direction: column; justify-content: center; gap: 0; overflow: hidden; font-size: 0.78rem; line-height: 1.12; }
+            .tl-label > div { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
             .tl-row.group-row .tl-label { background: #0f172a; font-weight: 700; color: #e2e8f0; }
-            .tl-label .sub { font-size: 0.72rem; color: #94a3b8; font-weight: 500; }
+            .tl-row.group-row .tl-label > div:first-child { color: #bae6fd; }
+            .tl-label .sub { font-size: 0.63rem; color: #94a3b8; font-weight: 500; }
             .tl-track { position: relative; flex: 1; min-height: 24px; }
             .tl-gridline { position: absolute; top: 0; bottom: 0; border-left: 1px solid #111827; }
             .tl-gridline.major { border-left-color: #1e293b; }
@@ -2923,8 +2933,16 @@ def view_timeline():
             .tl-detail th, .tl-detail td { white-space: normal; font-size: 0.82rem; padding: 6px 8px; vertical-align: top; }
             .period-badge { display: inline-block; margin-left: 8px; font-size: 0.78rem; color: #94a3b8; font-weight: 500; }
             @media (max-width: 760px) {
-              .tl-corner, .tl-label { width: 160px; min-width: 160px; }
-              .tl-inner { min-width: 680px; }
+              .tl-controls { gap: 6px; }
+              .tl-controls .group { flex: 1 1 100%; }
+              .tl-controls .group.half { flex: 1 1 calc(50% - 3px); justify-content: space-between; }
+              .tl-controls .group.grow { flex: 1 1 100%; }
+              .tl-corner, .tl-label { width: 118px; min-width: 118px; }
+              .tl-corner { padding: 8px 8px; font-size: 0.78rem; }
+              .tl-label { padding: 2px 7px; }
+              .tl-inner { min-width: 560px; }
+              .tl-legend { font-size: 0.74rem; }
+              #summary-table th, #summary-table td { white-space: normal; }
             }
         </style>
         <link rel="manifest" href="/manifest.webmanifest">
@@ -2963,37 +2981,38 @@ def view_timeline():
                         <option value="custom">Custom</option>
                     </select>
                 </div>
-                <div class="group" id="anchor-group">
-                    <button class="tl-btn btn-secondary" id="tl-prev" title="Sebelumnya">◀</button>
+                <div class="group grow" id="anchor-group">
+                    <button class="tl-btn btn-secondary icon" id="tl-prev" title="Sebelumnya">◀</button>
                     <input type="date" id="tl-date" value="{{ date_str }}">
-                    <button class="tl-btn btn-secondary" id="tl-next" title="Berikutnya">▶</button>
+                    <button class="tl-btn btn-secondary icon" id="tl-next" title="Berikutnya">▶</button>
+                    <button class="tl-btn" id="tl-today">Hari ini</button>
                 </div>
-                <div class="group" id="custom-group" style="display:none;">
+                <div class="group grow" id="custom-group" style="display:none;">
                     <label for="tl-start">Dari</label>
                     <input type="date" id="tl-start" value="{{ start_str }}">
                     <label for="tl-end">Sampai</label>
                     <input type="date" id="tl-end" value="{{ end_str }}">
                     <button class="tl-btn" id="tl-apply">Terapkan</button>
                 </div>
-                <div class="group">
-                    <button class="tl-btn" id="tl-today">Hari ini</button>
-                </div>
-                <div class="group">
+                <div class="group half">
                     <label>Zoom</label>
-                    <button class="tl-btn btn-secondary" id="tl-zoom-out" title="Perkecil">−</button>
-                    <button class="tl-btn btn-secondary" id="tl-zoom-in" title="Perbesar">+</button>
+                    <button class="tl-btn btn-secondary icon" id="tl-zoom-out" title="Perkecil">−</button>
+                    <button class="tl-btn btn-secondary icon" id="tl-zoom-in" title="Perbesar">+</button>
                 </div>
-                <div class="group">
+                <div class="group half">
                     <label>Baris</label>
-                    <button class="tl-btn btn-secondary" id="tl-row-down" title="Rapatkan">−</button>
-                    <button class="tl-btn btn-secondary" id="tl-row-up" title="Renggangkan">+</button>
+                    <button class="tl-btn btn-secondary icon" id="tl-row-down" title="Rapatkan">−</button>
+                    <button class="tl-btn btn-secondary icon" id="tl-row-up" title="Renggangkan">+</button>
                 </div>
                 <div class="group">
                     <button class="tl-btn btn-secondary" id="tl-reset">Reset</button>
                     <button class="tl-btn" id="tl-reload">Muat ulang</button>
                 </div>
             </div>
-            <div class="tl-legend">X: waktu (WIB). Y: host, dikelompokkan per channel target. Hanya host/akun dengan data yang ditampilkan. Sesi berdekatan (channel+host sama, selisih kecil) digabung otomatis. Klik bar untuk rincian. Garis merah = waktu sekarang (jika dalam rentang).</div>
+            <details class="tl-legend-box">
+                <summary>ℹ️ Info tampilan</summary>
+                <div class="tl-legend">X: waktu (WIB). Y: host, dikelompokkan per channel target. Hanya host/akun dengan data yang ditampilkan. Sesi berdekatan (channel+host sama, selisih kecil) digabung otomatis. Klik bar untuk rincian. Garis merah = waktu sekarang (jika dalam rentang).</div>
+            </details>
             <div id="tl-status" class="section-note">Memuat data...</div>
             <div class="tl-wrap" id="tl-wrap">
                 <div class="tl-inner" id="tl-inner"></div>
@@ -3205,7 +3224,7 @@ def view_timeline():
                 const totalMin = Math.max(1, Number(data.range_total_min)||1440);
                 const totalHours = totalMin / 60.0;
                 const timelineWidth = Math.max(200, totalHours * pxPerHour);
-                const labelW = 240;
+                const labelW = 200;
                 const mode = data.mode || 'day';
 
                 periodLabel.textContent = '(' + fmtRangeLabel(data) + ')';
