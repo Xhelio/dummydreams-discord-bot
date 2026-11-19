@@ -673,13 +673,12 @@ def get_analytics_timeseries(start_date, end_date, group_by="day", host=None,
         conn.close()
 
 
-def get_analytics_host_frequency_timeseries(start_date, end_date, group_by="day", host=None,
-                                            account=None, limit=6) -> dict:
-    """Per-host live session (interaction) frequency over time buckets.
+def get_analytics_host_engagement_timeseries(start_date, end_date, group_by="day", host=None,
+                                             account=None, viewer=None, limit=12) -> dict:
+    """Per-host gift engagement over time buckets (from gift_logs).
 
-    Returns {"labels": [...], "keys": [...], "hosts": [{"key","name","values","total"}, ...]}.
-    Hosts are ranked by total interactions in the period (top N), unless a specific
-    host filter is provided in which case that host is included.
+    Engagement metrics per bucket per host: transactions (gift rows), coins, unique viewers.
+    Returns {"labels": [...], "keys": [...], "hosts": [{key,name,transactions[],coins[],viewers[],totals...}, ...]}.
     """
     group_by = group_by if group_by in ("day", "week", "month") else "day"
     start_d = _analytics_parse_date(start_date)
@@ -687,7 +686,7 @@ def get_analytics_host_frequency_timeseries(start_date, end_date, group_by="day"
     if not start_d or not end_d or start_d > end_d:
         return {"labels": [], "keys": [], "hosts": []}
 
-    swhere, sparams = _analytics_session_where(start_date, end_date, host, account)
+    where, params = _analytics_gift_where(start_date, end_date, host, account, viewer)
 
     buckets = {}
     order = []
@@ -699,51 +698,88 @@ def get_analytics_host_frequency_timeseries(start_date, end_date, group_by="day"
             order.append(key)
         cursor_day = _analytics_next_bucket(cursor_day, group_by)
 
-    per_host = {}  # host_key -> {key,name,total,counts{bucket: n}}
-    host_labels = {}
+    per_host = {}  # host_key -> stats
     conn = get_db_connection()
     try:
         cur = conn.cursor()
+        # Aggregate transactions and coins per host per day
         rows = cur.execute(f"""
-            SELECT substr(start_time, 1, 10) AS d,
-                   LOWER(COALESCE(NULLIF(scheduled_host, ''), tiktok_username)) AS host_key,
-                   COALESCE(MAX(NULLIF(scheduled_host, '')), MAX(tiktok_username)) AS host_name,
-                   COUNT(*) AS cnt
-            FROM live_sessions
-            WHERE {swhere}
-            GROUP BY substr(start_time, 1, 10),
-                     LOWER(COALESCE(NULLIF(scheduled_host, ''), tiktok_username))
-        """, sparams).fetchall()
-        for d, hkey, hname, cnt in rows:
+            SELECT substr(g.log_date, 1, 10) AS d,
+                   {_ANALYTICS_HOST_KEY} AS host_key,
+                   {_ANALYTICS_HOST_LABEL} AS host_name,
+                   COUNT(*) AS transactions,
+                   COALESCE(SUM(g.coins), 0) AS coins
+            FROM gift_logs g
+            WHERE {where}
+            GROUP BY substr(g.log_date, 1, 10), {_ANALYTICS_HOST_KEY}
+        """, params).fetchall()
+        for d, hkey, hname, transactions, coins in rows:
             parsed = _analytics_parse_date(d)
             if not parsed:
                 continue
             bkey = _analytics_bucket_key(parsed, group_by)
             if bkey not in buckets:
                 continue
-            hk = (hkey or "").lower() or "-"
+            hk = (str(hkey or "").lower().strip()) or "-"
             if hk not in per_host:
-                per_host[hk] = {"key": hk, "name": hname or hk or "-", "total": 0, "counts": {}}
-            # keep most informative label
-            if hname and (not per_host[hk]["name"] or per_host[hk]["name"] == hk):
-                per_host[hk]["name"] = hname
-            c = int(cnt or 0)
-            per_host[hk]["counts"][bkey] = per_host[hk]["counts"].get(bkey, 0) + c
-            per_host[hk]["total"] += c
+                per_host[hk] = {
+                    "key": hk, "name": str(hname or hk or "-").strip() or "-",
+                    "transactions": {}, "coins": {}, "_viewers": {},
+                    "total_transactions": 0, "total_coins": 0,
+                }
+            item = per_host[hk]
+            if hname and (not item["name"] or item["name"] == hk):
+                item["name"] = str(hname).strip()
+            tr = int(transactions or 0)
+            c = int(coins or 0)
+            item["transactions"][bkey] = item["transactions"].get(bkey, 0) + tr
+            item["coins"][bkey] = item["coins"].get(bkey, 0) + c
+            item["total_transactions"] += tr
+            item["total_coins"] += c
+
+        # Unique viewers per host per day (count distinct per bucket)
+        vrows = cur.execute(f"""
+            SELECT substr(g.log_date, 1, 10) AS d,
+                   {_ANALYTICS_HOST_KEY} AS host_key,
+                   LOWER(g.viewer_username) AS viewer_key
+            FROM gift_logs g
+            WHERE {where}
+            GROUP BY substr(g.log_date, 1, 10), {_ANALYTICS_HOST_KEY}, LOWER(g.viewer_username)
+        """, params).fetchall()
+        for d, hkey, viewer_key in vrows:
+            parsed = _analytics_parse_date(d)
+            if not parsed or not viewer_key:
+                continue
+            bkey = _analytics_bucket_key(parsed, group_by)
+            if bkey not in buckets:
+                continue
+            hk = (str(hkey or "").lower().strip()) or "-"
+            if hk not in per_host:
+                per_host[hk] = {
+                    "key": hk, "name": hk or "-",
+                    "transactions": {}, "coins": {}, "_viewers": {},
+                    "total_transactions": 0, "total_coins": 0,
+                }
+            item = per_host[hk]
+            if bkey not in item["_viewers"]:
+                item["_viewers"][bkey] = set()
+            item["_viewers"][bkey].add(viewer_key)
     except Exception as e:
-        print(f"[Analytics] host frequency timeseries failed: {e}")
+        print(f"[Analytics] host engagement timeseries failed: {e}")
         return {"labels": [buckets[k]["label"] for k in order], "keys": list(order), "hosts": []}
     finally:
         conn.close()
 
     try:
-        limit_n = max(1, min(int(limit or 6), 12))
+        limit_n = max(1, min(int(limit or 12), 20))
     except Exception:
-        limit_n = 6
+        limit_n = 12
 
-    ranked = sorted(per_host.values(), key=lambda x: (-x["total"], x["name"].lower()))
+    ranked = sorted(
+        per_host.values(),
+        key=lambda x: (-(x.get("total_coins") or 0), -(x.get("total_transactions") or 0), str(x.get("name") or "").lower())
+    )
     selected = ranked[:limit_n]
-    # If a specific host filter is set, ensure it is included (even if not in top N)
     if host:
         h = str(host).strip().lower().lstrip("@")
         if h and all(x["key"] != h for x in selected):
@@ -753,12 +789,18 @@ def get_analytics_host_frequency_timeseries(start_date, end_date, group_by="day"
 
     hosts_out = []
     for item in selected:
-        values = [int(item["counts"].get(k, 0)) for k in order]
+        vsets = item.get("_viewers") or {}
+        viewers_arr = [len(vsets.get(k, set())) for k in order]
+        total_viewers = sum(viewers_arr)
         hosts_out.append({
             "key": item["key"],
             "name": item["name"],
-            "total": int(item["total"]),
-            "values": values,
+            "transactions": [int(item["transactions"].get(k, 0)) for k in order],
+            "coins": [int(item["coins"].get(k, 0)) for k in order],
+            "viewers": viewers_arr,
+            "total_transactions": int(item.get("total_transactions") or 0),
+            "total_coins": int(item.get("total_coins") or 0),
+            "total_viewers": int(total_viewers),
         })
 
     return {

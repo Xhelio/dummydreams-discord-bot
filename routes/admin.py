@@ -32,7 +32,7 @@ from db import (
     get_analytics_sessions,
     get_analytics_session_breakdown,
     get_analytics_timeseries,
-    get_analytics_host_frequency_timeseries,
+    get_analytics_host_engagement_timeseries,
     get_analytics_gift_by_host,
     get_analytics_gift_by_account,
     get_analytics_viewer_ranking,
@@ -1404,7 +1404,7 @@ def view_analytics():
     session_summary = get_analytics_sessions(start_str, end_str, host_arg, account_arg)
     session_break = get_analytics_session_breakdown(start_str, end_str, host_arg, account_arg)
     series = get_analytics_timeseries(start_str, end_str, group_by, host_arg, account_arg, viewer_arg)
-    host_freq_series = get_analytics_host_frequency_timeseries(start_str, end_str, group_by, host_arg, account_arg, limit=6)
+    host_engagement_series = get_analytics_host_engagement_timeseries(start_str, end_str, group_by, host_arg, account_arg, viewer_arg, limit=12)
     gift_by_host = get_analytics_gift_by_host(start_str, end_str, account_arg, viewer_arg)
     gift_by_account = get_analytics_gift_by_account(start_str, end_str, host_arg, viewer_arg)
     viewer_rows_raw = get_analytics_viewer_ranking(start_str, end_str, host_arg, account_arg, 100)
@@ -1811,14 +1811,22 @@ def view_analytics():
 
             <div style="margin-bottom:18px;">
                 <div class="card-header" style="margin-bottom:6px;">
-                    <h3 style="margin:0;">Host (interaksi per nama host)</h3>
+                    <h3 style="margin:0;">Host (engagement per nama host)</h3>
                     <div class="chart-toolbar" style="margin-bottom:0;">
-                        <span class="muted" style="font-size:0.78rem;">Sumbu X: waktu ({{ group_by }}) · Sumbu Y: jumlah interaksi/sesi host · Tiap seri = nama host</span>
+                        <label>Metrik
+                            <select id="host-eng-metric">
+                                <option value="transactions" selected>Transaksi gift (frekuensi)</option>
+                                <option value="coins">Koin (gift)</option>
+                                <option value="viewers">Viewer unik (pemberi gift)</option>
+                            </select>
+                        </label>
                         <label style="flex-direction:row; align-items:center; gap:6px; cursor:pointer;">
                             <input type="checkbox" id="host-freq-trend" checked style="width:auto;"> Tren/Rata-rata
                         </label>
                     </div>
                 </div>
+                <div class="muted" style="font-size:0.78rem; margin-bottom:6px;">Sumbu X: waktu ({{ group_by }}) · Sumbu Y: engagement host (dari gift) · Tiap seri = nama host. Pilih host yang dianalisis:</div>
+                <div id="host-select-controls" style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px;"></div>
                 <div class="chart-wrap"><div id="freq-chart-host-multi"></div></div>
                 <div id="host-freq-legend" class="muted" style="font-size:0.78rem; margin-top:6px;"></div>
             </div>
@@ -2244,7 +2252,7 @@ def view_analytics():
         freq_account_rows=freq_account_rows,
         freq_host_rows=freq_host_rows,
         freq_viewer_rows=freq_viewer_rows,
-        host_freq_series=host_freq_series,
+        host_engagement_series=host_engagement_series,
         chart_payload=chart_payload,
         start_str=start_str,
         end_str=end_str,
