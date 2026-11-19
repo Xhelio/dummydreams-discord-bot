@@ -562,11 +562,11 @@ def _analytics_next_bucket(value, group_by):
 
 def get_analytics_timeseries(start_date, end_date, group_by="day", host=None,
                              account=None, viewer=None) -> list:
-    """Deret waktu koin/gift/viewer/sesi per hari, minggu, atau bulan.
+    """Deret waktu koin/gift/viewer/sesi per hari, minggu, bulan, atau jam (dalam sehari).
 
     Bucket kosong tetap disertakan (nilai 0) supaya grafik tidak bolong.
     """
-    group_by = group_by if group_by in ("day", "week", "month") else "day"
+    group_by = group_by if group_by in ("day", "week", "month", "hour") else "day"
     start_d = _analytics_parse_date(start_date)
     end_d = _analytics_parse_date(end_date)
     if not start_d or not end_d or start_d > end_d:
@@ -574,6 +574,89 @@ def get_analytics_timeseries(start_date, end_date, group_by="day", host=None,
 
     where, params = _analytics_gift_where(start_date, end_date, host, account, viewer)
     swhere, sparams = _analytics_session_where(start_date, end_date, host, account)
+
+    if group_by == "hour":
+        day_str = start_d.strftime("%Y-%m-%d")
+        order = [f"{h:02d}" for h in range(24)]
+        buckets = {
+            k: {
+                "key": k, "label": f"{k}:00",
+                "coins": 0, "gifts": 0, "gift_events": 0, "sessions": 0,
+                "_viewers": set(), "_accounts": set(), "_hosts": set(),
+            } for k in order
+        }
+        hour_expr = "substr(COALESCE(NULLIF(g.log_time, ''), substr(COALESCE(g.log_datetime, ''), 12, 8), '00:00:00'), 1, 2)"
+        conn = get_db_connection()
+        try:
+            cur = conn.cursor()
+            for hour_key, coins, gifts, events in cur.execute(f"""
+                SELECT {hour_expr} AS h,
+                       COALESCE(SUM(g.coins), 0),
+                       COALESCE(SUM(g.gift_count), 0),
+                       COUNT(*)
+                FROM gift_logs g
+                WHERE {where}
+                GROUP BY h
+            """, params).fetchall():
+                hk = str(hour_key or "00")[:2].zfill(2)
+                bucket = buckets.get(hk)
+                if not bucket:
+                    continue
+                bucket["coins"] += int(coins or 0)
+                bucket["gifts"] += int(gifts or 0)
+                bucket["gift_events"] += int(events or 0)
+
+            for hour_key, viewer_key in cur.execute(f"""
+                SELECT {hour_expr} AS h, LOWER(g.viewer_username)
+                FROM gift_logs g
+                WHERE {where}
+                GROUP BY h, LOWER(g.viewer_username)
+            """, params).fetchall():
+                hk = str(hour_key or "00")[:2].zfill(2)
+                bucket = buckets.get(hk)
+                if bucket and viewer_key:
+                    bucket["_viewers"].add(viewer_key)
+
+            shour_expr = "substr(COALESCE(start_time, ''), 12, 2)"
+            for hour_key, session_count, account_key, host_key in cur.execute(f"""
+                SELECT {shour_expr} AS h,
+                       COUNT(*),
+                       LOWER(tiktok_username),
+                       LOWER(COALESCE(NULLIF(scheduled_host, ''), tiktok_username))
+                FROM live_sessions
+                WHERE {swhere}
+                GROUP BY h, LOWER(tiktok_username),
+                         LOWER(COALESCE(NULLIF(scheduled_host, ''), tiktok_username))
+            """, sparams).fetchall():
+                hk = str(hour_key or "00")[:2].zfill(2)
+                bucket = buckets.get(hk)
+                if not bucket:
+                    continue
+                bucket["sessions"] += int(session_count or 0)
+                if account_key:
+                    bucket["_accounts"].add(account_key)
+                if host_key:
+                    bucket["_hosts"].add(host_key)
+
+            return [
+                {
+                    "key": buckets[k]["key"],
+                    "label": buckets[k]["label"],
+                    "coins": buckets[k]["coins"],
+                    "gifts": buckets[k]["gifts"],
+                    "gift_events": buckets[k]["gift_events"],
+                    "viewers": len(buckets[k]["_viewers"]),
+                    "sessions": buckets[k]["sessions"],
+                    "active_accounts": len(buckets[k]["_accounts"]),
+                    "active_hosts": len(buckets[k]["_hosts"]),
+                }
+                for k in order
+            ]
+        except Exception as e:
+            print(f"[Analytics] timeseries (hour) failed: {e}")
+            return []
+        finally:
+            conn.close()
 
     buckets = {}
     order = []
@@ -678,15 +761,115 @@ def get_analytics_host_engagement_timeseries(start_date, end_date, group_by="day
     """Per-host gift engagement over time buckets (from gift_logs).
 
     Engagement metrics per bucket per host: transactions (gift rows), coins, unique viewers.
+    group_by: day/week/month/hour (hour = rentetan waktu dalam satu hari).
     Returns {"labels": [...], "keys": [...], "hosts": [{key,name,transactions[],coins[],viewers[],totals...}, ...]}.
     """
-    group_by = group_by if group_by in ("day", "week", "month") else "day"
+    group_by = group_by if group_by in ("day", "week", "month", "hour") else "day"
     start_d = _analytics_parse_date(start_date)
     end_d = _analytics_parse_date(end_date)
     if not start_d or not end_d or start_d > end_d:
         return {"labels": [], "keys": [], "hosts": []}
 
     where, params = _analytics_gift_where(start_date, end_date, host, account, viewer)
+
+    if group_by == "hour":
+        order = [f"{h:02d}" for h in range(24)]
+        buckets = {k: {"key": k, "label": f"{k}:00"} for k in order}
+        hour_expr = "substr(COALESCE(NULLIF(g.log_time, ''), substr(COALESCE(g.log_datetime, ''), 12, 8), '00:00:00'), 1, 2)"
+        per_host = {}
+        conn = get_db_connection()
+        try:
+            cur = conn.cursor()
+            rows = cur.execute(f"""
+                SELECT {hour_expr} AS h,
+                       {_ANALYTICS_HOST_KEY} AS host_key,
+                       {_ANALYTICS_HOST_LABEL} AS host_name,
+                       COUNT(*) AS transactions,
+                       COALESCE(SUM(g.coins), 0) AS coins
+                FROM gift_logs g
+                WHERE {where}
+                GROUP BY h, {_ANALYTICS_HOST_KEY}
+            """, params).fetchall()
+            for hour_key, hkey, hname, transactions, coins in rows:
+                bkey = str(hour_key or "00")[:2].zfill(2)
+                if bkey not in buckets:
+                    continue
+                hk = (str(hkey or "").lower().strip()) or "-"
+                if hk not in per_host:
+                    per_host[hk] = {
+                        "key": hk, "name": str(hname or hk or "-").strip() or "-",
+                        "transactions": {}, "coins": {}, "_viewers": {},
+                        "total_transactions": 0, "total_coins": 0,
+                    }
+                item = per_host[hk]
+                if hname and (not item["name"] or item["name"] == hk):
+                    item["name"] = str(hname).strip()
+                tr = int(transactions or 0)
+                c = int(coins or 0)
+                item["transactions"][bkey] = item["transactions"].get(bkey, 0) + tr
+                item["coins"][bkey] = item["coins"].get(bkey, 0) + c
+                item["total_transactions"] += tr
+                item["total_coins"] += c
+
+            vrows = cur.execute(f"""
+                SELECT {hour_expr} AS h,
+                       {_ANALYTICS_HOST_KEY} AS host_key,
+                       LOWER(g.viewer_username) AS viewer_key
+                FROM gift_logs g
+                WHERE {where}
+                GROUP BY h, {_ANALYTICS_HOST_KEY}, LOWER(g.viewer_username)
+            """, params).fetchall()
+            for hour_key, hkey, viewer_key in vrows:
+                bkey = str(hour_key or "00")[:2].zfill(2)
+                if bkey not in buckets or not viewer_key:
+                    continue
+                hk = (str(hkey or "").lower().strip()) or "-"
+                if hk not in per_host:
+                    per_host[hk] = {
+                        "key": hk, "name": hk or "-",
+                        "transactions": {}, "coins": {}, "_viewers": {},
+                        "total_transactions": 0, "total_coins": 0,
+                    }
+                item = per_host[hk]
+                if bkey not in item["_viewers"]:
+                    item["_viewers"][bkey] = set()
+                item["_viewers"][bkey].add(viewer_key)
+        except Exception as e:
+            print(f"[Analytics] host engagement timeseries (hour) failed: {e}")
+            return {"labels": [buckets[k]["label"] for k in order], "keys": list(order), "hosts": []}
+        finally:
+            conn.close()
+
+        try:
+            limit_n = max(1, min(int(limit or 12), 20))
+        except Exception:
+            limit_n = 12
+        ranked = sorted(
+            per_host.values(),
+            key=lambda x: (-(x.get("total_coins") or 0), -(x.get("total_transactions") or 0), str(x.get("name") or "").lower())
+        )
+        selected = ranked[:limit_n]
+        if host:
+            h = str(host).strip().lower().lstrip("@")
+            if h and all(x["key"] != h for x in selected):
+                match = per_host.get(h)
+                if match:
+                    selected = [match] + selected[: max(0, limit_n - 1)]
+        hosts_out = []
+        for item in selected:
+            vsets = item.get("_viewers") or {}
+            viewers_arr = [len(vsets.get(k, set())) for k in order]
+            hosts_out.append({
+                "key": item["key"],
+                "name": item["name"],
+                "transactions": [int(item["transactions"].get(k, 0)) for k in order],
+                "coins": [int(item["coins"].get(k, 0)) for k in order],
+                "viewers": viewers_arr,
+                "total_transactions": int(item.get("total_transactions") or 0),
+                "total_coins": int(item.get("total_coins") or 0),
+                "total_viewers": int(sum(viewers_arr)),
+            })
+        return {"labels": [buckets[k]["label"] for k in order], "keys": list(order), "hosts": hosts_out}
 
     buckets = {}
     order = []
@@ -702,7 +885,6 @@ def get_analytics_host_engagement_timeseries(start_date, end_date, group_by="day
     conn = get_db_connection()
     try:
         cur = conn.cursor()
-        # Aggregate transactions and coins per host per day
         rows = cur.execute(f"""
             SELECT substr(g.log_date, 1, 10) AS d,
                    {_ANALYTICS_HOST_KEY} AS host_key,
@@ -737,7 +919,6 @@ def get_analytics_host_engagement_timeseries(start_date, end_date, group_by="day
             item["total_transactions"] += tr
             item["total_coins"] += c
 
-        # Unique viewers per host per day (count distinct per bucket)
         vrows = cur.execute(f"""
             SELECT substr(g.log_date, 1, 10) AS d,
                    {_ANALYTICS_HOST_KEY} AS host_key,

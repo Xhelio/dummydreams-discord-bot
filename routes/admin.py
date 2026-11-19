@@ -1388,6 +1388,17 @@ def view_analytics():
     if group_by not in ('day', 'week', 'month'):
         group_by = 'day' if days <= 45 else ('week' if days <= 200 else 'month')
 
+    chart_group = 'hour' if (days == 1 and group_by == 'day') else group_by
+    if chart_group == 'hour':
+        group_label = 'per jam (dalam sehari)'
+    elif chart_group == 'day':
+        group_label = 'per hari'
+    elif chart_group == 'week':
+        group_label = 'per minggu'
+    else:
+        group_label = 'per bulan'
+
+
     chart_type = (request.args.get('chart') or 'bar').strip()
     if chart_type not in ('bar', 'line', 'area'):
         chart_type = 'bar'
@@ -1403,8 +1414,8 @@ def view_analytics():
     summary = get_analytics_summary(start_str, end_str, host_arg, account_arg, viewer_arg)
     session_summary = get_analytics_sessions(start_str, end_str, host_arg, account_arg)
     session_break = get_analytics_session_breakdown(start_str, end_str, host_arg, account_arg)
-    series = get_analytics_timeseries(start_str, end_str, group_by, host_arg, account_arg, viewer_arg)
-    host_engagement_series = get_analytics_host_engagement_timeseries(start_str, end_str, group_by, host_arg, account_arg, viewer_arg, limit=12)
+    series = get_analytics_timeseries(start_str, end_str, chart_group, host_arg, account_arg, viewer_arg)
+    host_engagement_series = get_analytics_host_engagement_timeseries(start_str, end_str, chart_group, host_arg, account_arg, viewer_arg, limit=12)
     gift_by_host = get_analytics_gift_by_host(start_str, end_str, account_arg, viewer_arg)
     gift_by_account = get_analytics_gift_by_account(start_str, end_str, host_arg, viewer_arg)
     viewer_rows_raw = get_analytics_viewer_ranking(start_str, end_str, host_arg, account_arg, 100)
@@ -1573,7 +1584,7 @@ def view_analytics():
         <div class="header">
             <div>
                 <h1>📈 Analytics</h1>
-                <p class="page-subtitle">{{ start_str }} s/d {{ end_str }} (WIB) · {{ days }} hari · grup: {{ group_by }}</p>
+                <p class="page-subtitle">{{ start_str }} s/d {{ end_str }} (WIB) · {{ days }} hari · grup: {{ group_label }}</p>
             </div>
             <a class="nav-btn" href="/admin/analytics?preset=7d">🔄 Reset Filter</a>
         </div>
@@ -1785,7 +1796,7 @@ def view_analytics():
         <div class="card">
             <div class="card-header">
                 <h2>📈 Frekuensi / Traffic (Grafik Waktu)</h2>
-                <span class="muted" style="font-size:0.8rem;">Sumbu X = waktu ({{ group_by }}). Menampilkan frekuensi/interaksi akun, host, dan keaktifan viewer.</span>
+                <span class="muted" style="font-size:0.8rem;">Sumbu X = waktu ({{ group_label }}). Menampilkan frekuensi/interaksi akun, host, dan keaktifan viewer.</span>
             </div>
 
             <div style="margin-bottom:18px;">
@@ -1816,7 +1827,7 @@ def view_analytics():
                         </label>
                     </div>
                 </div>
-                <div class="muted" style="font-size:0.78rem; margin-bottom:6px;">Sumbu X: waktu ({{ group_by }}) · Tiap seri = nama host. Pilih host yang dianalisis:</div>
+                <div class="muted" style="font-size:0.78rem; margin-bottom:6px;">Sumbu X: waktu ({{ group_label }}) · Tiap seri = nama host. Pilih host yang dianalisis:</div>
                 <div id="host-select-controls" style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px;"></div>
                 <div class="chart-wrap"><div id="freq-chart-host-multi"></div></div>
                 <div id="host-freq-legend" class="muted" style="font-size:0.78rem; margin-top:6px;"></div>
@@ -1951,7 +1962,7 @@ def view_analytics():
         AUTO_REFRESH_JS_PLACEHOLDER
         <script>
         var CHART_DATA = {{ chart_payload|tojson }};
-        var GROUP_BY = {{ group_by|tojson }};
+        var GROUP_BY = {{ chart_group|tojson }};
         var HOST_ENGAGEMENT = {{ (host_engagement_series|default({"labels": [], "keys": [], "hosts": []}, true))|tojson }};
 
         function fmtNum(n) { return (Math.round(n || 0)).toLocaleString('id-ID'); }
@@ -2271,6 +2282,8 @@ def view_analytics():
         preset=preset,
         presets=ANALYTICS_PRESETS,
         group_by=group_by,
+        chart_group=chart_group,
+        group_label=group_label,
         host_filter=host_filter,
         account_filter=account_filter,
         viewer_filter=viewer_filter,
