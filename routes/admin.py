@@ -3141,13 +3141,25 @@ def view_timeline():
                 // now line (real-time position within range)
                 let nowLine = '';
                 const nowMin = currentNowMin();
-                if (!isNaN(nowMin) && nowMin >= 0 && nowMin <= totalMin) {
-                    nowLine = '<div class="tl-now" style="left:'+(nowMin/60*pxPerHour)+'px;height:'+ (rowIndex*rowHeight) +'px"></div>';
+                const hasNow = (!isNaN(nowMin) && nowMin >= 0 && nowMin <= totalMin);
+                if (hasNow) {
+                    nowLine = '<div class="tl-now" style="height:'+ (rowIndex*rowHeight) +'px"></div>';
                 }
 
                 inner.innerHTML = ''
                   + '<div class="tl-header"><div class="tl-corner">Channel / Host</div><div class="tl-hours" style="width:'+timelineWidth+'px">'+hours+'</div></div>'
-                  + '<div class="tl-body" style="height:'+ (rowIndex*rowHeight) +'px;width:'+ (labelW+timelineWidth) +'px">'+body+nowLine+'</div>';
+                  + '<div class="tl-body" style="height:'+ (rowIndex*rowHeight) +'px">'+body+nowLine+'</div>';
+
+                // Position the now line relative to the track area (after the sticky label
+                // column). The label column width changes on mobile, so measure it.
+                if (hasNow) {
+                    const nowEl = inner.querySelector('.tl-now');
+                    const labEl = inner.querySelector('.tl-label');
+                    const labW = labEl ? labEl.getBoundingClientRect().width : labelW;
+                    if (nowEl) {
+                        nowEl.style.left = (labW + nowMin/60*pxPerHour) + 'px';
+                    }
+                }
 
                 inner.querySelectorAll('.tl-bar').forEach(el => {
                     el.addEventListener('click', (e) => {
