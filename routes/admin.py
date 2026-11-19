@@ -1696,9 +1696,6 @@ def view_analytics():
                             <option value="area">Area</option>
                         </select>
                     </label>
-                    <label style="flex-direction:row; align-items:center; gap:6px; cursor:pointer;">
-                        <input type="checkbox" id="chart-trend" style="width:auto;"> Tren/Rata-rata
-                    </label>
                 </div>
             </div>
             <div class="chart-wrap">
@@ -1801,12 +1798,9 @@ def view_analytics():
                                 <option value="active_accounts">Akun aktif</option>
                             </select>
                         </label>
-                        <label style="flex-direction:row; align-items:center; gap:6px; cursor:pointer;">
-                            <input type="checkbox" class="freq-trend" data-target="freq-chart-account" checked style="width:auto;"> Tren/Rata-rata
-                        </label>
                     </div>
                 </div>
-                <div class="chart-wrap"><div id="freq-chart-account" class="freq-chart" data-metric="sessions" data-trend="1"></div></div>
+                <div class="chart-wrap"><div id="freq-chart-account" class="freq-chart" data-metric="sessions"></div></div>
             </div>
 
             <div style="margin-bottom:18px;">
@@ -1820,12 +1814,9 @@ def view_analytics():
                                 <option value="viewers">Viewer unik (pemberi gift)</option>
                             </select>
                         </label>
-                        <label style="flex-direction:row; align-items:center; gap:6px; cursor:pointer;">
-                            <input type="checkbox" id="host-freq-trend" checked style="width:auto;"> Tren/Rata-rata
-                        </label>
                     </div>
                 </div>
-                <div class="muted" style="font-size:0.78rem; margin-bottom:6px;">Sumbu X: waktu ({{ group_by }}) · Sumbu Y: engagement host (mengikuti metrik terpilih) · Tiap seri = nama host. Pilih host yang dianalisis:</div>
+                <div class="muted" style="font-size:0.78rem; margin-bottom:6px;">Sumbu X: waktu ({{ group_by }}) · Tiap seri = nama host. Pilih host yang dianalisis:</div>
                 <div id="host-select-controls" style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px;"></div>
                 <div class="chart-wrap"><div id="freq-chart-host-multi"></div></div>
                 <div id="host-freq-legend" class="muted" style="font-size:0.78rem; margin-top:6px;"></div>
@@ -1842,12 +1833,9 @@ def view_analytics():
                                 <option value="gifts">Jumlah gift (item)</option>
                             </select>
                         </label>
-                        <label style="flex-direction:row; align-items:center; gap:6px; cursor:pointer;">
-                            <input type="checkbox" class="freq-trend" data-target="freq-chart-viewer" checked style="width:auto;"> Tren/Rata-rata
-                        </label>
                     </div>
                 </div>
-                <div class="chart-wrap"><div id="freq-chart-viewer" class="freq-chart" data-metric="viewers" data-trend="1"></div></div>
+                <div class="chart-wrap"><div id="freq-chart-viewer" class="freq-chart" data-metric="viewers"></div></div>
             </div>
 
             <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; align-items: start; margin-top:16px;">
@@ -1975,45 +1963,27 @@ def view_analytics():
             return nf * exp;
         }
         function escHtml(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
-        function movingAvg(values, windowSize) {
-            var out = [], n = values.length;
-            var w = Math.max(1, windowSize || 1);
-            for (var i = 0; i < n; i++) {
-                var start = Math.max(0, i - w + 1);
-                var sum = 0, count = 0;
-                for (var j = start; j <= i; j++) { sum += (values[j] || 0); count++; }
-                out.push(count ? (sum / count) : 0);
-            }
-            return out;
-        }
-        function trendWindow() {
-            if (GROUP_BY === 'day') return 7;
-            if (GROUP_BY === 'week') return 4;
-            if (GROUP_BY === 'month') return 3;
-            return 7;
-        }
-
-        function yAxisLabel(metric) {
-            var labels = {
-                coins: 'Koin (c)',
-                gifts: 'Jumlah gift (item)',
-                gift_events: 'Transaksi gift',
-                viewers: 'Viewer unik',
-                sessions: 'Sesi live',
-                active_accounts: 'Akun aktif',
-                active_hosts: 'Host aktif',
-                transactions: 'Transaksi gift'
+        function yAxisUnit(metric) {
+            var units = {
+                coins: 'koin',
+                gifts: 'gift',
+                gift_events: 'transaksi',
+                viewers: 'viewer',
+                sessions: 'sesi',
+                active_accounts: 'akun',
+                active_hosts: 'host',
+                transactions: 'transaksi'
             };
-            return labels[metric] || metric || '-';
+            return units[metric] || '';
         }
 
-        function renderChart(containerId, metric, chartType, showTrend) {
+        function renderChart(containerId, metric, chartType) {
             var wrap = document.getElementById(containerId);
             if (!wrap) return;
             var labels = CHART_DATA.labels || [];
             var values = (CHART_DATA[metric] || []).slice();
             if (!labels.length) {
-                wrap.innerHTML = '<div class="muted" style="padding:32px;text-align:center;">No data untuk filter ini. Sumbu Y: ' + escHtml(yAxisLabel(metric)) + '.</div>';
+                wrap.innerHTML = '<div class="muted" style="padding:32px;text-align:center;">No data untuk filter ini (' + escHtml(yAxisUnit(metric)) + ').</div>';
                 return;
             }
             var n = values.length;
@@ -2025,18 +1995,10 @@ def view_analytics():
             var ph = height - pad.t - pad.b;
             var slot = pw / n;
 
-            var ma = showTrend ? movingAvg(values, trendWindow()) : [];
-            var avg = 0;
-            for (var ai = 0; ai < n; ai++) avg += (values[ai] || 0);
-            avg = n ? (avg / n) : 0;
-
             var maxV = 0;
             for (var mi = 0; mi < n; mi++) { if ((values[mi] || 0) > maxV) maxV = values[mi] || 0; }
-            if (showTrend) {
-                for (var mj = 0; mj < ma.length; mj++) { if ((ma[mj] || 0) > maxV) maxV = ma[mj] || 0; }
-                if (avg > maxV) maxV = avg;
-            }
             var top = niceCeil(maxV);
+            var unit = yAxisUnit(metric);
 
             function yOf(v) { return pad.t + ph - ph * ((v || 0) / top); }
             function xOf(i) { return pad.l + slot * (i + 0.5); }
@@ -2045,13 +2007,13 @@ def view_analytics():
             var parts = [];
             parts.push('<svg viewBox="0 0 ' + width + ' ' + height + '" width="100%" height="' + height + '" role="img">');
             parts.push('<defs><linearGradient id="' + gradId + '" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#38bdf8" stop-opacity="0.40"/><stop offset="100%" stop-color="#38bdf8" stop-opacity="0.02"/></linearGradient></defs>');
-            parts.push('<text x="4" y="13" fill="#94a3b8" font-size="10" font-weight="600">Sumbu Y: ' + escHtml(yAxisLabel(metric)) + '</text>');
             for (var t = 0; t <= 4; t++) {
                 var yy = pad.t + ph - (ph * t / 4);
                 var val = top * t / 4;
                 parts.push('<line x1="' + pad.l + '" y1="' + yy + '" x2="' + (pad.l + pw) + '" y2="' + yy + '" stroke="#1e293b" stroke-width="1"/>');
                 parts.push('<text x="' + (pad.l - 8) + '" y="' + (yy + 4) + '" text-anchor="end" fill="#64748b" font-size="10">' + fmtNum(val) + '</text>');
             }
+            if (unit) parts.push('<text x="' + (pad.l - 8) + '" y="' + (pad.t - 6) + '" text-anchor="end" fill="#94a3b8" font-size="9" font-style="italic">' + escHtml(unit) + '</text>');
 
             if (type === 'bar') {
                 var bw = Math.max(2, Math.min(44, slot * 0.62));
@@ -2071,17 +2033,6 @@ def view_analytics():
                 parts.push('<polyline fill="none" stroke="#38bdf8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" points="' + pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' ') + '"/>');
                 for (var k = 0; k < n; k++) {
                     parts.push('<circle cx="' + pts[k][0] + '" cy="' + pts[k][1] + '" r="3.2" fill="#0b1220" stroke="#38bdf8" stroke-width="2"><title>' + escHtml(labels[k]) + ': ' + fmtNum(values[k]) + '</title></circle>');
-                }
-            }
-
-            if (showTrend) {
-                var yAvg = yOf(avg);
-                parts.push('<line x1="' + pad.l + '" y1="' + yAvg + '" x2="' + (pad.l + pw) + '" y2="' + yAvg + '" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="6 4"/>');
-                parts.push('<text x="' + (pad.l + pw - 4) + '" y="' + (yAvg - 5) + '" text-anchor="end" fill="#fbbf24" font-size="10">Rata-rata: ' + fmtNum(avg) + '</text>');
-                if (ma.length > 1) {
-                    var mpts = ma.map(function (v, i) { return xOf(i) + ',' + yOf(v); }).join(' ');
-                    parts.push('<polyline fill="none" stroke="#22c55e" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="' + mpts + '"/>');
-                    parts.push('<text x="' + (pad.l + 6) + '" y="' + (pad.t + 12) + '" fill="#4ade80" font-size="10">Tren (MA ' + trendWindow() + ' ' + escHtml(GROUP_BY) + ')</text>');
                 }
             }
 
@@ -2148,7 +2099,7 @@ def view_analytics():
             };
         }
 
-        function renderHostFrequencyChart(showTrend) {
+        function renderHostFrequencyChart() {
             var wrap = document.getElementById('freq-chart-host-multi');
             var legend = document.getElementById('host-freq-legend');
             if (!wrap) return;
@@ -2194,39 +2145,25 @@ def view_analytics():
             var ph = height - pad.t - pad.b;
             var slot = pw / n;
 
-            var totals = [];
-            for (var i = 0; i < n; i++) {
-                var sum = 0;
-                for (var h = 0; h < hosts.length; h++) sum += (hostEngValues(hosts[h].host, metric)[i] || 0);
-                totals.push(sum);
-            }
-            var ma = showTrend ? movingAvg(totals, trendWindow()) : [];
-            var avg = 0;
-            for (var ai = 0; ai < n; ai++) avg += totals[ai] || 0;
-            avg = n ? (avg / n) : 0;
-
             var maxV = 0;
             for (var hi = 0; hi < hosts.length; hi++) {
                 var vals = hostEngValues(hosts[hi].host, metric);
                 for (var vi = 0; vi < vals.length; vi++) { if ((vals[vi] || 0) > maxV) maxV = vals[vi] || 0; }
             }
-            if (showTrend) {
-                for (var mj = 0; mj < ma.length; mj++) { if ((ma[mj] || 0) > maxV) maxV = ma[mj] || 0; }
-                if (avg > maxV) maxV = avg;
-            }
             var top = niceCeil(maxV);
+            var unit = yAxisUnit(metric);
             function yOf(v) { return pad.t + ph - ph * ((v || 0) / top); }
             function xOf(i) { return pad.l + slot * (i + 0.5); }
 
             var parts = [];
             parts.push('<svg viewBox="0 0 ' + width + ' ' + height + '" width="100%" height="' + height + '" role="img">');
-            parts.push('<text x="4" y="13" fill="#94a3b8" font-size="10" font-weight="600">Sumbu Y: ' + escHtml(hostEngMetricLabel(metric)) + (metric === 'coins' ? ' (c)' : '') + '</text>');
             for (var t = 0; t <= 4; t++) {
                 var yy = pad.t + ph - (ph * t / 4);
                 var val = top * t / 4;
                 parts.push('<line x1="' + pad.l + '" y1="' + yy + '" x2="' + (pad.l + pw) + '" y2="' + yy + '" stroke="#1e293b" stroke-width="1"/>');
                 parts.push('<text x="' + (pad.l - 8) + '" y="' + (yy + 4) + '" text-anchor="end" fill="#64748b" font-size="10">' + fmtNum(val) + '</text>');
             }
+            if (unit) parts.push('<text x="' + (pad.l - 8) + '" y="' + (pad.t - 6) + '" text-anchor="end" fill="#94a3b8" font-size="9" font-style="italic">' + escHtml(unit) + '</text>');
 
             for (var s = 0; s < hosts.length; s++) {
                 var item = hosts[s];
@@ -2238,16 +2175,6 @@ def view_analytics():
                 parts.push('<polyline fill="none" stroke="' + color + '" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" points="' + pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' ') + '"/>');
                 for (var k = 0; k < n; k++) {
                     parts.push('<circle cx="' + pts[k][0] + '" cy="' + pts[k][1] + '" r="3" fill="#0b1220" stroke="' + color + '" stroke-width="2"><title>' + escHtml(series.name) + ' · ' + escHtml(labels[k]) + ': ' + fmtNum(valsS[k] || 0) + ' ' + escHtml(metricLabel.toLowerCase()) + '</title></circle>');
-                }
-            }
-
-            if (showTrend) {
-                var yAvg = yOf(avg);
-                parts.push('<line x1="' + pad.l + '" y1="' + yAvg + '" x2="' + (pad.l + pw) + '" y2="' + yAvg + '" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="6 4"/>');
-                parts.push('<text x="' + (pad.l + pw - 4) + '" y="' + (yAvg - 5) + '" text-anchor="end" fill="#fbbf24" font-size="10">Rata-rata: ' + fmtNum(avg) + '</text>');
-                if (ma.length > 1) {
-                    var mpts = ma.map(function (v, i) { return xOf(i) + ',' + yOf(v); }).join(' ');
-                    parts.push('<polyline fill="none" stroke="#22c55e" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="' + mpts + '"/>');
                 }
             }
 
@@ -2268,37 +2195,30 @@ def view_analytics():
                         + '<strong style="color:#e2e8f0;">' + escHtml(series.name) + '</strong>'
                         + '<span>(' + fmtNum(hostEngTotal(series, metric)) + ' ' + escHtml(metricLabel.toLowerCase()) + ')</span></span>';
                 }).join('');
-                if (showTrend) items += '<span style="display:inline-flex;align-items:center;gap:6px;margin:2px 10px 2px 0;"><span style="width:12px;height:0;border-top:2px dashed #f59e0b;display:inline-block;"></span><span>Rata-rata</span></span>'
-                    + '<span style="display:inline-flex;align-items:center;gap:6px;margin:2px 10px 2px 0;"><span style="width:12px;height:3px;background:#22c55e;display:inline-block;"></span><span>Tren (MA ' + trendWindow() + ')</span></span>';
                 legend.innerHTML = items;
             }
         }
 
         function drawHostFreq() {
-            var cb = document.getElementById('host-freq-trend');
-            renderHostFrequencyChart(cb ? !!cb.checked : true);
+            renderHostFrequencyChart();
         }
 
         (function () {
             var mainMetric = {{ metric|tojson }};
             var mainType = {{ chart_type|tojson }};
-            var mainTrend = false;
             var metricSelect = document.getElementById('chart-metric');
             var typeSelect = document.getElementById('chart-type');
-            var trendCheck = document.getElementById('chart-trend');
 
-            function drawMain() { renderChart('chart-svg', mainMetric, mainType, mainTrend); }
+            function drawMain() { renderChart('chart-svg', mainMetric, mainType); }
             if (metricSelect) { metricSelect.value = mainMetric; metricSelect.addEventListener('change', function () { mainMetric = this.value; drawMain(); }); }
             if (typeSelect) { typeSelect.value = mainType; typeSelect.addEventListener('change', function () { mainType = this.value; drawMain(); }); }
-            if (trendCheck) { trendCheck.checked = mainTrend; trendCheck.addEventListener('change', function () { mainTrend = !!this.checked; drawMain(); }); }
 
             function drawFreq() {
                 var charts = document.querySelectorAll('.freq-chart');
                 for (var i = 0; i < charts.length; i++) {
                     var el = charts[i];
                     var m = el.getAttribute('data-metric') || 'sessions';
-                    var tr = el.getAttribute('data-trend') === '1';
-                    renderChart(el.id, m, 'line', tr);
+                    renderChart(el.id, m, 'line');
                 }
                 drawHostFreq();
             }
@@ -2307,19 +2227,9 @@ def view_analytics():
             for (var i = 0; i < metricSelects.length; i++) {
                 metricSelects[i].addEventListener('change', function () {
                     var target = document.getElementById(this.getAttribute('data-target'));
-                    if (target) { target.setAttribute('data-metric', this.value); renderChart(target.id, this.value, 'line', target.getAttribute('data-trend') === '1'); }
+                    if (target) { target.setAttribute('data-metric', this.value); renderChart(target.id, this.value, 'line'); }
                 });
             }
-            var trendChecks = document.querySelectorAll('.freq-trend');
-            for (var j = 0; j < trendChecks.length; j++) {
-                trendChecks[j].addEventListener('change', function () {
-                    var target = document.getElementById(this.getAttribute('data-target'));
-                    if (target) { target.setAttribute('data-trend', this.checked ? '1' : '0'); renderChart(target.id, target.getAttribute('data-metric') || 'sessions', 'line', this.checked); }
-                });
-            }
-
-            var hostTrendCb = document.getElementById('host-freq-trend');
-            if (hostTrendCb) hostTrendCb.addEventListener('change', function () { drawHostFreq(); });
             var hostMetricSel = document.getElementById('host-eng-metric');
             if (hostMetricSel) hostMetricSel.addEventListener('change', function () { renderHostSelector(); drawHostFreq(); });
             renderHostSelector();
