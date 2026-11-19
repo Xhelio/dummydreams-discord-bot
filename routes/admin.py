@@ -2921,6 +2921,13 @@ def view_timeline():
             let rowHeight = 30;
             let currentData = null;
             let drag = null;
+            let nowBaseMin = null;
+            let nowBaseMs = 0;
+
+            function currentNowMin(){
+                if (nowBaseMin === null) return NaN;
+                return nowBaseMin + (Date.now() - nowBaseMs) / 60000.0;
+            }
 
             function pad(n){ return String(n).padStart(2,'0'); }
             function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
@@ -3103,9 +3110,9 @@ def view_timeline():
                     });
                 });
 
-                // now line
+                // now line (real-time position within range)
                 let nowLine = '';
-                const nowMin = Number(data.now_min);
+                const nowMin = currentNowMin();
                 if (!isNaN(nowMin) && nowMin >= 0 && nowMin <= totalMin) {
                     nowLine = '<div class="tl-now" style="left:'+(nowMin/60*pxPerHour)+'px;height:'+ (rowIndex*rowHeight) +'px"></div>';
                 }
@@ -3219,6 +3226,9 @@ def view_timeline():
                     if (data.date) dateInput.value = data.date;
                     if (data.start) startInput.value = data.start;
                     if (data.end) endInput.value = data.end;
+                    nowBaseMin = Number(data.now_min);
+                    if (isNaN(nowBaseMin)) nowBaseMin = null;
+                    nowBaseMs = Date.now();
                     render();
                 } catch(e){
                     statusEl.textContent = 'Gagal memuat data: ' + (e && e.message ? e.message : e);
@@ -3272,7 +3282,8 @@ def view_timeline():
             endInput.value = {{ end_json|safe }};
             updateModeUI();
             load();
-            setInterval(()=>{ if (currentData) { currentData.now_min = (Number(currentData.now_min)||0) + 1; render(); } }, 60000);
+            // Keep "now" line accurate without refetching; recompute from server baseline.
+            setInterval(()=>{ if (currentData && nowBaseMin !== null) render(); }, 30000);
         })();
         </script>
     </body>
