@@ -58,7 +58,7 @@ from db import (
 )
 from utils import get_schedule_info, load_summary_config
 from server import keep_alive
-from observer import run_all_observers, get_current_live_hosts, is_any_host_live, probe_room_live
+from observer import run_all_observers, get_current_live_hosts, is_any_host_live, probe_room_live, probe_priority_targets_once
 from verification import async_verify_tiktok_bio
 from routes.settings import set_verification_refresh_handler, set_presence_refresh_handler
 import runtime_status
@@ -1882,7 +1882,7 @@ class VerificationMethodChoiceView(VerificationView):
         if not await _safe_defer(interaction, "verification method: live greeting"):
             return
         await _show_verify_progress(
-            interaction, "Checking your verification request and live hosts…"
+            interaction, "Checking your verification request and testing priority targets…"
         )
         ok, resolved = await _run_verify_step(
             self._resolve(interaction), "resolve verification request"
@@ -1908,20 +1908,36 @@ class VerificationMethodChoiceView(VerificationView):
             f"[VERIFY METHOD] {interaction.user} (ID {interaction.user.id}) chose live greeting for @{tiktok_user}.",
             tiktok_user
         )
-        live_hosts = get_current_live_hosts()
+        ok_probe, probe_results = await _run_verify_step(
+            probe_priority_targets_once(), "test priority target connection"
+        )
+        if not ok_probe:
+            probe_results = []
+        await asyncio.to_thread(
+            log_activity_event,
+            "verification",
+            f"[VERIFY PROBE] Priority target check for @{tiktok_user}: {probe_results}",
+            tiktok_user
+        )
+        live_hosts = _live_hosts_with_probe(get_current_live_hosts(), probe_results)
         if live_hosts:
-            embed = build_live_greeting_embed(tiktok_user, live_hosts)
+            embed = build_live_greeting_embed(tiktok_user, live_hosts, probe_results)
         else:
             embed = discord.Embed(
                 title="⏳ Waiting for a Live Stream",
                 description=(
-                    f"No host is live right now.\n\n"
+                    f"No host is live right now. Priority targets were checked once.\n\n"
                     f"TikTok account **@{tiktok_user}** will be verified automatically "
                     f"as soon as you post a welcome message (for example `hello` or `hiii`) "
                     f"in one of our live streams.\n\n"
                     f"💡 *You can switch to bio verification if you do not want to wait.*"
                 ),
                 color=discord.Color.yellow()
+            )
+            embed.add_field(
+                name="🔎 Priority target connection check",
+                value=_format_priority_probe_results(probe_results),
+                inline=False,
             )
         await interaction.edit_original_response(
             embed=embed,
@@ -1961,7 +1977,7 @@ class LowActivityVerificationView(VerificationView):
         if not await _safe_defer(interaction, "low-activity method: live greeting"):
             return
         await _show_verify_progress(
-            interaction, "Checking your verification request and live hosts…"
+            interaction, "Checking your verification request and testing priority targets…"
         )
         ok, resolved = await _run_verify_step(
             self._resolve(interaction), "resolve verification request"
@@ -1981,14 +1997,31 @@ class LowActivityVerificationView(VerificationView):
             f"[VERIFY METHOD] {interaction.user} (ID {interaction.user.id}) chose live greeting for @{tiktok_user}.",
             tiktok_user
         )
-        live_hosts = get_current_live_hosts()
+        ok_probe, probe_results = await _run_verify_step(
+            probe_priority_targets_once(), "test priority target connection"
+        )
+        if not ok_probe:
+            probe_results = []
+        await asyncio.to_thread(
+            log_activity_event,
+            "verification",
+            f"[VERIFY PROBE] Priority target check for @{tiktok_user}: {probe_results}",
+            tiktok_user
+        )
+        live_hosts = _live_hosts_with_probe(get_current_live_hosts(), probe_results)
         if not live_hosts:
             code = await _create_pending_code(interaction, tiktok_user, "bio", view=self)
             if not code:
                 return
             embed = build_bio_verification_embed(tiktok_user, code)
             embed.description = (
-                f"⚪ **No host is live right now.**\n\n" + embed.description
+                f"⚪ **No host is live right now.** Priority targets were checked once.\n\n"
+                + embed.description
+            )
+            embed.add_field(
+                name="🔎 Priority target connection check",
+                value=_format_priority_probe_results(probe_results),
+                inline=False,
             )
             await interaction.edit_original_response(
                 embed=embed,
@@ -2002,7 +2035,7 @@ class LowActivityVerificationView(VerificationView):
             return
         _cache_live_pending(tiktok_user)
         await interaction.edit_original_response(
-            embed=build_live_greeting_embed(tiktok_user, live_hosts),
+            embed=build_live_greeting_embed(tiktok_user, live_hosts, probe_results),
             view=LiveGreetingVerificationView(tiktok_user, total_coins)
         )
 
@@ -2051,11 +2084,47 @@ class LowActivityVerificationView(VerificationView):
             _drop_live_pending(tiktok_user)
         await interaction.edit_original_response(content="❌ Verification cancelled.", embed=None, view=None)
 
-def build_live_greeting_embed(tiktok_user: str, live_hosts: list) -> discord.Embed:
+def _format_priority_probe_results(results):
+    if not results:
+        return "No priority target configured."
+    lines = []
+    for r in results:
+        username = str((r or {}).get("username") or "?").lower().lstrip("@")
+        live = (r or {}).get("live")
+        if live is True:
+            lines.append(f"• `@{username}` — ✅ Accessible (live)")
+        elif live is False:
+            lines.append(f"• `@{username}` — ⚪ Not live")
+        else:
+            lines.append(f"• `@{username}` — ⚠️ Unreachable right now")
+    return "\n".join(lines) if lines else "No priority target configured."
+
+
+def _live_hosts_with_probe(live_hosts, probe_results=None):
+    hosts = []
+    seen = set()
+    for host in (live_hosts or []):
+        username = str(host or "").lower().lstrip("@")
+        if not username or username in seen:
+            continue
+        seen.add(username)
+        hosts.append(username)
+    for result in (probe_results or []):
+        if (result or {}).get("live") is not True:
+            continue
+        username = str((result or {}).get("username") or "").lower().lstrip("@")
+        if not username or username in seen:
+            continue
+        seen.add(username)
+        hosts.append(username)
+    return hosts
+
+
+def build_live_greeting_embed(tiktok_user: str, live_hosts: list, probe_results=None) -> discord.Embed:
     host_lines = "\n".join(
-        [f"• `@{h}` — https://www.tiktok.com/@{h}/live" for h in live_hosts]
-    )
-    return discord.Embed(
+        [f"• `@{h}` — https://www.tiktok.com/@{h}/live" for h in (live_hosts or [])]
+    ) or "• No live host detected right now."
+    embed = discord.Embed(
         title="🔴 Verify via Live Greeting",
         description=(
             f"TikTok account: **@{tiktok_user}**\n"
@@ -2070,6 +2139,13 @@ def build_live_greeting_embed(tiktok_user: str, live_hosts: list) -> discord.Emb
         ),
         color=discord.Color.red()
     )
+    if probe_results is not None:
+        embed.add_field(
+            name="🔎 Priority target connection check",
+            value=_format_priority_probe_results(probe_results),
+            inline=False,
+        )
+    return embed
 
 class BioVerificationView(VerificationView):
     """Persistent bio verification: the button stays clickable and can be retried."""
@@ -2525,19 +2601,35 @@ class LiveGreetingVerificationView(VerificationView):
             f"@{tiktok_user}: not verified yet.",
             tiktok_user
         )
-        live_hosts = get_current_live_hosts()
+        ok_probe, probe_results = await _run_verify_step(
+            probe_priority_targets_once(), "test priority target connection"
+        )
+        if not ok_probe:
+            probe_results = []
+        await asyncio.to_thread(
+            log_activity_event,
+            "verification",
+            f"[VERIFY PROBE] Priority target check (status) for @{tiktok_user}: {probe_results}",
+            tiktok_user
+        )
+        live_hosts = _live_hosts_with_probe(get_current_live_hosts(), probe_results)
         if live_hosts:
-            embed = build_live_greeting_embed(tiktok_user, live_hosts)
+            embed = build_live_greeting_embed(tiktok_user, live_hosts, probe_results)
         else:
             embed = discord.Embed(
                 title="⏳ Waiting for a Live Stream",
                 description=(
-                    f"No host is live right now.\n\n"
+                    f"No host is live right now. Priority targets were checked once.\n\n"
                     f"TikTok account **@{tiktok_user}** will be verified automatically "
                     f"as soon as you post a welcome message in one of our live streams.\n\n"
                     f"💡 *You can also switch to bio verification if you do not want to wait.*"
                 ),
                 color=discord.Color.yellow()
+            )
+            embed.add_field(
+                name="🔎 Priority target connection check",
+                value=_format_priority_probe_results(probe_results),
+                inline=False,
             )
         await interaction.edit_original_response(embed=embed, view=self)
 

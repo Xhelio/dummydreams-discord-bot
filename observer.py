@@ -258,6 +258,38 @@ def is_any_host_live() -> bool:
     """Mengecek apakah ada minimal 1 host yang sedang live saat ini."""
     return len(runtime_status.get_live_usernames()) > 0
 
+
+async def probe_priority_targets_once():
+    """Probe active priority targets once to verify live accessibility.
+
+    Returns a list of {"username": str, "live": bool|None} in priority-target order.
+    """
+    try:
+        targets = get_observable_hosts() or []
+    except Exception:
+        targets = []
+    usernames = []
+    seen = set()
+    for target in targets:
+        if not isinstance(target, dict) or not target.get("priority"):
+            continue
+        username = (target.get("username") or "").lower().lstrip("@")
+        if not username or username in seen:
+            continue
+        seen.add(username)
+        usernames.append(username)
+    if not usernames:
+        return []
+    results = await asyncio.gather(*(probe_room_live(u) for u in usernames), return_exceptions=True)
+    out = []
+    for username, result in zip(usernames, results):
+        if isinstance(result, Exception):
+            print(f"[{username}] Priority probe exception: {result}")
+            out.append({"username": username, "live": None})
+        else:
+            out.append({"username": username, "live": result})
+    return out
+
 async def _trigger_announcement(announcement_callback, username: str, is_live: bool, host_name: str = None):
     if not announcement_callback:
         return
