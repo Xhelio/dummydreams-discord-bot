@@ -802,12 +802,12 @@ async def asyncio_sleep(seconds: float) -> None:
     await asyncio.sleep(seconds)
 
 
-def tail_log(lines: int = 300, level: str = "all", search: str = None):
-    """Return ``(text, matched_count)`` from the end of the log file."""
+def tail_log(lines: int = 100, level: str = "all", search: str = None):
+    """Return ``(text, matched_count)`` from the end of the log file (maks 100 baris)."""
     try:
-        count = max(1, min(int(lines or 300), 3000))
+        count = max(1, min(int(lines or 100), 100))
     except (TypeError, ValueError):
-        count = 300
+        count = 100
 
     if not os.path.exists(LOG_PATH):
         return "Log file not found.", 0

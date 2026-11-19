@@ -1845,8 +1845,12 @@ def get_user_total_spent(viewer_user: str) -> int:
     finally:
         conn.close()
 
-def get_activity_logs(limit: int = 150, channel_filter: str = "") -> list:
-    """Mengambil riwayat log aktivitas terbaru."""
+def get_activity_logs(limit: int = 100, channel_filter: str = "") -> list:
+    """Mengambil riwayat log aktivitas terbaru (maks 100 baris)."""
+    try:
+        limit = max(1, min(int(limit or 100), 100))
+    except (TypeError, ValueError):
+        limit = 100
     conn = get_db_connection()
     try:
         cur = conn.cursor()

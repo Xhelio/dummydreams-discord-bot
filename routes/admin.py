@@ -936,7 +936,6 @@ def view_monitor():
                         {% endif %}
                     </td>
                     <td>
-                        <a href="/admin/toggle-host/{{ h.host_id }}" class="btn-action btn-toggle">Toggle Active Status</a>
                         <a href="/admin/delete-host/{{ h.host_id }}" class="btn-action btn-del" onclick="return confirm('Delete this target?')">Delete</a>
                     </td>
                 </tr>
@@ -1019,13 +1018,6 @@ def add_host():
         conn.close()
     return redirect('/admin/monitor?msg=' + quote_plus('Host ditambahkan/diperbarui.') + '&msg_type=success')
 
-@admin_bp.route('/toggle-host/<int:host_id>', methods=['GET', 'POST'])
-def toggle_host(host_id):
-    conn = get_db_connection()
-    conn.execute("UPDATE hosts SET is_active = CASE WHEN is_active = 1 THEN 0 ELSE 1 END WHERE host_id = ?", (host_id,))
-    conn.commit()
-    conn.close()
-    return redirect('/admin/monitor?msg=' + quote_plus('Status aktif host diperbarui.') + '&msg_type=success')
 
 @admin_bp.route('/delete-host/<int:host_id>', methods=['GET', 'POST'])
 def delete_host(host_id):
@@ -1083,7 +1075,7 @@ def sync_hosts_action():
 @admin_bp.route('/activity', methods=['GET'])
 def view_activity():
     channel_filter = request.args.get("channel", "").strip().lower().lstrip("@")
-    logs = get_activity_logs(limit=250, channel_filter=channel_filter)
+    logs = get_activity_logs(limit=100, channel_filter=channel_filter)
     gift_activities = get_recent_gift_activities(limit=100, channel_filter=channel_filter)
     all_hosts = get_active_hosts()
     if not all_hosts:
@@ -1199,7 +1191,6 @@ def view_activity():
         <div class="card">
             <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom: 8px;">
                 <h2 style="margin:0;">📜 Live Activity Feed (Stream Console)</h2>
-                <button type="button" class="btn" id="copy-all-log-btn" onclick="copyAllActivityLog()" style="background:#334155; border:1px solid #475569; padding:8px 12px;">📋 Copy All Log</button>
             </div>
             <div class="terminal-container" id="terminal-feed">
                 {% for log in logs %}
@@ -1245,74 +1236,6 @@ def view_activity():
             </div>
         </div>
 
-        <script>
-        function collectActivityLogText() {
-            const rows = Array.from(document.querySelectorAll('#terminal-feed .terminal-row'));
-            let text = rows.map(row => {
-                const ts = row.getAttribute('data-log-ts') || '';
-                const type = (row.getAttribute('data-log-type') || '').toUpperCase();
-                const msg = row.getAttribute('data-log-msg') || '';
-                return `[${ts}] [${type}] ${msg}`.trim();
-            }).filter(Boolean).join('\n');
-            if (!text) text = 'No activity log lines available.';
-            return text;
-        }
-
-        function showCopyLogModal(text) {
-            const existing = document.getElementById('copy-log-modal');
-            if (existing) existing.remove();
-            const overlay = document.createElement('div');
-            overlay.id = 'copy-log-modal';
-            overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px;';
-            overlay.innerHTML = `
-                <div style="background:#0f172a;border:1px solid #334155;border-radius:12px;max-width:1000px;width:100%;padding:16px;color:#e2e8f0;">
-                    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;">
-                        <strong>Copy All Log</strong>
-                        <button type="button" id="close-copy-log-modal" class="btn" style="background:#334155;border:1px solid #475569;padding:6px 10px;">Close</button>
-                    </div>
-                    <p style="margin:0 0 8px;color:#94a3b8;font-size:0.85rem;">Teks log sudah diseleksi. Jika tidak otomatis tercopy, tekan Ctrl+C / Cmd+C lalu paste.</p>
-                    <textarea id="copy-log-textarea" readonly style="width:100%;height:60vh;background:#020617;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:12px;font-family:monospace;font-size:12px;white-space:pre;"></textarea>
-                </div>`;
-            document.body.appendChild(overlay);
-            const ta = overlay.querySelector('#copy-log-textarea');
-            ta.value = text;
-            ta.focus();
-            ta.select();
-            overlay.querySelector('#close-copy-log-modal').onclick = () => overlay.remove();
-            overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
-        }
-
-        async function copyAllActivityLog() {
-            const text = collectActivityLogText();
-            const btn = document.getElementById('copy-all-log-btn');
-            const original = btn ? btn.textContent : '';
-            let copied = false;
-            try {
-                if (navigator.clipboard && window.isSecureContext) {
-                    await navigator.clipboard.writeText(text);
-                    copied = true;
-                }
-            } catch (e) { copied = false; }
-            if (!copied) {
-                try {
-                    const ta = document.createElement('textarea');
-                    ta.value = text;
-                    ta.setAttribute('readonly', '');
-                    ta.style.position = 'fixed';
-                    ta.style.top = '-9999px';
-                    document.body.appendChild(ta);
-                    ta.select();
-                    copied = document.execCommand('copy');
-                    document.body.removeChild(ta);
-                } catch (e) { copied = false; }
-            }
-            if (btn) {
-                btn.textContent = copied ? '✅ Copied' : '📋 Manual Copy';
-                setTimeout(() => btn.textContent = original, 1500);
-            }
-            showCopyLogModal(text);
-        }
-        </script>
 
         AUTO_REFRESH_JS_PLACEHOLDER
     </body>
@@ -1334,10 +1257,10 @@ def view_logs():
     from log_setup import tail_log, get_build_info
 
     try:
-        line_count = int(request.args.get('lines', 300))
+        line_count = int(request.args.get('lines', 100))
     except (TypeError, ValueError):
-        line_count = 300
-    line_count = max(1, min(line_count, 3000))
+        line_count = 100
+    line_count = max(1, min(line_count, 100))
     level = (request.args.get('level') or 'all').strip()
     search = (request.args.get('search') or '').strip() or None
 
@@ -1566,6 +1489,11 @@ def view_analytics():
 
     host_max = max([r['coins'] for r in host_rows] + [0])
     account_max = max([r['coins'] for r in account_rows] + [0])
+
+    # Frekuensi/traffic: seberapa sering akun live, host tampil, dan viewer memberi gift.
+    freq_account_rows = sorted(account_rows, key=lambda r: (r.get('sessions', 0), r.get('coins', 0)), reverse=True)[:10]
+    freq_host_rows = sorted(host_rows, key=lambda r: (r.get('sessions', 0), r.get('coins', 0)), reverse=True)[:10]
+    freq_viewer_rows = sorted(viewer_rows, key=lambda r: (r.get('gifts', 0), r.get('coins', 0)), reverse=True)[:10]
 
     chart_payload = {
         'labels': [b['label'] for b in series],
@@ -1844,6 +1772,69 @@ def view_analytics():
 
         <div class="card">
             <div class="card-header">
+                <h2>📊 Frekuensi Traffic</h2>
+                <span class="muted" style="font-size:0.8rem;">Frekuensi aktivitas akun, host, dan viewer pada rentang ini</span>
+            </div>
+            <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; align-items: start;">
+                <div>
+                    <h3 style="margin-bottom:8px;">Akun (sesi live)</h3>
+                    <div class="table-scroll">
+                        <table>
+                            <tr><th>#</th><th>Akun</th><th>Frekuensi</th><th>Durasi</th></tr>
+                            {% for a in freq_account_rows %}
+                            <tr>
+                                <td>{{ loop.index }}</td>
+                                <td><a href="{{ _link(preset='custom', account=a.name) }}" class="viewer-link">@{{ a.name }}</a></td>
+                                <td><span class="badge">{{ a.sessions }} sesi</span></td>
+                                <td class="muted">{{ a.duration }}</td>
+                            </tr>
+                            {% else %}
+                            <tr><td colspan="4" class="muted">Belum ada data.</td></tr>
+                            {% endfor %}
+                        </table>
+                    </div>
+                </div>
+                <div>
+                    <h3 style="margin-bottom:8px;">Host (sesi tampil)</h3>
+                    <div class="table-scroll">
+                        <table>
+                            <tr><th>#</th><th>Host</th><th>Frekuensi</th><th>Durasi</th></tr>
+                            {% for h in freq_host_rows %}
+                            <tr>
+                                <td>{{ loop.index }}</td>
+                                <td><a href="{{ _link(preset='custom', host=h.name) }}" class="host-link">{{ h.name }}</a></td>
+                                <td><span class="badge" style="background:#7c3aed;">{{ h.sessions }} sesi</span></td>
+                                <td class="muted">{{ h.duration }}</td>
+                            </tr>
+                            {% else %}
+                            <tr><td colspan="4" class="muted">Belum ada data.</td></tr>
+                            {% endfor %}
+                        </table>
+                    </div>
+                </div>
+                <div>
+                    <h3 style="margin-bottom:8px;">Viewer (transaksi gift)</h3>
+                    <div class="table-scroll">
+                        <table>
+                            <tr><th>#</th><th>Viewer</th><th>Frekuensi</th><th>Koin</th></tr>
+                            {% for v in freq_viewer_rows %}
+                            <tr>
+                                <td>{{ loop.index }}</td>
+                                <td><a href="{{ _link(preset='custom', viewer=v.key) }}" class="viewer-link">{{ v.name }}</a></td>
+                                <td><span class="badge" style="background:#ca8a04;">{{ v.gifts }}x gift</span></td>
+                                <td class="muted">{{ v.coins }} c</td>
+                            </tr>
+                            {% else %}
+                            <tr><td colspan="4" class="muted">Belum ada data.</td></tr>
+                            {% endfor %}
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
                 <h2>💎 Ranking Viewer (Spent Koin)</h2>
                 <span class="muted" style="font-size:0.8rem;">Klik nama viewer untuk analisa spent-nya per host</span>
             </div>
@@ -1996,6 +1987,9 @@ def view_analytics():
         account_rows=account_rows,
         viewer_rows=viewer_rows,
         spend_rows=spend_rows,
+        freq_account_rows=freq_account_rows,
+        freq_host_rows=freq_host_rows,
+        freq_viewer_rows=freq_viewer_rows,
         chart_payload=chart_payload,
         start_str=start_str,
         end_str=end_str,
