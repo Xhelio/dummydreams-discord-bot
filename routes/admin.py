@@ -2122,13 +2122,15 @@ def view_analytics():
                     + '</label>';
             }
             wrap.innerHTML = html;
-            var picks = wrap.querySelectorAll('.host-eng-pick');
-            for (var k = 0; k < picks.length; k++) {
-                picks[k].addEventListener('change', function () {
-                    hostEngSelected[this.getAttribute('data-key')] = !!this.checked;
-                    drawHostFreq();
-                });
-            }
+            // Delegasi event: tetap bekerja walau isi selector di-render ulang.
+            wrap.onchange = function (ev) {
+                var t = ev && ev.target;
+                if (!t || !t.getAttribute) return;
+                var key = t.getAttribute('data-key');
+                if (key === null) return;
+                hostEngSelected[key] = !!t.checked;
+                drawHostFreq();
+            };
         }
 
         function renderHostFrequencyChart(showTrend) {
@@ -2145,6 +2147,15 @@ def view_analytics():
             if (!hostEngSelected) {
                 hostEngSelected = {};
                 for (var si = 0; si < allHosts.length; si++) hostEngSelected[allHosts[si].key] = true;
+            }
+            // Samakan state dengan checkbox yang terlihat (sumber kebenaran UI).
+            var pickInputs = document.querySelectorAll('#host-select-controls .host-eng-pick');
+            if (pickInputs.length) {
+                hostEngSelected = {};
+                for (var pi = 0; pi < pickInputs.length; pi++) {
+                    var pkey = pickInputs[pi].getAttribute('data-key');
+                    if (pkey !== null) hostEngSelected[pkey] = !!pickInputs[pi].checked;
+                }
             }
             var metricSel = document.getElementById('host-eng-metric');
             var metric = metricSel ? metricSel.value : 'transactions';
@@ -2247,6 +2258,11 @@ def view_analytics():
             }
         }
 
+        function drawHostFreq() {
+            var cb = document.getElementById('host-freq-trend');
+            renderHostFrequencyChart(cb ? !!cb.checked : true);
+        }
+
         (function () {
             var mainMetric = {{ metric|tojson }};
             var mainType = {{ chart_type|tojson }};
@@ -2259,11 +2275,6 @@ def view_analytics():
             if (metricSelect) { metricSelect.value = mainMetric; metricSelect.addEventListener('change', function () { mainMetric = this.value; drawMain(); }); }
             if (typeSelect) { typeSelect.value = mainType; typeSelect.addEventListener('change', function () { mainType = this.value; drawMain(); }); }
             if (trendCheck) { trendCheck.checked = mainTrend; trendCheck.addEventListener('change', function () { mainTrend = !!this.checked; drawMain(); }); }
-
-            function drawHostFreq() {
-                var cb = document.getElementById('host-freq-trend');
-                renderHostFrequencyChart(cb ? !!cb.checked : true);
-            }
 
             function drawFreq() {
                 var charts = document.querySelectorAll('.freq-chart');
