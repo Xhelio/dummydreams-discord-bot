@@ -32,6 +32,7 @@ from db import (
     get_analytics_sessions,
     get_analytics_session_breakdown,
     get_analytics_timeseries,
+    get_analytics_host_frequency_timeseries,
     get_analytics_gift_by_host,
     get_analytics_gift_by_account,
     get_analytics_viewer_ranking,
@@ -1403,6 +1404,7 @@ def view_analytics():
     session_summary = get_analytics_sessions(start_str, end_str, host_arg, account_arg)
     session_break = get_analytics_session_breakdown(start_str, end_str, host_arg, account_arg)
     series = get_analytics_timeseries(start_str, end_str, group_by, host_arg, account_arg, viewer_arg)
+    host_freq_series = get_analytics_host_frequency_timeseries(start_str, end_str, group_by, host_arg, account_arg, limit=6)
     gift_by_host = get_analytics_gift_by_host(start_str, end_str, account_arg, viewer_arg)
     gift_by_account = get_analytics_gift_by_account(start_str, end_str, host_arg, viewer_arg)
     viewer_rows_raw = get_analytics_viewer_ranking(start_str, end_str, host_arg, account_arg, 100)
@@ -1809,20 +1811,16 @@ def view_analytics():
 
             <div style="margin-bottom:18px;">
                 <div class="card-header" style="margin-bottom:6px;">
-                    <h3 style="margin:0;">Host (interaksi harian / tampil)</h3>
+                    <h3 style="margin:0;">Host (interaksi per nama host)</h3>
                     <div class="chart-toolbar" style="margin-bottom:0;">
-                        <label>Metrik
-                            <select class="freq-metric" data-target="freq-chart-host">
-                                <option value="active_hosts" selected>Host aktif</option>
-                                <option value="sessions">Sesi tampil (frekuensi)</option>
-                            </select>
-                        </label>
+                        <span class="muted" style="font-size:0.78rem;">Sumbu X: waktu ({{ group_by }}) · Sumbu Y: jumlah interaksi/sesi host · Tiap seri = nama host</span>
                         <label style="flex-direction:row; align-items:center; gap:6px; cursor:pointer;">
-                            <input type="checkbox" class="freq-trend" data-target="freq-chart-host" checked style="width:auto;"> Tren/Rata-rata
+                            <input type="checkbox" id="host-freq-trend" checked style="width:auto;"> Tren/Rata-rata
                         </label>
                     </div>
                 </div>
-                <div class="chart-wrap"><div id="freq-chart-host" class="freq-chart" data-metric="active_hosts" data-trend="1"></div></div>
+                <div class="chart-wrap"><div id="freq-chart-host-multi"></div></div>
+                <div id="host-freq-legend" class="muted" style="font-size:0.78rem; margin-top:6px;"></div>
             </div>
 
             <div>
@@ -1958,6 +1956,7 @@ def view_analytics():
         <script>
         var CHART_DATA = {{ chart_payload|tojson }};
         var GROUP_BY = {{ group_by|tojson }};
+        var HOST_FREQ = {{ host_freq_series|tojson }};
 
         function fmtNum(n) { return (Math.round(n || 0)).toLocaleString('id-ID'); }
         function niceCeil(v) {
@@ -2072,6 +2071,103 @@ def view_analytics():
             wrap.innerHTML = parts.join('');
         }
 
+        function renderHostFrequencyChart(showTrend) {
+            var wrap = document.getElementById('freq-chart-host-multi');
+            var legend = document.getElementById('host-freq-legend');
+            if (!wrap) return;
+            var labels = (HOST_FREQ && HOST_FREQ.labels) || [];
+            var hosts = (HOST_FREQ && HOST_FREQ.hosts) || [];
+            if (!labels.length || !hosts.length) {
+                wrap.innerHTML = '<div class="muted" style="padding:32px;text-align:center;">No data host untuk filter ini.</div>';
+                if (legend) legend.innerHTML = '';
+                return;
+            }
+            var colors = ['#38bdf8','#f472b6','#34d399','#f59e0b','#a78bfa','#fb7185','#22d3ee','#facc15'];
+            var n = labels.length;
+            var width = Math.max(320, wrap.clientWidth || 800);
+            var height = 260;
+            var pad = { l: 58, r: 18, t: 22, b: 62 };
+            var pw = width - pad.l - pad.r;
+            var ph = height - pad.t - pad.b;
+            var slot = pw / n;
+
+            var totals = [];
+            for (var i = 0; i < n; i++) {
+                var sum = 0;
+                for (var h = 0; h < hosts.length; h++) sum += ((hosts[h].values || [])[i] || 0);
+                totals.push(sum);
+            }
+            var ma = showTrend ? movingAvg(totals, trendWindow()) : [];
+            var avg = 0;
+            for (var ai = 0; ai < n; ai++) avg += totals[ai] || 0;
+            avg = n ? (avg / n) : 0;
+
+            var maxV = 0;
+            for (var hi = 0; hi < hosts.length; hi++) {
+                var vals = hosts[hi].values || [];
+                for (var vi = 0; vi < vals.length; vi++) { if ((vals[vi] || 0) > maxV) maxV = vals[vi] || 0; }
+            }
+            if (showTrend) {
+                for (var mj = 0; mj < ma.length; mj++) { if ((ma[mj] || 0) > maxV) maxV = ma[mj] || 0; }
+                if (avg > maxV) maxV = avg;
+            }
+            var top = niceCeil(maxV);
+            function yOf(v) { return pad.t + ph - ph * ((v || 0) / top); }
+            function xOf(i) { return pad.l + slot * (i + 0.5); }
+
+            var parts = [];
+            parts.push('<svg viewBox="0 0 ' + width + ' ' + height + '" width="100%" height="' + height + '" role="img">');
+            for (var t = 0; t <= 4; t++) {
+                var yy = pad.t + ph - (ph * t / 4);
+                var val = top * t / 4;
+                parts.push('<line x1="' + pad.l + '" y1="' + yy + '" x2="' + (pad.l + pw) + '" y2="' + yy + '" stroke="#1e293b" stroke-width="1"/>');
+                parts.push('<text x="' + (pad.l - 8) + '" y="' + (yy + 4) + '" text-anchor="end" fill="#64748b" font-size="10">' + fmtNum(val) + '</text>');
+            }
+
+            for (var s = 0; s < hosts.length; s++) {
+                var series = hosts[s];
+                var color = colors[s % colors.length];
+                var valsS = series.values || [];
+                var pts = [];
+                for (var j = 0; j < n; j++) pts.push([xOf(j), yOf(valsS[j] || 0)]);
+                parts.push('<polyline fill="none" stroke="' + color + '" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" points="' + pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' ') + '"/>');
+                for (var k = 0; k < n; k++) {
+                    parts.push('<circle cx="' + pts[k][0] + '" cy="' + pts[k][1] + '" r="3" fill="#0b1220" stroke="' + color + '" stroke-width="2"><title>' + escHtml(series.name) + ' · ' + escHtml(labels[k]) + ': ' + fmtNum(valsS[k] || 0) + ' interaksi</title></circle>');
+                }
+            }
+
+            if (showTrend) {
+                var yAvg = yOf(avg);
+                parts.push('<line x1="' + pad.l + '" y1="' + yAvg + '" x2="' + (pad.l + pw) + '" y2="' + yAvg + '" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="6 4"/>');
+                parts.push('<text x="' + (pad.l + pw - 4) + '" y="' + (yAvg - 5) + '" text-anchor="end" fill="#fbbf24" font-size="10">Rata-rata total: ' + fmtNum(avg) + '</text>');
+                if (ma.length > 1) {
+                    var mpts = ma.map(function (v, i) { return xOf(i) + ',' + yOf(v); }).join(' ');
+                    parts.push('<polyline fill="none" stroke="#22c55e" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="' + mpts + '"/>');
+                }
+            }
+
+            var step = Math.max(1, Math.ceil(n / 12));
+            for (var x = 0; x < n; x += step) {
+                var cx = pad.l + slot * (x + 0.5);
+                parts.push('<text x="' + cx + '" y="' + (pad.t + ph + 18) + '" text-anchor="end" fill="#94a3b8" font-size="10" transform="rotate(-28 ' + cx + ' ' + (pad.t + ph + 18) + ')">' + escHtml(labels[x]) + '</text>');
+            }
+            parts.push('</svg>');
+            wrap.innerHTML = parts.join('');
+
+            if (legend) {
+                var items = hosts.map(function (series, idx) {
+                    var color = colors[idx % colors.length];
+                    return '<span style="display:inline-flex;align-items:center;gap:6px;margin:2px 10px 2px 0;">'
+                        + '<span style="width:12px;height:3px;border-radius:2px;background:' + color + ';display:inline-block;"></span>'
+                        + '<strong style="color:#e2e8f0;">' + escHtml(series.name) + '</strong>'
+                        + '<span>(' + fmtNum(series.total || 0) + ' interaksi)</span></span>';
+                }).join('');
+                if (showTrend) items += '<span style="display:inline-flex;align-items:center;gap:6px;margin:2px 10px 2px 0;"><span style="width:12px;height:0;border-top:2px dashed #f59e0b;display:inline-block;"></span><span>Rata-rata total</span></span>'
+                    + '<span style="display:inline-flex;align-items:center;gap:6px;margin:2px 10px 2px 0;"><span style="width:12px;height:3px;background:#22c55e;display:inline-block;"></span><span>Tren total (MA ' + trendWindow() + ')</span></span>';
+                legend.innerHTML = items;
+            }
+        }
+
         (function () {
             var mainMetric = {{ metric|tojson }};
             var mainType = {{ chart_type|tojson }};
@@ -2085,6 +2181,11 @@ def view_analytics():
             if (typeSelect) { typeSelect.value = mainType; typeSelect.addEventListener('change', function () { mainType = this.value; drawMain(); }); }
             if (trendCheck) { trendCheck.checked = mainTrend; trendCheck.addEventListener('change', function () { mainTrend = !!this.checked; drawMain(); }); }
 
+            function drawHostFreq() {
+                var cb = document.getElementById('host-freq-trend');
+                renderHostFrequencyChart(cb ? !!cb.checked : true);
+            }
+
             function drawFreq() {
                 var charts = document.querySelectorAll('.freq-chart');
                 for (var i = 0; i < charts.length; i++) {
@@ -2093,6 +2194,7 @@ def view_analytics():
                     var tr = el.getAttribute('data-trend') === '1';
                     renderChart(el.id, m, 'line', tr);
                 }
+                drawHostFreq();
             }
 
             var metricSelects = document.querySelectorAll('.freq-metric');
@@ -2109,6 +2211,9 @@ def view_analytics():
                     if (target) { target.setAttribute('data-trend', this.checked ? '1' : '0'); renderChart(target.id, target.getAttribute('data-metric') || 'sessions', 'line', this.checked); }
                 });
             }
+
+            var hostTrendCb = document.getElementById('host-freq-trend');
+            if (hostTrendCb) hostTrendCb.addEventListener('change', function () { drawHostFreq(); });
 
             function drawAll() { drawMain(); drawFreq(); }
             window.addEventListener('resize', function () { drawAll(); });
@@ -2139,6 +2244,7 @@ def view_analytics():
         freq_account_rows=freq_account_rows,
         freq_host_rows=freq_host_rows,
         freq_viewer_rows=freq_viewer_rows,
+        host_freq_series=host_freq_series,
         chart_payload=chart_payload,
         start_str=start_str,
         end_str=end_str,

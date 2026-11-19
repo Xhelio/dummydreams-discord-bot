@@ -673,6 +673,101 @@ def get_analytics_timeseries(start_date, end_date, group_by="day", host=None,
         conn.close()
 
 
+def get_analytics_host_frequency_timeseries(start_date, end_date, group_by="day", host=None,
+                                            account=None, limit=6) -> dict:
+    """Per-host live session (interaction) frequency over time buckets.
+
+    Returns {"labels": [...], "keys": [...], "hosts": [{"key","name","values","total"}, ...]}.
+    Hosts are ranked by total interactions in the period (top N), unless a specific
+    host filter is provided in which case that host is included.
+    """
+    group_by = group_by if group_by in ("day", "week", "month") else "day"
+    start_d = _analytics_parse_date(start_date)
+    end_d = _analytics_parse_date(end_date)
+    if not start_d or not end_d or start_d > end_d:
+        return {"labels": [], "keys": [], "hosts": []}
+
+    swhere, sparams = _analytics_session_where(start_date, end_date, host, account)
+
+    buckets = {}
+    order = []
+    cursor_day = _analytics_bucket_start(start_d, group_by)
+    while cursor_day <= end_d:
+        key = _analytics_bucket_key(cursor_day, group_by)
+        if key not in buckets:
+            buckets[key] = {"key": key, "label": _analytics_bucket_label(cursor_day, group_by)}
+            order.append(key)
+        cursor_day = _analytics_next_bucket(cursor_day, group_by)
+
+    per_host = {}  # host_key -> {key,name,total,counts{bucket: n}}
+    host_labels = {}
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        rows = cur.execute(f"""
+            SELECT substr(start_time, 1, 10) AS d,
+                   LOWER(COALESCE(NULLIF(scheduled_host, ''), tiktok_username)) AS host_key,
+                   COALESCE(MAX(NULLIF(scheduled_host, '')), MAX(tiktok_username)) AS host_name,
+                   COUNT(*) AS cnt
+            FROM live_sessions
+            WHERE {swhere}
+            GROUP BY substr(start_time, 1, 10),
+                     LOWER(COALESCE(NULLIF(scheduled_host, ''), tiktok_username))
+        """, sparams).fetchall()
+        for d, hkey, hname, cnt in rows:
+            parsed = _analytics_parse_date(d)
+            if not parsed:
+                continue
+            bkey = _analytics_bucket_key(parsed, group_by)
+            if bkey not in buckets:
+                continue
+            hk = (hkey or "").lower() or "-"
+            if hk not in per_host:
+                per_host[hk] = {"key": hk, "name": hname or hk or "-", "total": 0, "counts": {}}
+            # keep most informative label
+            if hname and (not per_host[hk]["name"] or per_host[hk]["name"] == hk):
+                per_host[hk]["name"] = hname
+            c = int(cnt or 0)
+            per_host[hk]["counts"][bkey] = per_host[hk]["counts"].get(bkey, 0) + c
+            per_host[hk]["total"] += c
+    except Exception as e:
+        print(f"[Analytics] host frequency timeseries failed: {e}")
+        return {"labels": [buckets[k]["label"] for k in order], "keys": list(order), "hosts": []}
+    finally:
+        conn.close()
+
+    try:
+        limit_n = max(1, min(int(limit or 6), 12))
+    except Exception:
+        limit_n = 6
+
+    ranked = sorted(per_host.values(), key=lambda x: (-x["total"], x["name"].lower()))
+    selected = ranked[:limit_n]
+    # If a specific host filter is set, ensure it is included (even if not in top N)
+    if host:
+        h = str(host).strip().lower().lstrip("@")
+        if h and all(x["key"] != h for x in selected):
+            match = per_host.get(h)
+            if match:
+                selected = [match] + selected[: max(0, limit_n - 1)]
+
+    hosts_out = []
+    for item in selected:
+        values = [int(item["counts"].get(k, 0)) for k in order]
+        hosts_out.append({
+            "key": item["key"],
+            "name": item["name"],
+            "total": int(item["total"]),
+            "values": values,
+        })
+
+    return {
+        "labels": [buckets[k]["label"] for k in order],
+        "keys": list(order),
+        "hosts": hosts_out,
+    }
+
+
 def get_analytics_gift_by_host(start_date, end_date, account=None, viewer=None) -> list:
     where, params = _analytics_gift_where(start_date, end_date, None, account, viewer)
     conn = get_db_connection()
