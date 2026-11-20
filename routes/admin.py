@@ -1869,6 +1869,11 @@ def view_analytics():
     freq_host_rows = sorted(host_rows, key=lambda r: (r.get('sessions', 0), r.get('coins', 0)), reverse=True)[:10]
     freq_viewer_rows = sorted(viewer_rows, key=lambda r: (r.get('gifts', 0), r.get('coins', 0)), reverse=True)[:10]
 
+    hourly_baseline_series = []
+    if chart_group == 'hour':
+        # Baseline: average per clock hour across all days (dynamic hourly profile).
+        hourly_baseline_series = get_analytics_timeseries('2000-01-01', '2099-12-31', 'hour_of_day', host_arg, account_arg, viewer_arg) or []
+
     chart_payload = {
         'labels': [b['label'] for b in series],
         'keys': [b['key'] for b in series],
@@ -1879,6 +1884,17 @@ def view_analytics():
         'sessions': [b.get('sessions', 0) for b in series],
         'active_accounts': [b.get('active_accounts', 0) for b in series],
         'active_hosts': [b.get('active_hosts', 0) for b in series],
+    }
+    hourly_baseline_payload = {
+        'labels': [b.get('label', '') for b in (hourly_baseline_series or [])],
+        'keys': [b.get('key', '') for b in (hourly_baseline_series or [])],
+        'coins': [b.get('coins', 0) for b in (hourly_baseline_series or [])],
+        'gifts': [b.get('gifts', 0) for b in (hourly_baseline_series or [])],
+        'gift_events': [b.get('gift_events', 0) for b in (hourly_baseline_series or [])],
+        'viewers': [b.get('viewers', 0) for b in (hourly_baseline_series or [])],
+        'sessions': [b.get('sessions', 0) for b in (hourly_baseline_series or [])],
+        'active_accounts': [b.get('active_accounts', 0) for b in (hourly_baseline_series or [])],
+        'active_hosts': [b.get('active_hosts', 0) for b in (hourly_baseline_series or [])],
     }
 
     def _link(**overrides):
@@ -2354,6 +2370,7 @@ def view_analytics():
         AUTO_REFRESH_JS_PLACEHOLDER
         <script>
         var CHART_DATA = {{ chart_payload|tojson }};
+        var HOURLY_BASELINE = {{ (hourly_baseline_payload|default({}, true))|tojson }};
         var GROUP_BY = {{ chart_group|tojson }};
         var HOST_ENGAGEMENT = {{ (host_engagement_series|default({"labels": [], "keys": [], "hosts": []}, true))|tojson }};
 
@@ -2386,18 +2403,17 @@ def view_analytics():
             };
             return units[metric] || '';
         }
-        function isHourlyMode() { return GROUP_BY === 'hour' || GROUP_BY === 'hour_of_day'; }
-        function showOverallAvgEnabled() {
-            if (!isHourlyMode()) return true;
-            var cb = document.getElementById('show-overall-avg');
-            return !cb || !!cb.checked;
-        }
         function avgPeriodLabel() {
             if (GROUP_BY === 'hour') return '/hour';
-            if (GROUP_BY === 'hour_of_day') return '/hour (avg/day)';
             if (GROUP_BY === 'week') return '/week';
             if (GROUP_BY === 'month') return '/month';
             return '/day';
+        }
+        function getBaselineValues(metric) {
+            if (GROUP_BY !== 'hour' || !HOURLY_BASELINE) return null;
+            var vals = HOURLY_BASELINE[metric];
+            if (!vals || !vals.length) return null;
+            return vals;
         }
 
         function renderChart(containerId, metric, chartType) {
@@ -2418,8 +2434,14 @@ def view_analytics():
             var ph = height - pad.t - pad.b;
             var slot = pw / n;
 
+            var baselineVals = getBaselineValues(metric);
+            if (baselineVals && baselineVals.length !== n) baselineVals = null;
+
             var maxV = 0;
             for (var mi = 0; mi < n; mi++) { if ((values[mi] || 0) > maxV) maxV = values[mi] || 0; }
+            if (baselineVals) {
+                for (var bi = 0; bi < baselineVals.length; bi++) { if ((baselineVals[bi] || 0) > maxV) maxV = baselineVals[bi] || 0; }
+            }
             var top = niceCeil(maxV);
             var unit = yAxisUnit(metric);
             var avgSum = 0;
@@ -2441,8 +2463,7 @@ def view_analytics():
             }
             if (unit) parts.push('<text x="' + (pad.l - 8) + '" y="' + (pad.t - 6) + '" text-anchor="end" fill="#94a3b8" font-size="9" font-style="italic">' + escHtml(unit) + '</text>');
 
-            var dashedProfile = (GROUP_BY === 'hour_of_day');
-            var drawType = dashedProfile ? 'line' : type;
+            var drawType = type;
             if (drawType === 'bar') {
                 var bw = Math.max(2, Math.min(44, slot * 0.62));
                 for (var i = 0; i < n; i++) {
@@ -2458,18 +2479,25 @@ def view_analytics():
                     var area = 'M' + pts[0][0] + ',' + (pad.t + ph) + ' L' + pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' L') + ' L' + pts[n - 1][0] + ',' + (pad.t + ph) + ' Z';
                     parts.push('<path d="' + area + '" fill="url(#' + gradId + ')" stroke="none"/>');
                 }
-                var dashAttr = dashedProfile ? ' stroke-dasharray="7 5"' : '';
-                parts.push('<polyline fill="none" stroke="#38bdf8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"' + dashAttr + ' points="' + pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' ') + '"/>');
+                parts.push('<polyline fill="none" stroke="#38bdf8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" points="' + pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' ') + '"/>');
                 for (var k = 0; k < n; k++) {
                     parts.push('<circle cx="' + pts[k][0] + '" cy="' + pts[k][1] + '" r="3.2" fill="#0b1220" stroke="#38bdf8" stroke-width="2"><title>' + escHtml(labels[k]) + ': ' + fmtNum(values[k]) + '</title></circle>');
                 }
             }
 
-            if (avg > 0 && showOverallAvgEnabled()) {
+            // Daily/hourly baseline: average per clock hour across all days (dashed, dynamic).
+            if (baselineVals) {
+                var bpts = [];
+                for (var bj = 0; bj < n; bj++) bpts.push([xOf(bj), yOf(baselineVals[bj] || 0)]);
+                parts.push('<polyline fill="none" stroke="#f59e0b" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 5" points="' + bpts.map(function (p) { return p[0] + ',' + p[1]; }).join(' ') + '"/>');
+                for (var bk = 0; bk < n; bk++) {
+                    parts.push('<circle cx="' + bpts[bk][0] + '" cy="' + bpts[bk][1] + '" r="2.8" fill="#0b1220" stroke="#f59e0b" stroke-width="1.8"><title>' + escHtml(labels[bk]) + ' (rata-rata harian): ' + fmtNum(baselineVals[bk] || 0) + '</title></circle>');
+                }
+                parts.push('<text x="' + (pad.l + pw - 4) + '" y="' + (pad.t + 12) + '" text-anchor="end" fill="#fbbf24" font-size="10">- - Rata-rata harian per jam</text>');
+            } else if (avg > 0 && GROUP_BY !== 'hour') {
                 var yAvg = yOf(avg);
-                var avgLabelPrefix = isHourlyMode() ? 'Avg (all hours): ' : 'Avg: ';
                 parts.push('<line x1="' + pad.l + '" y1="' + yAvg + '" x2="' + (pad.l + pw) + '" y2="' + yAvg + '" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="6 4"/>');
-                parts.push('<text x="' + (pad.l + pw - 4) + '" y="' + (yAvg - 5) + '" text-anchor="end" fill="#fbbf24" font-size="10">' + avgLabelPrefix + fmtNum(avg) + escHtml(avgPeriodLabel()) + '</text>');
+                parts.push('<text x="' + (pad.l + pw - 4) + '" y="' + (yAvg - 5) + '" text-anchor="end" fill="#fbbf24" font-size="10">Avg: ' + fmtNum(avg) + escHtml(avgPeriodLabel()) + '</text>');
             }
 
             var step = Math.max(1, Math.ceil(n / 12));
@@ -2581,6 +2609,10 @@ def view_analytics():
             var ph = height - pad.t - pad.b;
             var slot = pw / n;
 
+            var baselineKey = (metric === 'coins') ? 'coins' : (metric === 'viewers' ? 'viewers' : 'gift_events');
+            var baselineVals = getBaselineValues(baselineKey);
+            if (baselineVals && baselineVals.length !== n) baselineVals = null;
+
             var maxV = 0, totals = [], avgSum = 0;
             for (var ti = 0; ti < n; ti++) {
                 var tsum = 0;
@@ -2592,6 +2624,9 @@ def view_analytics():
                 totals.push(tsum);
                 avgSum += tsum;
                 if (tsum > maxV) maxV = tsum;
+            }
+            if (baselineVals) {
+                for (var bi = 0; bi < baselineVals.length; bi++) { if ((baselineVals[bi] || 0) > maxV) maxV = baselineVals[bi] || 0; }
             }
             var top = niceCeil(maxV);
             var unit = yAxisUnit(metric);
@@ -2609,8 +2644,17 @@ def view_analytics():
             }
             if (unit) parts.push('<text x="' + (pad.l - 8) + '" y="' + (pad.t - 6) + '" text-anchor="end" fill="#94a3b8" font-size="9" font-style="italic">' + escHtml(unit) + '</text>');
 
-            var dashedProfile = (GROUP_BY === 'hour_of_day');
-            var hostDashAttr = dashedProfile ? ' stroke-dasharray="7 5"' : '';
+            // Baseline (overall daily average per clock hour) for this metric in harian/hourly mode.
+            if (baselineVals) {
+                var bpts = [];
+                for (var bj = 0; bj < n; bj++) bpts.push([xOf(bj), yOf(baselineVals[bj] || 0)]);
+                parts.push('<polyline fill="none" stroke="#f59e0b" stroke-width="2.1" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 5" points="' + bpts.map(function (p) { return p[0] + ',' + p[1]; }).join(' ') + '"/>');
+                for (var bk = 0; bk < n; bk++) {
+                    parts.push('<circle cx="' + bpts[bk][0] + '" cy="' + bpts[bk][1] + '" r="2.6" fill="#0b1220" stroke="#f59e0b" stroke-width="1.6"><title>Rata-rata harian · ' + escHtml(labels[bk]) + ': ' + fmtNum(baselineVals[bk] || 0) + ' ' + escHtml(metricLabel.toLowerCase()) + '</title></circle>');
+                }
+                parts.push('<text x="' + (pad.l + pw - 4) + '" y="' + (pad.t + 12) + '" text-anchor="end" fill="#fbbf24" font-size="10">- - Rata-rata harian per jam</text>');
+            }
+
             for (var s = 0; s < hosts.length; s++) {
                 var item = hosts[s];
                 var series = item.host;
@@ -2618,17 +2662,16 @@ def view_analytics():
                 var valsS = hostEngValues(series, metric);
                 var pts = [];
                 for (var j = 0; j < n; j++) pts.push([xOf(j), yOf(valsS[j] || 0)]);
-                parts.push('<polyline fill="none" stroke="' + color + '" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"' + hostDashAttr + ' points="' + pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' ') + '"/>');
+                parts.push('<polyline fill="none" stroke="' + color + '" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" points="' + pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' ') + '"/>');
                 for (var k = 0; k < n; k++) {
                     parts.push('<circle cx="' + pts[k][0] + '" cy="' + pts[k][1] + '" r="3" fill="#0b1220" stroke="' + color + '" stroke-width="2"><title>' + escHtml(series.name) + ' · ' + escHtml(labels[k]) + ': ' + fmtNum(valsS[k] || 0) + ' ' + escHtml(metricLabel.toLowerCase()) + '</title></circle>');
                 }
             }
 
-            if (avg > 0 && showOverallAvgEnabled()) {
+            if (!baselineVals && avg > 0 && GROUP_BY !== 'hour') {
                 var yAvg = yOf(avg);
-                var avgLabelPrefix = isHourlyMode() ? 'Avg (all hours): ' : 'Avg: ';
                 parts.push('<line x1="' + pad.l + '" y1="' + yAvg + '" x2="' + (pad.l + pw) + '" y2="' + yAvg + '" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="6 4"/>');
-                parts.push('<text x="' + (pad.l + pw - 4) + '" y="' + (yAvg - 5) + '" text-anchor="end" fill="#fbbf24" font-size="10">' + avgLabelPrefix + fmtNum(avg) + escHtml(avgPeriodLabel()) + '</text>');
+                parts.push('<text x="' + (pad.l + pw - 4) + '" y="' + (yAvg - 5) + '" text-anchor="end" fill="#fbbf24" font-size="10">Avg: ' + fmtNum(avg) + escHtml(avgPeriodLabel()) + '</text>');
             }
 
             var step = Math.max(1, Math.ceil(n / 12));
@@ -2648,10 +2691,14 @@ def view_analytics():
                         + '<strong style="color:#e2e8f0;">' + escHtml(series.name) + '</strong>'
                         + '<span>(' + fmtNum(hostEngTotal(series, metric)) + ' ' + escHtml(metricLabel.toLowerCase()) + ')</span></span>';
                 }).join('');
+                if (baselineVals) {
+                    items = '<span style="display:inline-flex;align-items:center;gap:6px;margin:2px 10px 2px 0;">'
+                        + '<span style="width:12px;height:0;border-top:2px dashed #f59e0b;display:inline-block;"></span>'
+                        + '<strong style="color:#fbbf24;">Rata-rata harian per jam</strong></span>' + items;
+                }
                 legend.innerHTML = items;
             }
         }
-
         function drawHostFreq() {
             renderHostFrequencyChart();
         }
@@ -2664,11 +2711,7 @@ def view_analytics():
 
             function drawMain() { renderChart('chart-svg', mainMetric, mainType); }
             if (metricSelect) { metricSelect.value = mainMetric; metricSelect.addEventListener('change', function () { mainMetric = this.value; drawMain(); }); }
-            if (typeSelect) {
-                if (GROUP_BY === 'hour_of_day') { mainType = 'line'; typeSelect.value = 'line'; typeSelect.disabled = true; typeSelect.title = 'Hour-of-day average is shown as a dashed line.'; }
-                else { typeSelect.value = mainType; }
-                typeSelect.addEventListener('change', function () { mainType = this.value; drawMain(); });
-            }
+            if (typeSelect) { typeSelect.value = mainType; typeSelect.addEventListener('change', function () { mainType = this.value; drawMain(); }); }
 
             function drawFreq() {
                 var charts = document.querySelectorAll('.freq-chart');
@@ -2690,11 +2733,6 @@ def view_analytics():
             var hostMetricSel = document.getElementById('host-eng-metric');
             if (hostMetricSel) hostMetricSel.addEventListener('change', function () { renderHostSelector(); drawHostFreq(); });
             renderHostSelector();
-
-            var avgWrap = document.getElementById('avg-all-wrap');
-            var avgCb = document.getElementById('show-overall-avg');
-            if (avgWrap) { avgWrap.style.display = isHourlyMode() ? 'inline-flex' : 'none'; }
-            if (avgCb) { avgCb.addEventListener('change', function () { drawAll(); }); }
 
             function drawAll() { drawMain(); drawFreq(); }
             window.addEventListener('resize', function () { drawAll(); });
@@ -2727,6 +2765,7 @@ def view_analytics():
         freq_viewer_rows=freq_viewer_rows,
         host_engagement_series=host_engagement_series or {'labels': [], 'keys': [], 'hosts': []},
         chart_payload=chart_payload,
+        hourly_baseline_payload=hourly_baseline_payload,
         start_str=start_str,
         end_str=end_str,
         days=days,
