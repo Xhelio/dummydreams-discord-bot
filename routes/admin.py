@@ -41,6 +41,7 @@ from db import (
     get_analytics_viewer_host_spend,
     get_analytics_host_options,
     get_analytics_account_options,
+    get_analytics_date_bounds,
     get_timeline_data,
     get_timeline_sessions_for_date,
     get_timeline_daily_summary,
@@ -1869,10 +1870,16 @@ def view_analytics():
     freq_host_rows = sorted(host_rows, key=lambda r: (r.get('sessions', 0), r.get('coins', 0)), reverse=True)[:10]
     freq_viewer_rows = sorted(viewer_rows, key=lambda r: (r.get('gifts', 0), r.get('coins', 0)), reverse=True)[:10]
 
+    # Baseline/profile: average per clock hour across all days (jam ramai/sepi tendency), respects filters.
+    bounds = get_analytics_date_bounds(host_arg, account_arg, viewer_arg)
+    if bounds and bounds[0] and bounds[1]:
+        profile_start, profile_end = bounds[0], bounds[1]
+    else:
+        profile_start, profile_end = start_str, end_str
     hourly_baseline_series = []
     if chart_group == 'hour':
-        # Baseline: average per clock hour across all days (dynamic hourly profile).
-        hourly_baseline_series = get_analytics_timeseries('2000-01-01', '2099-12-31', 'hour_of_day', host_arg, account_arg, viewer_arg) or []
+        hourly_baseline_series = get_analytics_timeseries(profile_start, profile_end, 'hour_of_day', host_arg, account_arg, viewer_arg) or []
+    hourly_profile_series = get_analytics_timeseries(profile_start, profile_end, 'hour_of_day', host_arg, account_arg, viewer_arg) or []
 
     chart_payload = {
         'labels': [b['label'] for b in series],
@@ -1895,6 +1902,17 @@ def view_analytics():
         'sessions': [b.get('sessions', 0) for b in (hourly_baseline_series or [])],
         'active_accounts': [b.get('active_accounts', 0) for b in (hourly_baseline_series or [])],
         'active_hosts': [b.get('active_hosts', 0) for b in (hourly_baseline_series or [])],
+    }
+    hourly_profile_payload = {
+        'labels': [b.get('label', '') for b in (hourly_profile_series or [])],
+        'keys': [b.get('key', '') for b in (hourly_profile_series or [])],
+        'coins': [b.get('coins', 0) for b in (hourly_profile_series or [])],
+        'gifts': [b.get('gifts', 0) for b in (hourly_profile_series or [])],
+        'gift_events': [b.get('gift_events', 0) for b in (hourly_profile_series or [])],
+        'viewers': [b.get('viewers', 0) for b in (hourly_profile_series or [])],
+        'sessions': [b.get('sessions', 0) for b in (hourly_profile_series or [])],
+        'active_accounts': [b.get('active_accounts', 0) for b in (hourly_profile_series or [])],
+        'active_hosts': [b.get('active_hosts', 0) for b in (hourly_profile_series or [])],
     }
 
     def _link(**overrides):
@@ -2087,10 +2105,6 @@ def view_analytics():
                             <option value="area">Area</option>
                         </select>
                     </label>
-                    <label id="avg-all-wrap" class="inline-check" style="margin:0; font-size:0.8rem; font-weight:600; color:#e2e8f0; text-transform:none; letter-spacing:0; display:none;">
-                        <input type="checkbox" id="show-overall-avg" checked> Show overall hour avg
-                        <span class="info-i" data-tip="Optional reference line: average across all hour buckets shown (all-hours average).">!</span>
-                    </label>
                 </div>
             </div>
             <div class="chart-wrap">
@@ -2114,6 +2128,17 @@ def view_analytics():
                     <tr><td colspan="8" class="muted">No data in this range.</td></tr>
                     {% endfor %}
                 </table>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h2>⏰ Rata-rata per Jam (Kecenderungan Jam Ramai/Sepi)</h2>
+                <span class="info-i" data-tip="Profil rata-rata per jam (00–23) dari semua hari, mengikuti filter akun/host/viewer. Berguna untuk melihat jam ramai/sepi atau waktu aktif/pasif.">!</span>
+            </div>
+            <p class="muted" style="font-size:0.8rem; margin-bottom:10px;">Garis putus-putus menunjukkan rata-rata tiap jam (value jam 01 = rata-rata semua value jam 01, dst). Mengikuti filter akun/host/viewer.</p>
+            <div class="chart-wrap">
+                <div id="hourly-profile-chart"></div>
             </div>
         </div>
 
@@ -2371,6 +2396,7 @@ def view_analytics():
         <script>
         var CHART_DATA = {{ chart_payload|tojson }};
         var HOURLY_BASELINE = {{ (hourly_baseline_payload|default({}, true))|tojson }};
+        var HOURLY_PROFILE = {{ (hourly_profile_payload|default({}, true))|tojson }};
         var GROUP_BY = {{ chart_group|tojson }};
         var HOST_ENGAGEMENT = {{ (host_engagement_series|default({"labels": [], "keys": [], "hosts": []}, true))|tojson }};
 
@@ -2709,7 +2735,53 @@ def view_analytics():
             var metricSelect = document.getElementById('chart-metric');
             var typeSelect = document.getElementById('chart-type');
 
-            function drawMain() { renderChart('chart-svg', mainMetric, mainType); }
+            function renderHourlyProfile(metric) {
+                var wrap = document.getElementById('hourly-profile-chart');
+                if (!wrap) return;
+                var labels = (HOURLY_PROFILE && HOURLY_PROFILE.labels) || [];
+                var values = ((HOURLY_PROFILE && HOURLY_PROFILE[metric]) || []).slice();
+                if (!labels.length || !values.length) {
+                    wrap.innerHTML = '<div class="muted" style="padding:24px;text-align:center;">No hourly profile data for this filter.</div>';
+                    return;
+                }
+                var n = values.length;
+                var width = Math.max(320, wrap.clientWidth || 800);
+                var height = 260;
+                var pad = { l: 58, r: 18, t: 22, b: 62 };
+                var pw = width - pad.l - pad.r;
+                var ph = height - pad.t - pad.b;
+                var slot = pw / n;
+                var maxV = 0;
+                for (var i = 0; i < n; i++) { if ((values[i] || 0) > maxV) maxV = values[i] || 0; }
+                var top = niceCeil(maxV);
+                var unit = yAxisUnit(metric);
+                function yOf(v) { return pad.t + ph - ph * ((v || 0) / top); }
+                function xOf(i) { return pad.l + slot * (i + 0.5); }
+                var parts = [];
+                parts.push('<svg viewBox="0 0 ' + width + ' ' + height + '" width="100%" height="' + height + '" role="img">');
+                for (var t = 0; t <= 4; t++) {
+                    var yy = pad.t + ph - (ph * t / 4);
+                    var val = top * t / 4;
+                    parts.push('<line x1="' + pad.l + '" y1="' + yy + '" x2="' + (pad.l + pw) + '" y2="' + yy + '" stroke="#1e293b" stroke-width="1"/>');
+                    parts.push('<text x="' + (pad.l - 8) + '" y="' + (yy + 4) + '" text-anchor="end" fill="#64748b" font-size="10">' + fmtNum(val) + '</text>');
+                }
+                if (unit) parts.push('<text x="' + (pad.l - 8) + '" y="' + (pad.t - 6) + '" text-anchor="end" fill="#94a3b8" font-size="9" font-style="italic">' + escHtml(unit) + '</text>');
+                var pts = [];
+                for (var j = 0; j < n; j++) pts.push([xOf(j), yOf(values[j] || 0)]);
+                parts.push('<polyline fill="none" stroke="#f59e0b" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 5" points="' + pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' ') + '"/>');
+                for (var k = 0; k < n; k++) {
+                    parts.push('<circle cx="' + pts[k][0] + '" cy="' + pts[k][1] + '" r="3" fill="#0b1220" stroke="#f59e0b" stroke-width="2"><title>' + escHtml(labels[k]) + ' (rata-rata): ' + fmtNum(values[k] || 0) + '</title></circle>');
+                }
+                parts.push('<text x="' + (pad.l + pw - 4) + '" y="' + (pad.t + 12) + '" text-anchor="end" fill="#fbbf24" font-size="10">- - Rata-rata per jam (semua hari)</text>');
+                var step = Math.max(1, Math.ceil(n / 12));
+                for (var x = 0; x < n; x += step) {
+                    var cx = pad.l + slot * (x + 0.5);
+                    parts.push('<text x="' + cx + '" y="' + (pad.t + ph + 18) + '" text-anchor="end" fill="#94a3b8" font-size="10" transform="rotate(-28 ' + cx + ' ' + (pad.t + ph + 18) + ')">' + escHtml(labels[x]) + '</text>');
+                }
+                parts.push('</svg>');
+                wrap.innerHTML = parts.join('');
+            }
+            function drawMain() { renderChart('chart-svg', mainMetric, mainType); renderHourlyProfile(mainMetric); }
             if (metricSelect) { metricSelect.value = mainMetric; metricSelect.addEventListener('change', function () { mainMetric = this.value; drawMain(); }); }
             if (typeSelect) { typeSelect.value = mainType; typeSelect.addEventListener('change', function () { mainType = this.value; drawMain(); }); }
 
@@ -2766,6 +2838,7 @@ def view_analytics():
         host_engagement_series=host_engagement_series or {'labels': [], 'keys': [], 'hosts': []},
         chart_payload=chart_payload,
         hourly_baseline_payload=hourly_baseline_payload,
+        hourly_profile_payload=hourly_profile_payload,
         start_str=start_str,
         end_str=end_str,
         days=days,

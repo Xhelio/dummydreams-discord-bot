@@ -445,6 +445,36 @@ def _analytics_session_where(start_date, end_date, host=None, account=None):
     return " AND ".join(clauses), tuple(params)
 
 
+def get_analytics_date_bounds(host=None, account=None, viewer=None):
+    """Return (min_date_str, max_date_str) across gift_logs/live_sessions for filters, or (None,None)."""
+    g_where, g_params = _analytics_gift_where('0000-01-01', '9999-12-31', host, account, viewer)
+    s_where, s_params = _analytics_session_where('0000-01-01', '9999-12-31', host, account)
+    mins = []
+    maxs = []
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        try:
+            row = cur.execute(f"SELECT MIN(substr(g.log_date,1,10)), MAX(substr(g.log_date,1,10)) FROM gift_logs g WHERE {g_where}", g_params).fetchone()
+            if row:
+                if row[0]: mins.append(str(row[0])[:10])
+                if row[1]: maxs.append(str(row[1])[:10])
+        except Exception:
+            pass
+        try:
+            row = cur.execute(f"SELECT MIN(substr(start_time,1,10)), MAX(substr(start_time,1,10)) FROM live_sessions WHERE {s_where}", s_params).fetchone()
+            if row:
+                if row[0]: mins.append(str(row[0])[:10])
+                if row[1]: maxs.append(str(row[1])[:10])
+        except Exception:
+            pass
+        if not mins or not maxs:
+            return (None, None)
+        return (min(mins), max(maxs))
+    finally:
+        conn.close()
+
+
 def get_analytics_summary(start_date, end_date, host=None, account=None, viewer=None) -> dict:
     """Ringkasan koin/gift/viewer/host/akun pada rentang tanggal."""
     where, params = _analytics_gift_where(start_date, end_date, host, account, viewer)
