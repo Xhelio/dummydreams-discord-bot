@@ -813,15 +813,24 @@ def view_monitor():
                     wait_seconds = remaining
         except Exception:
             pass
-        rate_limited = bool(d.get("rate_limited")) or status.startswith("rate_limited") or status == "backoff_json_response"
-        if rate_limited or status == "backoff_json_response":
+        # Connected/healthy states must not inherit stale backoff/limit fields
+        # from a previous failed attempt (root cause of "10/10 gagal beruntun"
+        # showing while a host name was already detected).
+        connected_status = status in ("connected", "connected_with_handler_error", "reconnected")
+        healthy_status = connected_status or status in ("offline", "non_priority_off", "checking", "online_waiting_websocket")
+        rate_limited = (not healthy_status) and (
+            bool(d.get("rate_limited"))
+            or status.startswith("rate_limited")
+            or status == "backoff_json_response"
+        )
+        if rate_limited:
             rate_limited_any = True
         lp = d.get("limit_progress") or {}
-        lp_label = (lp.get("label") or "").strip()
+        lp_label = "" if healthy_status else (lp.get("label") or "").strip()
         attempts = d.get("attempts_since_success")
         if attempts is None:
             attempts = d.get("attempts_total")
-        retry_text = _fmt_retry(wait_seconds) if wait_seconds > 0 else ""
+        retry_text = _fmt_retry(wait_seconds) if (wait_seconds > 0 and not healthy_status) else ""
 
         if status in ("rate_limited_cooldown", "rate_limited_backoff", "backoff_json_response"):
             if retry_text:

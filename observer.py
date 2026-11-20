@@ -1095,6 +1095,10 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 start_session_heartbeat()
 
                 attempts_since_success = 0
+                # A successful websocket connection clears stale backoff/limit
+                # diagnostics. Without this, the monitor kept showing an old
+                # "10/10 gagal beruntun" estimate even after LiveIntro worked.
+                _clear_rate_limit_state(username_clean)
                 runtime_status.set_live(username_clean, current_host, source="event")
                 runtime_status.update_observer_diag(
                     username_clean,
@@ -1103,6 +1107,10 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     last_error=None,
                     attempts_total=attempts_total,
                     attempts_since_success=attempts_since_success,
+                    wait_seconds=0,
+                    retry_at=None,
+                    rate_limited=False,
+                    limit_progress={"used": 0, "next": 0, "label": ""},
                 )
                 print(f"[{username_clean}] {'Reconnected to' if reconnected_in_grace else 'Connected to'} live stream (Host: {current_host}). Host detection active.")
 
@@ -1607,7 +1615,11 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                         runtime_status.clear_live(username_clean)
                     probed_live = False
                 if cycle_error is None:
-                    runtime_status.update_observer_diag(username_clean, status="offline", consecutive_failures=0, last_error=None)
+                    runtime_status.update_observer_diag(
+                        username_clean, status="offline", consecutive_failures=0, last_error=None,
+                        wait_seconds=0, retry_at=None, rate_limited=False,
+                        limit_progress={"used": 0, "next": 0, "label": ""},
+                    )
             elif probe_result is None and cycle_error is None and not grace_pending:
                 runtime_status.update_observer_diag(username_clean, status="checking")
         else:
@@ -1709,6 +1721,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 username_clean, status="online_waiting_websocket", wait_seconds=wait_seconds,
                 attempts_total=attempts_total, attempts_since_success=attempts_since_success,
                 consecutive_failures=consecutive_failures, limit_progress=prog,
+                rate_limited=False, retry_at=None,
             )
         else:
             wait_seconds = slow_seconds if connect_mode == "slow" else 30
