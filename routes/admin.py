@@ -11,7 +11,8 @@ from datetime import datetime, timedelta
 from db import (
     get_db_connection, 
     get_all_host_names, 
-    get_activity_logs, 
+    get_activity_logs,
+    export_activity_logs, 
     clear_activity_logs, 
     get_active_hosts,
     get_setting,
@@ -1286,21 +1287,64 @@ def sync_hosts_action():
 
 @admin_bp.route('/activity', methods=['GET'])
 def view_activity():
-    channel_filter = request.args.get("channel", "").strip().lower().lstrip("@")
-    logs = get_activity_logs(limit=100, channel_filter=channel_filter)
-    gift_activities = get_recent_gift_activities(limit=100, channel_filter=channel_filter)
+    category = (request.args.get('category') or 'operational').strip().lower()
+    if category not in ('operational', 'technical'):
+        category = 'operational'
+    channel_filter = (request.args.get('channel') or '').strip().lower().lstrip('@')
+    search = (request.args.get('search') or '').strip()
+    level = (request.args.get('level') or '').strip().lower()
+    if level not in ('info', 'warning', 'error', ''):
+        level = ''
+    try:
+        limit = int(request.args.get('limit') or 200)
+    except Exception:
+        limit = 200
+    limit = max(20, min(limit, 1000))
+
+    logs = get_activity_logs(limit=limit, channel_filter=channel_filter, category=category, level=level, search=search)
+    gift_activities = []
+    if category == 'operational':
+        gift_activities = get_recent_gift_activities(limit=100, channel_filter=channel_filter)
     all_hosts = get_active_hosts()
     if not all_hosts:
         all_hosts = ['georgevilora', 'clarissadreams', 'juliannedreams', 'franklyndreams', 'stefannyalisha', 'dummydreamsentertaiment']
 
-    html = """
+    download_qs = {
+        'category': category,
+        'channel': channel_filter,
+        'search': search,
+        'level': level,
+        'limit': 5000,
+    }
+    qs_items = []
+    for k, v in download_qs.items():
+        if v in ('', None):
+            continue
+        qs_items.append(f"{k}={quote_plus(str(v))}")
+    download_qs_str = "&".join(qs_items)
+
+    html = r"""
     <!DOCTYPE html>
     <html lang="en">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Log Activity Realtime</title>
-        <style>BASE_CSS_PLACEHOLDER</style>
+        <title>Activity Logs</title>
+        <style>BASE_CSS_PLACEHOLDER
+        .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+        .tab { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 999px; text-decoration: none; font-weight: 600; font-size: 0.9rem; background: #1e293b; color: #cbd5e1; border: 1px solid #334155; }
+        .tab.active { background: #0ea5e9; color: #fff; border-color: #38bdf8; }
+        .tab.tech.active { background: #f59e0b; color: #111827; border-color: #fbbf24; }
+        .filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; align-items: end; }
+        .filters label { font-size: 0.8rem; color: #94a3b8; display: block; margin-bottom: 4px; }
+        .filters input, .filters select { width: 100%; }
+        .toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+        .lvl-info { color:#38bdf8; background: rgba(56,189,248,.12); }
+        .lvl-warning { color:#f59e0b; background: rgba(245,158,11,.14); }
+        .lvl-error { color:#f87171; background: rgba(248,113,113,.14); }
+        .meta-muted { color:#94a3b8; font-size:0.8rem; }
+        .src-chip { color:#94a3b8; font-size:0.72rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin-left: 8px; white-space: nowrap; }
+        </style>
         <link rel="manifest" href="/manifest.webmanifest">
         <meta name="theme-color" content="#0284c7">
         <meta name="mobile-web-app-capable" content="yes">
@@ -1318,41 +1362,80 @@ def view_activity():
     </head>
     <body>
         <div class="header">
-            <h1>📊 Realtime Activity Log</h1>
-            <div style="display: flex; gap: 10px; align-items: center;">
-                <form action="/admin/clear-activity-logs" method="POST" onsubmit="return confirm('Clear the entire activity log?');" style="margin: 0;">
+            <h1>📊 Activity Logs</h1>
+            <div class="toolbar">
+                <a class="btn-action" style="background:#0ea5e9;color:#fff;" href="/admin/activity/download?{{ download_qs_str }}&format=txt">⬇ Download {{ 'Technical' if category=='technical' else 'Operational' }} (.txt)</a>
+                <a class="btn-action" style="background:#334155;color:#fff;" href="/admin/activity/download?{{ download_qs_str }}&format=json">JSON</a>
+                <form action="/admin/clear-activity-logs" method="POST" onsubmit="return confirm('Clear {{ category }} logs only?');" style="margin:0;">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                    <button type="submit" class="btn-danger" style="padding: 6px 12px; font-size: 0.8rem;">🗑️ Clear Log</button>
+                    <input type="hidden" name="category" value="{{ category }}">
+                    <button type="submit" class="btn-danger" style="padding: 6px 12px; font-size: 0.8rem;">🗑️ Clear {{ 'Technical' if category=='technical' else 'Operational' }}</button>
                 </form>
             </div>
         </div>
         NAV_HTML_PLACEHOLDER
 
-        <div class="card" style="margin-bottom: 16px; padding: 14px 20px;">
-            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
-                <form method="GET" action="/admin/activity" style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-                    <label for="channel_filter" style="font-size: 0.875rem; color: #94a3b8; font-weight: 500;">Channel Account Filter:</label>
-                    <select name="channel" id="channel_filter" onchange="this.form.submit()" style="padding: 6px 10px; min-width: 240px;">
-                        <option value="" {% if not current_filter %}selected{% endif %}>🌐 All Accounts (6 Official Targets)</option>
-                        {% for h in all_hosts %}
-                        <option value="{{ h }}" {% if current_filter == h %}selected{% endif %}>@{{ h }}</option>
-                        {% endfor %}
-                    </select>
-                    {% if current_filter %}
-                    <a href="/admin/activity" class="btn-action" style="background: #334155; color: white;">Reset Filter</a>
-                    {% endif %}
-                </form>
-                <div style="color: #94a3b8; font-size: 0.85rem;">
-                    Showing <strong>{{ gift_activities|length }}</strong> gifts & <strong>{{ logs|length }}</strong> log feed lines
+        <div class="card" style="margin-bottom: 16px; padding: 16px 20px;">
+            <div class="tabs">
+                <a class="tab {% if category=='operational' %}active{% endif %}" href="/admin/activity?category=operational&channel={{ current_filter|urlencode }}&search={{ search|urlencode }}&level={{ level|urlencode }}&limit={{ limit }}">🧭 Operasional</a>
+                <a class="tab tech {% if category=='technical' %}active{% endif %}" href="/admin/activity?category=technical&channel={{ current_filter|urlencode }}&search={{ search|urlencode }}&level={{ level|urlencode }}&limit={{ limit }}">🛠️ Teknikal</a>
+            </div>
+            <p style="color:#94a3b8; font-size:0.85rem; margin: 0 0 12px 0;">
+                {% if category == 'operational' %}
+                Log operasional: aktivitas sistem/bisnis, tracking live, gift, perubahan admin, verifikasi, reconnect, dan event penting.
+                {% else %}
+                Log teknikal: error, warning, kegagalan koneksi, timeout, crash/exception, dan diagnostik untuk debugging.
+                {% endif %}
+            </p>
+            <form method="GET" action="/admin/activity">
+                <input type="hidden" name="category" value="{{ category }}">
+                <div class="filters">
+                    <div>
+                        <label for="channel_filter">Account / Channel</label>
+                        <select name="channel" id="channel_filter">
+                            <option value="" {% if not current_filter %}selected{% endif %}>🌐 All Accounts</option>
+                            {% for h in all_hosts %}
+                            <option value="{{ h }}" {% if current_filter == h %}selected{% endif %}>@{{ h }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div>
+                        <label for="search">Search</label>
+                        <input type="text" id="search" name="search" value="{{ search }}" placeholder="message, event, source, @user">
+                    </div>
+                    <div>
+                        <label for="level">Level</label>
+                        <select name="level" id="level">
+                            <option value="" {% if not level %}selected{% endif %}>All levels</option>
+                            <option value="info" {% if level=='info' %}selected{% endif %}>Info</option>
+                            <option value="warning" {% if level=='warning' %}selected{% endif %}>Warning</option>
+                            <option value="error" {% if level=='error' %}selected{% endif %}>Error</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label for="limit">Rows</label>
+                        <select name="limit" id="limit">
+                            {% for n in [100,200,500,1000] %}
+                            <option value="{{ n }}" {% if limit==n %}selected{% endif %}>{{ n }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="toolbar" style="align-self:end;">
+                        <button type="submit" class="btn-action" style="background:#0284c7;color:#fff;">Apply</button>
+                        <a href="/admin/activity?category={{ category }}" class="btn-action" style="background:#334155;color:#fff;">Reset</a>
+                    </div>
                 </div>
+            </form>
+            <div style="margin-top:10px;" class="meta-muted">
+                Showing <strong>{{ logs|length }}</strong> {{ category }} log entries{% if category=='operational' %} and <strong>{{ gift_activities|length }}</strong> recent gifts{% endif %}.
             </div>
         </div>
 
-        <!-- RECENT GIFT ACTIVITY TABLE -->
+        {% if category == 'operational' %}
         <div class="card">
             <h2>🎁 Recent Incoming Gifts</h2>
             <p style="color: #94a3b8; font-size: 0.85rem; margin-bottom: 14px;">
-                Realtime gift history: date &amp; time, target account name, user/donor, gift name, coin amount, and the user's current total coins.
+                Realtime gift history for the selected account filter.
             </p>
             <table>
                 <tr>
@@ -1373,88 +1456,89 @@ def view_activity():
                         <strong>{{ g[3] }}</strong>
                         <span style="color: #38bdf8; font-size: 0.8rem; display: block;">@{{ g[2] }}</span>
                     </td>
-                    <td>
-                        <span class="badge" style="background: #7c3aed;">{{ g[10] or 'Host' }}</span>
-                    </td>
+                    <td><span class="badge" style="background: #7c3aed;">{{ g[10] or 'Host' }}</span></td>
                     <td>
                         <strong style="color: #f8fafc;">{{ g[5] }}</strong>
                         <span style="color: #94a3b8; font-size: 0.8rem; display: block;">@{{ g[4] }}</span>
                     </td>
-                    <td>
-                        <span class="badge" style="background: #0284c7;">{{ g[6] }} {% if g[7] > 1 %}(x{{ g[7] }}){% endif %}</span>
-                    </td>
-                    <td>
-                        <span class="badge" style="background: #ca8a04; font-weight: bold;">+{{ g[8] }} c</span>
-                    </td>
-                    <td>
-                        <span class="badge" style="background: #15803d; font-weight: bold;">{{ g[9] }} c</span>
-                    </td>
+                    <td><span class="badge" style="background: #0284c7;">{{ g[6] }} {% if g[7] > 1 %}(x{{ g[7] }}){% endif %}</span></td>
+                    <td><span class="badge" style="background: #ca8a04; font-weight: bold;">+{{ g[8] }} c</span></td>
+                    <td><span class="badge" style="background: #15803d; font-weight: bold;">{{ g[9] }} c</span></td>
                 </tr>
                 {% else %}
                 <tr>
-                    <td colspan="8" style="text-align: center; color: #64748b; padding: 20px;">
-                        No gift activity recorded for this filter yet.
-                    </td>
+                    <td colspan="8" style="text-align: center; color: #64748b; padding: 20px;">No gift activity recorded for this filter yet.</td>
                 </tr>
                 {% endfor %}
             </table>
         </div>
+        {% endif %}
 
-        <!-- LIVE STREAM FEED TERMINAL -->
         <div class="card">
             <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom: 8px;">
-                <h2 style="margin:0;">📜 Live Activity Feed (Stream Console)</h2>
+                <h2 style="margin:0;">{% if category=='technical' %}🛠️ Technical Log Feed{% else %}📜 Operational Activity Feed{% endif %}</h2>
+                <div class="meta-muted">Download includes current filters and metadata.</div>
             </div>
             <div class="terminal-container" id="terminal-feed">
                 {% for log in logs %}
+                {% set lvl = (log[6] if log|length > 6 else 'info') %}
+                {% set src = (log[7] if log|length > 7 else '') %}
                 <div class="terminal-row" data-log-ts="{{ log[4] }}" data-log-type="{{ log[1] }}" data-log-msg="{{ log[3]|e }}">
                     <span style="color: #64748b; font-size: 0.75rem; min-width: 140px;">[{{ log[4] }}]</span>
-                    {% if log[1] == 'connect' %}
+                    {% if lvl == 'error' or log[1] in ['error','critical','crash','exception','failed','failure','timeout'] %}
+                        <span class="log-tag-disconnect">ERROR</span>
+                    {% elif lvl == 'warning' or log[1] in ['warning','warn'] %}
+                        <span class="log-tag-gift" style="color:#f59e0b; background: rgba(245,158,11,0.14);">WARN</span>
+                    {% elif log[1] == 'connect' %}
                         <span class="log-tag-connect">CONNECT</span>
-                        <span style="color: #4ade80; font-weight: 600;">{{ log[3] }}</span>
                     {% elif log[1] == 'disconnect' %}
                         <span class="log-tag-disconnect">DISCONNECT</span>
-                        <span style="color: #f87171; font-weight: 600;">{{ log[3] }}</span>
                     {% elif log[1] == 'host_detected' %}
                         <span class="log-tag-gift" style="color: #38bdf8; background: rgba(56, 189, 248, 0.1);">HOST</span>
-                        <span style="color: #38bdf8; font-weight: 600;">{{ log[3] }}</span>
                     {% elif log[1] == 'host_check' %}
                         <span class="log-tag-gift" style="color: #a78bfa; background: rgba(167, 139, 250, 0.12);">HOST CHECK</span>
-                        <span style="color: #ddd6fe;">{{ log[3] }}</span>
                     {% elif log[1] == 'gift' %}
                         <span class="log-tag-gift">🎁 GIFT</span>
-                        <span style="color: #f8fafc;">{{ log[3] }}</span>
                     {% elif log[1] == 'reconnect' %}
                         <span class="log-tag-gift" style="color: #f59e0b; background: rgba(245, 158, 11, 0.12);">RECONNECT</span>
-                        <span style="color: #fde68a; font-weight: 600;">{{ log[3] }}</span>
                     {% elif log[1] == 'system' %}
                         <span class="log-tag-gift" style="color: #94a3b8; background: rgba(148, 163, 184, 0.12);">SYSTEM</span>
-                        <span style="color: #cbd5e1;">{{ log[3] }}</span>
                     {% elif log[1] == 'tier_reset' %}
                         <span class="log-tag-gift" style="color: #f472b6; background: rgba(244, 114, 182, 0.12);">TIER</span>
-                        <span style="color: #fbcfe8;">{{ log[3] }}</span>
-                    {% elif log[1] == 'error' %}
-                        <span class="log-tag-disconnect">ERROR</span>
-                        <span style="color: #fca5a5; font-weight: 600;">{{ log[3] }}</span>
+                    {% elif log[1] == 'webhook' %}
+                        <span class="log-tag-gift" style="color: #22d3ee; background: rgba(34, 211, 238, 0.12);">WEBHOOK</span>
+                    {% elif log[1] == 'technical' %}
+                        <span class="log-tag-gift" style="color:#f59e0b; background: rgba(245,158,11,0.14);">TECH</span>
                     {% else %}
                         <span class="log-tag-gift" style="color: #e2e8f0; background: rgba(226, 232, 240, 0.08);">{{ log[1]|upper }}</span>
-                        <span style="color: #e2e8f0;">{{ log[3] }}</span>
                     {% endif %}
+                    <span style="color: #f8fafc; white-space: pre-wrap; word-break: break-word; flex: 1;">{{ log[3] }}</span>
+                    <span class="src-chip">{% if log[2] %}@{{ log[2] }} · {% endif %}{{ src or 'activity' }}</span>
                 </div>
                 {% else %}
                 <div style="color: #64748b; font-style: italic; padding: 24px; text-align: center;">
-                    No activity recorded yet. The system is standing by and monitoring the 6 official target accounts.
+                    No {{ category }} logs for this filter yet.
                 </div>
                 {% endfor %}
             </div>
         </div>
-
 
         AUTO_REFRESH_JS_PLACEHOLDER
     </body>
     </html>
     """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
-    return render_template_string(html, logs=logs, gift_activities=gift_activities, all_hosts=all_hosts, current_filter=channel_filter)
+    return render_template_string(
+        html,
+        logs=logs,
+        gift_activities=gift_activities,
+        all_hosts=all_hosts,
+        current_filter=channel_filter,
+        category=category,
+        search=search,
+        level=level,
+        limit=limit,
+        download_qs_str=download_qs_str,
+    )
 
 
 @admin_bp.route('/logs', methods=['GET'])
@@ -3416,8 +3500,105 @@ def build_info():
 
 @admin_bp.route('/clear-activity-logs', methods=['POST'])
 def clear_activity():
-    clear_activity_logs()
-    return redirect('/admin/activity?msg=' + quote_plus('Activity log dibersihkan.') + '&msg_type=success')
+    category = (request.form.get('category') or request.args.get('category') or 'operational').strip().lower()
+    if category not in ('operational', 'technical', 'all'):
+        category = 'operational'
+    clear_activity_logs(None if category == 'all' else category)
+    label = 'All logs' if category == 'all' else ('Technical logs' if category == 'technical' else 'Operational logs')
+    target = category if category in ('operational', 'technical') else 'operational'
+    return redirect(f'/admin/activity?category={quote_plus(target)}&msg=' + quote_plus(f'{label} cleared.') + '&msg_type=success')
+
+
+@admin_bp.route('/activity/download', methods=['GET'])
+def download_activity():
+    from flask import Response
+    import json as _json
+    import csv
+    import io
+    from datetime import datetime as _dt
+    category = (request.args.get('category') or 'operational').strip().lower()
+    if category not in ('operational', 'technical', 'all'):
+        category = 'operational'
+    channel_filter = (request.args.get('channel') or '').strip().lower().lstrip('@')
+    search = (request.args.get('search') or '').strip()
+    level = (request.args.get('level') or '').strip().lower()
+    if level not in ('info', 'warning', 'error', ''):
+        level = ''
+    fmt = (request.args.get('format') or 'txt').strip().lower()
+    if fmt not in ('txt', 'json', 'csv'):
+        fmt = 'txt'
+    try:
+        limit = int(request.args.get('limit') or 5000)
+    except Exception:
+        limit = 5000
+    limit = max(1, min(limit, 20000))
+
+    rows = export_activity_logs(limit=limit, channel_filter=channel_filter, category=category, level=level, search=search)
+    generated_at = _dt.now().strftime('%Y-%m-%d %H:%M:%S')
+    try:
+        from log_setup import get_build_info
+        build = get_build_info() or {}
+    except Exception:
+        build = {}
+    meta = {
+        'generated_at': generated_at,
+        'category': category,
+        'channel_filter': channel_filter or None,
+        'search': search or None,
+        'level': level or None,
+        'limit': limit,
+        'returned': len(rows),
+        'build': build,
+    }
+
+    if fmt == 'json':
+        items = []
+        for r in rows:
+            items.append({
+                'log_id': r[0], 'event_type': r[1], 'account': r[2], 'message': r[3], 'created_at': r[4],
+                'category': r[5] if len(r) > 5 else category,
+                'level': r[6] if len(r) > 6 else 'info',
+                'source': r[7] if len(r) > 7 else '',
+            })
+        payload = _json.dumps({'meta': meta, 'logs': items}, ensure_ascii=False, indent=2)
+        resp = Response(payload, mimetype='application/json')
+        fname = f"activity-{category}-{generated_at.replace(' ','_').replace(':','')}.json"
+        resp.headers['Content-Disposition'] = f'attachment; filename="{fname}"'
+        return resp
+
+    if fmt == 'csv':
+        out = io.StringIO()
+        writer = csv.writer(out)
+        writer.writerow(['log_id','created_at','category','level','event_type','account','source','message'])
+        for r in rows:
+            writer.writerow([
+                r[0], r[4], (r[5] if len(r)>5 else category), (r[6] if len(r)>6 else 'info'),
+                r[1], r[2], (r[7] if len(r)>7 else ''), r[3],
+            ])
+        resp = Response(out.getvalue(), mimetype='text/csv; charset=utf-8')
+        fname = f"activity-{category}-{generated_at.replace(' ','_').replace(':','')}.csv"
+        resp.headers['Content-Disposition'] = f'attachment; filename="{fname}"'
+        return resp
+
+    lines = []
+    lines.append(f"Activity Logs Export ({category})")
+    lines.append(f"Generated: {generated_at}")
+    if build:
+        lines.append(f"Build: env={build.get('env','?')} version={build.get('version','?')} commit={build.get('commit','?')}")
+    lines.append(f"Filters: channel={channel_filter or '-'} search={search or '-'} level={level or '-'} limit={limit}")
+    lines.append(f"Returned: {len(rows)}")
+    lines.append("-" * 80)
+    for r in rows:
+        cat = r[5] if len(r)>5 else category
+        lvl = r[6] if len(r)>6 else 'info'
+        src = r[7] if len(r)>7 else ''
+        acct = f" @{r[2]}" if r[2] else ""
+        lines.append(f"[{r[4]}] [{cat}/{lvl}] [{r[1]}]{acct} ({src}) {r[3]}")
+    resp = Response("\n".join(lines) + "\n", mimetype='text/plain; charset=utf-8')
+    fname = f"activity-{category}-{generated_at.replace(' ','_').replace(':','')}.txt"
+    resp.headers['Content-Disposition'] = f'attachment; filename="{fname}"'
+    return resp
+
 
 @admin_bp.route('/reset-db', methods=['POST'])
 def reset_db():

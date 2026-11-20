@@ -1667,7 +1667,10 @@ def init_db():
                 event_type TEXT NOT NULL,
                 tiktok_username TEXT NOT NULL,
                 message TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                category TEXT NOT NULL DEFAULT 'operational',
+                level TEXT NOT NULL DEFAULT 'info',
+                source TEXT NOT NULL DEFAULT ''
             )
             """,
             """
@@ -1832,6 +1835,37 @@ def init_db():
                     conn.rollback()
                 except Exception:
                     pass
+
+        # Migrasi activity_logs: pisahkan log operasional vs teknikal.
+        for col, dtype, default in [
+            ("category", "TEXT", "'operational'"),
+            ("level", "TEXT", "'info'"),
+            ("source", "TEXT", "''"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE activity_logs ADD COLUMN {col} {dtype} DEFAULT {default}")
+                conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+        try:
+            conn.execute("UPDATE activity_logs SET category = 'operational' WHERE category IS NULL OR TRIM(category) = ''")
+            conn.execute("UPDATE activity_logs SET level = 'info' WHERE level IS NULL OR TRIM(level) = ''")
+            conn.execute("UPDATE activity_logs SET source = '' WHERE source IS NULL")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_activity_logs_cat_id ON activity_logs(category, log_id DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_activity_logs_cat_created ON activity_logs(category, created_at DESC)"
+            )
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
 
         # Dedupe index: TikTok can replay/duplicate gift messages (especially
         # across reconnects), so a gift log row is unique per message id.
@@ -2086,16 +2120,85 @@ def init_db():
     finally:
         conn.close()
 
-def log_activity_event(event_type: str, message: str, tiktok_username: str = ""):
-    """Mencatat aktivitas ke tabel activity_logs (dan selalu ke console).
+def _classify_activity(event_type: str, message: str, category: str = None, level: str = None):
+    """Infer (category, level) for an activity log entry.
+
+    Default is operational/info for business events. Technical captures system
+    diagnostics, failures, and debugging-relevant errors.
+    """
+    type_key = str(event_type or "").strip().lower()
+    msg = str(message or "")
+    msg_l = msg.lower()
+
+    if level:
+        level_n = str(level).strip().lower()
+    else:
+        if type_key in ("error", "critical", "crash", "timeout", "failed", "failure", "exception"):
+            level_n = "error"
+        elif type_key in ("warning", "warn"):
+            level_n = "warning"
+        else:
+            level_n = "info"
+
+    if category:
+        cat_n = str(category).strip().lower()
+        if cat_n not in ("operational", "technical"):
+            cat_n = "operational"
+        # Promote obvious technical severities into technical category.
+        if cat_n == "operational" and level_n in ("error", "critical") and type_key in ("error", "critical", "crash", "exception", "timeout", "failed", "failure"):
+            cat_n = "technical"
+        return cat_n, level_n
+
+    # Explicit technical event types
+    if type_key in ("error", "critical", "crash", "exception", "timeout", "failed", "failure"):
+        return "technical", ("error" if level_n == "info" else level_n)
+    if type_key in ("warning", "warn"):
+        return "technical", "warning"
+
+    # Heuristics for mixed "system"/debug messages
+    technical_markers = (
+        "[debug", "traceback", "exception", "failed to", "could not", "error",
+        "timeout", "timed out", "backoff", "rate limit", "rate-limit", "ratelimit",
+        "jsondecodeerror", "expecting value", "cooldown", "connection error",
+        "websocket", "sign-server", "sign server", "http 4", "http 5",
+        "invalid webhook signature", "rejected eulerstream webhook",
+        "sqlite", "database is locked", "turso", "hrana", "unavailable",
+    )
+    operational_markers = (
+        "admin ", "requested by admin", "admin requested", "cleared", "reset",
+        "settings saved", "tier ", "granted role", "revoked", "unclaimed",
+        "re-checked verification", "verification panel", "gift log selftest",
+        "reconnect requested", "started observer task", "stopped observer",
+        "observer supervisor started", "host priority mode updated",
+    )
+
+    if type_key == "system":
+        if any(m in msg_l for m in operational_markers):
+            return "operational", level_n
+        if msg_l.startswith("[debug @") or any(m in msg_l for m in ("backoff", "rate limit", "rate-limit", "ratelimit", "jsondecodeerror", "expecting value", "cooldown", "connection error", "failed to", "could not", "timeout", "traceback", "exception")):
+            return "technical", (level_n if level_n != "info" else "warning")
+        if msg_l.startswith("[debug") or any(m in msg_l for m in technical_markers):
+            return "technical", (level_n if level_n != "info" else "warning")
+        return "operational", level_n
+
+    # Webhook rejections/failures are technical diagnostics
+    if type_key == "webhook" and any(m in msg_l for m in ("rejected", "invalid", "failed", "error", "unrecognized")):
+        return "technical", (level_n if level_n != "info" else "warning")
+
+    return "operational", level_n
+
+
+def log_activity_event(event_type: str, message: str, tiktok_username: str = "", category: str = None, level: str = None, source: str = ""):
+    """Mencatat aktivitas ke tabel activity_logs (operasional/teknikal) dan ke logger.
 
     Penulisan DB dilakukan oleh satu thread penulis di belakang queue. Dengan
-    begitu pemanggilan dari event loop Discord tidak pernah menunggu Turso,
-    termasuk saat live ramai dan banyak event gift/komentar masuk.
+    begitu pemanggilan dari event loop Discord tidak pernah menunggu Turso.
     """
     event_type = str(event_type or "info")
     message = str(message or "")
     user_clean = (tiktok_username or "").lower().lstrip("@")
+    cat_n, level_n = _classify_activity(event_type, message, category=category, level=level)
+    source_n = str(source or "")
 
     wib = pytz.timezone('Asia/Jakarta')
     now_dt = datetime.now(wib)
@@ -2104,32 +2207,52 @@ def log_activity_event(event_type: str, message: str, tiktok_username: str = "")
     # Route activity to the central logger: everything is persisted to
     # logs/bot.log, and error/critical activity is also sent to the Discord
     # error channel by log_setup.
-    type_key = event_type.strip().lower()
-    if type_key in ("error", "critical", "crash", "timeout", "failed", "failure"):
-        level = logging.ERROR
-    elif type_key in ("warning", "warn"):
-        level = logging.WARNING
+    if level_n == "error":
+        py_level = logging.ERROR
+    elif level_n == "warning":
+        py_level = logging.WARNING
     else:
-        level = logging.INFO
+        py_level = logging.INFO
     _ACTIVITY_LOGGER.log(
-        level,
-        "[ActivityLog] [%s] @%s %s",
+        py_level,
+        "[ActivityLog] [%s/%s] @%s %s",
+        cat_n,
         event_type,
         user_clean or "-",
         message,
-        extra={"activity_type": event_type, "tiktok_user": user_clean or None},
+        extra={
+            "activity_type": event_type,
+            "tiktok_user": user_clean or None,
+            "log_category": cat_n,
+            "log_source": source_n or "activity_event",
+            "persisted_activity_log": True,
+        },
     )
 
     _ensure_activity_log_writer()
     try:
-        _ACTIVITY_LOG_QUEUE.put_nowait((event_type, message, user_clean, now_str))
+        _ACTIVITY_LOG_QUEUE.put_nowait((event_type, message, user_clean, now_str, cat_n, level_n, source_n))
     except queue.Full:
         _ACTIVITY_LOGGER.error("[ActivityLog] Queue is full; event dropped to keep the event loop responsive.")
+
+
+def log_technical_event(message: str, level: str = "warning", event_type: str = "technical", tiktok_username: str = "", source: str = "system"):
+    """Convenience helper for technical/system diagnostics in activity logs."""
+    return log_activity_event(
+        event_type=event_type,
+        message=message,
+        tiktok_username=tiktok_username,
+        category="technical",
+        level=level,
+        source=source,
+    )
 
 
 _ACTIVITY_LOG_QUEUE = queue.Queue(maxsize=5000)
 _ACTIVITY_LOG_WRITER_STARTED = False
 _ACTIVITY_LOG_WRITER_LOCK = threading.Lock()
+_ACTIVITY_LOG_PRUNE_COUNTER = 0
+_ACTIVITY_LOG_PRUNE_LOCK = threading.Lock()
 
 
 def _ensure_activity_log_writer():
@@ -2148,13 +2271,8 @@ def _ensure_activity_log_writer():
 
 
 def _activity_log_writer_loop():
-    """Persist activity log rows in small batches.
-
-    One Turso write per event (gift bursts during a live) kept the global write
-    lock and the network busy, so unrelated writes -- including verification
-    clicks -- waited seconds behind the queue. Batching up to ~0.75s of events
-    into one transaction cuts connection/commit traffic by an order of magnitude.
-    """
+    """Persist activity log rows in small batches."""
+    global _ACTIVITY_LOG_PRUNE_COUNTER
     while True:
         item = _ACTIVITY_LOG_QUEUE.get()
         if item is None:
@@ -2178,14 +2296,30 @@ def _activity_log_writer_loop():
             batch.append(nxt)
 
         def _write_batch(conn, rows=batch):
-            for event_type, message, user_clean, now_str in rows:
+            for row in rows:
+                # Backward compatibility with old 4-tuple shape
+                if len(row) == 4:
+                    event_type, message, user_clean, now_str = row
+                    cat_n, lvl_n, src_n = "operational", "info", ""
+                else:
+                    event_type, message, user_clean, now_str, cat_n, lvl_n, src_n = row
                 conn.execute("""
-                    INSERT INTO activity_logs (event_type, tiktok_username, message, created_at)
-                    VALUES (?, ?, ?, ?)
-                """, (event_type, user_clean, message, now_str))
+                    INSERT INTO activity_logs (event_type, tiktok_username, message, created_at, category, level, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (event_type, user_clean, message, now_str, cat_n or "operational", lvl_n or "info", src_n or ""))
 
         try:
             write_transaction(_write_batch)
+            with _ACTIVITY_LOG_PRUNE_LOCK:
+                _ACTIVITY_LOG_PRUNE_COUNTER += len(batch)
+                should_prune = _ACTIVITY_LOG_PRUNE_COUNTER >= 250
+                if should_prune:
+                    _ACTIVITY_LOG_PRUNE_COUNTER = 0
+            if should_prune:
+                try:
+                    prune_activity_logs()
+                except Exception:
+                    pass
         except Exception as e:
             _ACTIVITY_LOGGER.error(
                 "[ActivityLog] Failed to persist %d event(s): %s", len(batch), e
@@ -2196,6 +2330,36 @@ def _activity_log_writer_loop():
 
         if shutdown:
             return
+
+
+def prune_activity_logs(max_operational: int = 4000, max_technical: int = 6000):
+    """Keep activity_logs bounded per category (DB-backed retention)."""
+    try:
+        max_operational = max(200, int(max_operational or 4000))
+        max_technical = max(200, int(max_technical or 6000))
+    except Exception:
+        max_operational, max_technical = 4000, 6000
+
+    def _op(conn):
+        for cat, keep in (("operational", max_operational), ("technical", max_technical)):
+            conn.execute(
+                """
+                DELETE FROM activity_logs
+                WHERE category = ? AND log_id NOT IN (
+                    SELECT log_id FROM activity_logs
+                    WHERE category = ?
+                    ORDER BY log_id DESC
+                    LIMIT ?
+                )
+                """,
+                (cat, cat, keep),
+            )
+
+    try:
+        write_transaction(_op)
+    except Exception as e:
+        _ACTIVITY_LOGGER.error("[ActivityLog] Prune failed: %s", e)
+
 
 def get_user_channel_spent(viewer_user: str, target_user: str) -> int:
     """Menghitung total koin yang sudah di-spent oleh viewer di target channel ini."""
@@ -2239,36 +2403,87 @@ def get_user_total_spent(viewer_user: str) -> int:
     finally:
         conn.close()
 
-def get_activity_logs(limit: int = 100, channel_filter: str = "") -> list:
-    """Mengambil riwayat log aktivitas terbaru (maks 100 baris)."""
+def get_activity_logs(limit: int = 100, channel_filter: str = "", category: str = "operational", level: str = "", search: str = "", source: str = "") -> list:
+    """Mengambil riwayat log aktivitas terbaru.
+
+    Returns rows: (log_id, event_type, tiktok_username, message, created_at, category, level, source)
+    """
     try:
-        limit = max(1, min(int(limit or 100), 100))
+        limit = max(1, min(int(limit or 100), 2000))
     except (TypeError, ValueError):
         limit = 100
+    cat = (category or "").strip().lower()
+    lvl = (level or "").strip().lower()
+    q = (search or "").strip()
+    src = (source or "").strip().lower()
+    user_filter = (channel_filter or "").strip().lower().lstrip("@")
+
+    where = []
+    params = []
+    if cat in ("operational", "technical"):
+        where.append("COALESCE(category, 'operational') = ?")
+        params.append(cat)
+    elif cat in ("all", ""):
+        pass
+    else:
+        where.append("COALESCE(category, 'operational') = ?")
+        params.append("operational")
+    if lvl in ("info", "warning", "error"):
+        where.append("COALESCE(level, 'info') = ?")
+        params.append(lvl)
+    if user_filter:
+        where.append("LOWER(tiktok_username) = ?")
+        params.append(user_filter)
+    if src:
+        where.append("LOWER(COALESCE(source, '')) = ?")
+        params.append(src)
+    if q:
+        where.append("(message LIKE ? OR event_type LIKE ? OR tiktok_username LIKE ? OR COALESCE(source,'') LIKE ?)")
+        like = f"%{q}%"
+        params.extend([like, like, like, like])
+
+    sql = """
+        SELECT log_id, event_type, tiktok_username, message, created_at,
+               COALESCE(category, 'operational') AS category,
+               COALESCE(level, 'info') AS level,
+               COALESCE(source, '') AS source
+        FROM activity_logs
+    """
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY log_id DESC LIMIT ?"
+    params.append(limit)
+
     conn = get_db_connection()
     try:
         cur = conn.cursor()
-        if channel_filter:
-            rows = cur.execute("""
-                SELECT log_id, event_type, tiktok_username, message, created_at 
-                FROM activity_logs 
-                WHERE LOWER(tiktok_username) = ? 
-                ORDER BY log_id DESC LIMIT ?
-            """, (channel_filter.lower().lstrip("@"), limit)).fetchall()
-        else:
-            rows = cur.execute("""
-                SELECT log_id, event_type, tiktok_username, message, created_at 
-                FROM activity_logs 
-                ORDER BY log_id DESC LIMIT ?
-            """, (limit,)).fetchall()
+        rows = cur.execute(sql, tuple(params)).fetchall()
         return rows
     finally:
         conn.close()
 
-def clear_activity_logs():
+
+def export_activity_logs(limit: int = 5000, channel_filter: str = "", category: str = "operational", level: str = "", search: str = "") -> list:
+    """Fetch logs for export (same filters as get_activity_logs, higher cap)."""
+    try:
+        limit = max(1, min(int(limit or 5000), 20000))
+    except (TypeError, ValueError):
+        limit = 5000
+    return get_activity_logs(limit=limit, channel_filter=channel_filter, category=category, level=level, search=search)
+
+
+def clear_activity_logs(category: str = None):
+    """Clear activity logs.
+
+    category: 'operational', 'technical', or None/'all' for all.
+    """
+    cat = (category or "").strip().lower()
     conn = get_db_connection()
     try:
-        conn.execute("DELETE FROM activity_logs")
+        if cat in ("operational", "technical"):
+            conn.execute("DELETE FROM activity_logs WHERE category = ?", (cat,))
+        else:
+            conn.execute("DELETE FROM activity_logs")
         conn.commit()
     finally:
         conn.close()

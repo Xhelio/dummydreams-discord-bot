@@ -41,6 +41,8 @@ from db import (
     get_pending_live_usernames,
     cancel_pending_verification,
     log_activity_event,
+    clear_activity_logs,
+    prune_activity_logs,
     get_bool_setting,
     get_int_list_setting,
     get_announcement_channel_ids,
@@ -4170,6 +4172,14 @@ async def main():
 
     init_db()
     log.info("[Startup] Database initialised.")
+
+    # Clear operational logs on every deploy/restart; retain technical logs for debugging.
+    try:
+        await asyncio.to_thread(clear_activity_logs, "operational")
+        await asyncio.to_thread(prune_activity_logs)
+        log.info("[Startup] Operational activity logs cleared; technical logs retained/pruned.")
+    except Exception as e:
+        log.exception("[Startup] Could not apply activity log startup policy: %s", e)
 
     # Load bot_settings into memory before any interaction arrives. With the
     # stale-while-revalidate cache this means a settings read can never block

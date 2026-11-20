@@ -509,6 +509,53 @@ class _NotifyHandler(logging.Handler):
             pass
 
 
+_DB_TECH_GUARD = threading.local()
+
+
+class _TechnicalDBHandler(logging.Handler):
+    """Persist WARNING/ERROR logger records into activity_logs as technical entries."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            if record.levelno < logging.WARNING:
+                return
+            if getattr(record, "persisted_activity_log", False):
+                return
+            if getattr(_DB_TECH_GUARD, "active", False):
+                return
+            name = str(record.name or "")
+            if name == "bot.activity" or name.startswith("bot.notify"):
+                return
+            message = redact(record.getMessage())
+            tb = ""
+            if record.exc_info:
+                tb = redact("".join(traceback.format_exception(*record.exc_info)))
+            full = message
+            if tb:
+                full = (message + "\n" + tb[-1200:]).strip()
+            if len(full) > 2000:
+                full = full[:1997] + "..."
+            lvl = "error" if record.levelno >= logging.ERROR else "warning"
+            from db import log_activity_event  # lazy import to avoid circular deps
+            setattr(_DB_TECH_GUARD, "active", True)
+            try:
+                log_activity_event(
+                    event_type="technical",
+                    message=full,
+                    tiktok_username=str(getattr(record, "tiktok_user", "") or ""),
+                    category="technical",
+                    level=lvl,
+                    source=name or "logger",
+                )
+            finally:
+                setattr(_DB_TECH_GUARD, "active", False)
+        except Exception:
+            try:
+                setattr(_DB_TECH_GUARD, "active", False)
+            except Exception:
+                pass
+
+
 class _NotifyFilter(logging.Filter):
     """Drop noisy library warnings that are not actionable."""
 
@@ -552,6 +599,14 @@ def setup_logging() -> None:
     notify = _NotifyHandler(level=logging.WARNING)
     notify.addFilter(_NotifyFilter())
     root.addHandler(notify)
+
+    # Persist warning/error diagnostics into DB activity logs (technical).
+    try:
+        tech_db = _TechnicalDBHandler(level=logging.WARNING)
+        tech_db.addFilter(_NotifyFilter())
+        root.addHandler(tech_db)
+    except Exception:
+        pass
 
     # Keep third-party noise reasonable while preserving useful diagnostics.
     logging.getLogger("discord").setLevel(logging.INFO)
