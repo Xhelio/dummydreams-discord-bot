@@ -773,16 +773,54 @@ def view_monitor():
     except Exception:
         observer_diag = {}
     signer_configured = bool((os.environ.get("SIGN_API_KEY") or os.environ.get("TIKTOK_SIGN_API_KEY") or "").strip())
+    import time as _time
+
+    def _fmt_retry(seconds):
+        try:
+            s = max(0, int(seconds or 0))
+        except Exception:
+            s = 0
+        if s <= 0:
+            return "sekarang"
+        if s >= 3600:
+            h = s // 3600
+            m = (s % 3600) // 60
+            return f"{h} jam {m} menit" if m else f"{h} jam"
+        m = max(1, (s + 59) // 60) if s >= 60 else 0
+        if s >= 60:
+            return f"{m} menit"
+        return f"{s} detik"
+
     conn_states = []
     rate_limited_any = False
     for h in hosts:
         d = observer_diag.get((h["username"] or "").lower(), {}) or {}
         status = (d.get("status") or "unknown").lower()
         wait_seconds = int(d.get("wait_seconds") or 0)
-        if status.startswith("rate_limited"):
+        # Prefer retry_at for a live remaining estimate
+        retry_at = d.get("retry_at")
+        try:
+            if retry_at is not None:
+                remaining = int(float(retry_at) - _time.time())
+                if remaining > 0:
+                    wait_seconds = remaining
+        except Exception:
+            pass
+        rate_limited = bool(d.get("rate_limited")) or status.startswith("rate_limited") or status == "backoff_json_response"
+        if rate_limited or status == "backoff_json_response":
             rate_limited_any = True
-        if status in ("rate_limited_cooldown", "rate_limited_backoff"):
-            label = f"⏳ Rate limited — retry in {max(1, wait_seconds // 60)}m"
+        lp = d.get("limit_progress") or {}
+        lp_label = (lp.get("label") or "").strip()
+        attempts = d.get("attempts_since_success")
+        if attempts is None:
+            attempts = d.get("attempts_total")
+        retry_text = _fmt_retry(wait_seconds) if wait_seconds > 0 else ""
+
+        if status in ("rate_limited_cooldown", "rate_limited_backoff", "backoff_json_response"):
+            if retry_text:
+                label = f"⏳ Limit/cooldown — coba lagi dalam {retry_text}"
+            else:
+                label = "⏳ Limit/cooldown"
         elif status == "online_waiting_websocket":
             label = "🟡 Online (probe) — waiting websocket for LiveIntro"
         elif status in ("offline",):
@@ -795,6 +833,19 @@ def view_monitor():
             label = "🔴 Connection error"
         else:
             label = status.replace("_", " ").capitalize() if status else "Unknown"
+
+        # Build a rough "x/y before next tier/limit" indicator (estimate, not external quota)
+        limit_indicator = ""
+        if lp_label:
+            limit_indicator = f"Estimasi: {lp_label}"
+        elif attempts is not None and status not in ("connected", "connected_with_handler_error", "offline", "non_priority_off"):
+            try:
+                limit_indicator = f"Percobaan: {int(attempts)}"
+            except Exception:
+                pass
+        if rate_limited and retry_text and "coba lagi" not in label:
+            label = f"{label} — coba lagi dalam {retry_text}"
+
         conn_states.append({
             "username": h["username"],
             "label": label,
@@ -804,6 +855,10 @@ def view_monitor():
             "intro_preview": (d.get("last_intro_preview") or "")[:200],
             "intro_at": d.get("last_intro_at") or "",
             "intro_source": d.get("last_intro_source") or "",
+            "limit_indicator": limit_indicator,
+            "retry_text": retry_text,
+            "attempts": attempts,
+            "rate_limited": rate_limited,
         })
 
     sessions = []
@@ -888,10 +943,9 @@ def view_monitor():
 
         {% if rate_limited_any %}
         <div class="notice-warning">
-            ⚠️ One or more accounts hit the <strong>sign-server rate limit</strong> (EulerStream), so the
-            websocket cannot connect and <code>LiveIntroEvent</code> is not received. Add an API key at
+            ⚠️ Satu/lebih akun sedang <strong>limit/cooldown sign-server</strong> (EulerStream) atau backoff (respons kosong), sehingga websocket tidak terhubung dan <code>LiveIntroEvent</code> tidak diterima. Lihat kolom <em>Limit / Percobaan</em> untuk estimasi “x/y (kasar)” dan waktu coba lagi (~menit/jam). Tambah API key di
             <a href="https://www.eulerstream.com/pricing" target="_blank" rel="noopener">eulerstream.com/pricing</a>
-            or wait for the cooldown. <em>Refresh/Reset</em> retries now (uses quota).
+            atau tunggu cooldown. <em>Refresh/Reset</em> mencoba ulang sekarang (memakai kuota).
         </div>
         {% endif %}
 
@@ -908,13 +962,25 @@ def view_monitor():
             </div>
             <div class="table-scroll">
             <table>
-                <tr><th>Account</th><th>Mode</th><th>Status</th><th>Last Live Intro (host detection source)</th><th>Last Error</th></tr>
+                <tr><th>Account</th><th>Mode</th><th>Status</th><th>Limit / Percobaan (estimasi)</th><th>Last Live Intro (host detection source)</th><th>Last Error</th></tr>
                 {% for c in conn_states %}
                 <tr>
                     <td>@{{ c.username }}</td>
                     <td>{{ c.connect_mode }}</td>
                     <td>{{ c.label }}</td>
-                    <td style="max-width: 360px; white-space: normal; word-break: break-word;">
+                    <td style="max-width: 240px; white-space: normal; word-break: break-word;">
+                        {% if c.rate_limited and c.retry_text %}
+                        <span class="badge" style="background:#92400e; color:#fef3c7;">Limit/cooldown — ~{{ c.retry_text }}</span>
+                        {% endif %}
+                        {% if c.limit_indicator %}
+                        <div class="field-help" title="Estimasi kasar dari backoff/gagal beruntun (bukan kuota pasti EulerStream)">{{ c.limit_indicator }}</div>
+                        {% elif c.attempts is not none %}
+                        <div class="field-help">Percobaan: {{ c.attempts }}</div>
+                        {% else %}
+                        <span class="muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td style="max-width: 320px; white-space: normal; word-break: break-word;">
                         {% if c.intro_preview %}
                         <span style="color:#e2e8f0;">{{ c.intro_preview }}</span>
                         <div class="field-help">{{ c.intro_at }} · {{ c.intro_source }}</div>
@@ -922,10 +988,10 @@ def view_monitor():
                         <span class="field-help">No LiveIntroEvent output yet</span>
                         {% endif %}
                     </td>
-                    <td style="max-width: 320px; white-space: normal; word-break: break-word; color: #94a3b8;">{{ c.last_error or '-' }}</td>
+                    <td style="max-width: 280px; white-space: normal; word-break: break-word; color: #94a3b8;">{{ c.last_error or '-' }}</td>
                 </tr>
                 {% else %}
-                <tr><td colspan="5">No observer data yet.</td></tr>
+                <tr><td colspan="6">No observer data yet.</td></tr>
                 {% endfor %}
             </table>
             </div>

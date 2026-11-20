@@ -749,6 +749,44 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
 
     consecutive_failures = 0
     probed_live = False
+    attempts_total = 0
+    attempts_since_success = 0
+
+    def _fmt_wait(seconds: int) -> str:
+        try:
+            s = max(0, int(seconds or 0))
+        except Exception:
+            s = 0
+        if s >= 3600:
+            h = s // 3600
+            m = (s % 3600) // 60
+            return f"{h}h {m}m" if m else f"{h}h"
+        if s >= 60:
+            m = s // 60
+            sec = s % 60
+            return f"{m}m {sec}s" if sec and m < 10 else f"{m}m"
+        return f"{s}s"
+
+    def _limit_progress(status: str, failures: int, strikes: int, json_empty: bool):
+        """Rough progress toward next backoff/limit tier (not the external quota)."""
+        s = (status or "").lower()
+        f = max(0, int(failures or 0))
+        st = max(0, int(strikes or 0))
+        # explicit rate-limit cooldown tiers (strikes after hit): 1->30m,2->60m,3->120m,4+->180m
+        if s.startswith("rate_limited") or st > 0:
+            tier = min(st if st > 0 else 1, 4)
+            return {"used": tier, "next": 4, "label": f"limit tier {tier}/4"}
+        # json-empty backoff: 120s, becomes 300s at >=5 failures
+        if json_empty or s == "backoff_json_response":
+            y = 5
+            x = min(f, y)
+            return {"used": x, "next": y, "label": f"{x}/{y} gagal (backoff lebih lama >=5)"}
+        # generic reconnect backoff: 30s, 60s at >=5, 120s at >=10
+        if f > 0:
+            y = 10 if f >= 5 else 5
+            x = min(f, y)
+            return {"used": x, "next": y, "label": f"{x}/{y} gagal beruntun"}
+        return {"used": 0, "next": 0, "label": ""}
 
     async def delayed_disconnect_handler(session_to_close, disconnected_at: str):
         """Menunggu grace period 10 menit sebelum benar-benar menyatakan live berakhir di Discord.
@@ -887,13 +925,23 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             rl_until = int(float(get_setting(f"rl_until:{username_clean}", "0") or 0))
         except Exception:
             rl_until = 0
+        try:
+            rl_strikes_val = int(float(get_setting(f"rl_strikes:{username_clean}", "0") or 0))
+        except Exception:
+            rl_strikes_val = 0
         remaining_cooldown = rl_until - int(time.time())
         if remaining_cooldown > 0 and not _is_reconnect_requested(username_clean):
+            prog = _limit_progress("rate_limited_cooldown", consecutive_failures, rl_strikes_val, False)
             runtime_status.update_observer_diag(
                 username_clean,
                 status="rate_limited_cooldown",
                 wait_seconds=remaining_cooldown,
                 rate_limited=True,
+                retry_at=rl_until,
+                rl_strikes=rl_strikes_val,
+                attempts_total=attempts_total,
+                attempts_since_success=attempts_since_success,
+                limit_progress=prog,
             )
             log_activity_event(
                 "system",
@@ -914,13 +962,21 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             _apply_sign_api_key()
         except Exception:
             pass
+        attempts_total += 1
+        attempts_since_success += 1
         # See probe_room_live: TLS/CA setup must not run on the event loop.
         client = await asyncio.to_thread(TikTokLiveClient, unique_id=username_clean)
         connected_this_cycle = False
         reconnect_state = {"triggered": False}
         with _ACTIVE_CLIENTS_LOCK:
             _ACTIVE_CLIENTS[username_clean] = client
-        runtime_status.update_observer_diag(username_clean, connect_mode=connect_mode)
+        runtime_status.update_observer_diag(
+            username_clean,
+            connect_mode=connect_mode,
+            attempts_total=attempts_total,
+            attempts_since_success=attempts_since_success,
+            rl_strikes=rl_strikes_val,
+        )
 
         async def _watch_reconnect_request(active_client):
             while True:
@@ -1038,12 +1094,15 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 await asyncio.to_thread(touch_live_session, current_session_id)
                 start_session_heartbeat()
 
+                attempts_since_success = 0
                 runtime_status.set_live(username_clean, current_host, source="event")
                 runtime_status.update_observer_diag(
                     username_clean,
                     status="reconnected" if reconnected_in_grace else "connected",
                     consecutive_failures=0,
                     last_error=None,
+                    attempts_total=attempts_total,
+                    attempts_since_success=attempts_since_success,
                 )
                 print(f"[{username_clean}] {'Reconnected to' if reconnected_in_grace else 'Connected to'} live stream (Host: {current_host}). Host detection active.")
 
@@ -1573,10 +1632,27 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         elif rate_limited_cycle:
             # Back off hard on sign-server/account rate limits to avoid prolonging lockout.
             wait_seconds = _rate_limit_cooldown_seconds(username_clean, str(cycle_error or ""))
-            runtime_status.update_observer_diag(username_clean, status="rate_limited_backoff", wait_seconds=wait_seconds, rate_limited=True)
+            retry_at = int(time.time()) + wait_seconds
+            try:
+                rl_strikes_now = int(float(get_setting(f"rl_strikes:{username_clean}", "0") or 0))
+            except Exception:
+                rl_strikes_now = 1
+            prog = _limit_progress("rate_limited_backoff", consecutive_failures, rl_strikes_now, False)
+            runtime_status.update_observer_diag(
+                username_clean,
+                status="rate_limited_backoff",
+                wait_seconds=wait_seconds,
+                rate_limited=True,
+                retry_at=retry_at,
+                rl_strikes=rl_strikes_now,
+                attempts_total=attempts_total,
+                attempts_since_success=attempts_since_success,
+                consecutive_failures=consecutive_failures,
+                limit_progress=prog,
+            )
             log_activity_event(
                 "system",
-                f"[Debug @{username_clean}] Rate-limited websocket; backing off {wait_seconds}s (~{max(1, wait_seconds // 60)}m) before retry "
+                f"[Debug @{username_clean}] Rate-limited websocket; backing off {_fmt_wait(wait_seconds)} before retry "
                 f"(failures={consecutive_failures}, probe_online={probe_result is True}). "
                 f"Persistent limit? Add an EulerStream API key: https://www.eulerstream.com/pricing",
                 username_clean,
@@ -1588,10 +1664,33 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 wait_seconds = 300
             if connect_mode == "slow":
                 wait_seconds = max(wait_seconds, slow_seconds)
-            runtime_status.update_observer_diag(username_clean, status="backoff_json_response", wait_seconds=wait_seconds)
+            retry_at = int(time.time()) + wait_seconds
+            try:
+                queue_setting(f"rl_until:{username_clean}", str(retry_at))
+            except Exception:
+                pass
+            try:
+                rl_strikes_now = int(float(get_setting(f"rl_strikes:{username_clean}", "0") or 0))
+            except Exception:
+                rl_strikes_now = 0
+            prog = _limit_progress("backoff_json_response", consecutive_failures, rl_strikes_now, True)
+            runtime_status.update_observer_diag(
+                username_clean,
+                status="backoff_json_response",
+                wait_seconds=wait_seconds,
+                rate_limited=True,
+                retry_at=retry_at,
+                rl_strikes=rl_strikes_now,
+                attempts_total=attempts_total,
+                attempts_since_success=attempts_since_success,
+                consecutive_failures=consecutive_failures,
+                limit_progress=prog,
+            )
             log_activity_event(
                 "system",
-                f"[Debug @{username_clean}] Websocket returned empty/invalid JSON response; backing off {wait_seconds}s before retry (failures={consecutive_failures}, probe_online={probe_result is True}, mode={connect_mode}).",
+                f"[Debug @{username_clean}] Websocket returned empty/invalid JSON response; backing off {_fmt_wait(wait_seconds)} before retry "
+                f"(failures={consecutive_failures}, probe_online={probe_result is True}, mode={connect_mode}, "
+                f"progress={prog.get('label','')}).",
                 username_clean,
             )
         elif unavailable_cycle:
@@ -1599,18 +1698,30 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             # watch in case it becomes live-capable later, without burning quota.
             wait_seconds = _UNAVAILABLE_RETRY_SECONDS
             runtime_status.update_observer_diag(
-                username_clean, status="unavailable", wait_seconds=wait_seconds
+                username_clean, status="unavailable", wait_seconds=wait_seconds,
+                attempts_total=attempts_total, attempts_since_success=attempts_since_success,
             )
         elif probe_result is True and not connected_this_cycle:
             # Account is online (probe) but websocket event client not connected: retry to receive LiveIntroEvent.
             wait_seconds = 30 if connect_mode == "slow" else 10
-            runtime_status.update_observer_diag(username_clean, status="online_waiting_websocket", wait_seconds=wait_seconds)
+            prog = _limit_progress("online_waiting_websocket", consecutive_failures, 0, False)
+            runtime_status.update_observer_diag(
+                username_clean, status="online_waiting_websocket", wait_seconds=wait_seconds,
+                attempts_total=attempts_total, attempts_since_success=attempts_since_success,
+                consecutive_failures=consecutive_failures, limit_progress=prog,
+            )
         else:
             wait_seconds = slow_seconds if connect_mode == "slow" else 30
             if not connected_this_cycle and consecutive_failures >= 5:
                 wait_seconds = max(wait_seconds, 60)
             if not connected_this_cycle and consecutive_failures >= 10:
                 wait_seconds = max(wait_seconds, 120)
+            prog = _limit_progress("retry", consecutive_failures, 0, False) if consecutive_failures > 0 else {"used": 0, "next": 0, "label": ""}
+            runtime_status.update_observer_diag(
+                username_clean, wait_seconds=wait_seconds,
+                attempts_total=attempts_total, attempts_since_success=attempts_since_success,
+                consecutive_failures=consecutive_failures, limit_progress=prog,
+            )
         # If reconnect was requested while waiting, skip delay.
         for _ in range(wait_seconds):
             with _RECONNECT_REQUESTED_LOCK:
