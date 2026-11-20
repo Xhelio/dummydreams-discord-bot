@@ -160,43 +160,73 @@ def _reject_cross_origin_admin_mutations():
     """Defense-in-depth against CSRF on browser-based admin actions.
 
     Rejects unsafe cross-site requests to /admin/* when an Origin/Referer header
-    is present and does not match this host. Requests without either header are
-    allowed (e.g. CLI/monitor probes) and still rely on admin auth when enabled.
+    indicates a different site. Requests without usable origin info are allowed
+    (e.g. CLI/monitor probes) and still rely on admin auth when enabled.
     """
     if request.method in ("GET", "HEAD", "OPTIONS"):
         return None
     path = request.path or ""
     if not (path == "/admin" or path.startswith("/admin/")):
         return None
+
     origin = (request.headers.get("Origin") or "").strip()
-    source = origin or (request.headers.get("Referer") or "").strip()
-    if not source:
+    referer = (request.headers.get("Referer") or "").strip()
+    sec_fetch_site = (request.headers.get("Sec-Fetch-Site") or "").strip().lower()
+
+    # Modern browsers send Sec-Fetch-Site; same-origin/same-site are safe here.
+    if sec_fetch_site in ("same-origin", "same-site", "none"):
         return None
+
+    # Collect candidate source hosts (prefer Origin, fall back to Referer).
+    src_hosts = []
+    for candidate in (origin, referer):
+        if not candidate or candidate.lower() == "null":
+            continue
+        try:
+            host = (urlparse(candidate).hostname or "").lower()
+        except Exception:
+            host = ""
+        if host:
+            src_hosts.append(host)
+
+    # No usable browser origin info -> allow (auth still applies when enabled).
+    if not src_hosts:
+        return None
+
     try:
-        src_host = (urlparse(source).hostname or "").lower()
         allowed = set()
         for cand in (
             request.host,
             request.headers.get("Host"),
             request.headers.get("X-Forwarded-Host"),
+            request.headers.get("X-Forwarded-Server"),
             urlparse(request.host_url).hostname,
         ):
             if not cand:
                 continue
-            # X-Forwarded-Host/Host may include port or be a comma-separated list.
             for part in str(cand).split(","):
                 part = part.strip().lower()
                 if not part:
                     continue
-                host_only = part.split(":", 1)[0]
+                # Accept full URL values defensively.
+                if "://" in part:
+                    try:
+                        part = urlparse(part).hostname or part
+                    except Exception:
+                        pass
+                host_only = str(part).split(":", 1)[0].strip().lower()
                 if host_only:
                     allowed.add(host_only)
-        if not src_host or not allowed:
-            return jsonify({"ok": False, "error": "Invalid request origin"}), 403
-        if src_host not in allowed:
-            return jsonify({"ok": False, "error": "Cross-origin request blocked"}), 403
+
+        # If we cannot determine our own host, do not block legitimate requests.
+        if not allowed:
+            return None
+        if any(h in allowed for h in src_hosts):
+            return None
+        return jsonify({"ok": False, "error": "Cross-origin request blocked"}), 403
     except Exception:
-        return jsonify({"ok": False, "error": "Invalid request origin"}), 403
+        # Fail open on validation errors to avoid breaking legitimate admin use.
+        return None
     return None
 
 
