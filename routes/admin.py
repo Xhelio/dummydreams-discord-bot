@@ -1680,19 +1680,26 @@ def view_analytics():
     viewer_filter = (request.args.get('viewer') or '').strip().lstrip('@')
 
     days = (end_d - start_d).days + 1
-    group_by = (request.args.get('group') or '').strip()
-    if group_by not in ('day', 'week', 'month'):
+    group_by = (request.args.get('group') or '').strip().lower()
+    if group_by not in ('day', 'week', 'month', 'hour_avg'):
         group_by = 'day' if days <= 45 else ('week' if days <= 200 else 'month')
 
-    chart_group = 'hour' if (days == 1 and group_by == 'day') else group_by
-    if chart_group == 'hour':
+    # Explicit hour-of-day average profile across the selected range.
+    if group_by == 'hour_avg':
+        chart_group = 'hour_of_day'
+        group_label = f'hour of day (avg/day, {days} day{"s" if days != 1 else ""})'
+    elif days == 1 and group_by == 'day':
+        # Single-day view: show intra-day hourly timeline.
+        chart_group = 'hour'
         group_label = 'hourly (within day)'
-    elif chart_group == 'day':
-        group_label = 'daily'
-    elif chart_group == 'week':
-        group_label = 'weekly'
     else:
-        group_label = 'monthly'
+        chart_group = group_by
+        if chart_group == 'day':
+            group_label = 'daily'
+        elif chart_group == 'week':
+            group_label = 'weekly'
+        else:
+            group_label = 'monthly'
 
 
     chart_type = (request.args.get('chart') or 'bar').strip()
@@ -1998,6 +2005,7 @@ def view_analytics():
                             <option value="day" {% if group_by == 'day' %}selected{% endif %}>Daily</option>
                             <option value="week" {% if group_by == 'week' %}selected{% endif %}>Weekly</option>
                             <option value="month" {% if group_by == 'month' %}selected{% endif %}>Monthly</option>
+                            <option value="hour_avg" {% if group_by == 'hour_avg' %}selected{% endif %}>Hour of day (avg)</option>
                         </select>
                     </label>
                     <label>&nbsp;
@@ -2062,6 +2070,10 @@ def view_analytics():
                             <option value="line">Line</option>
                             <option value="area">Area</option>
                         </select>
+                    </label>
+                    <label id="avg-all-wrap" class="inline-check" style="margin:0; font-size:0.8rem; font-weight:600; color:#e2e8f0; text-transform:none; letter-spacing:0; display:none;">
+                        <input type="checkbox" id="show-overall-avg" checked> Show overall hour avg
+                        <span class="info-i" data-tip="Optional reference line: average across all hour buckets shown (all-hours average).">!</span>
                     </label>
                 </div>
             </div>
@@ -2345,7 +2357,14 @@ def view_analytics():
         var GROUP_BY = {{ chart_group|tojson }};
         var HOST_ENGAGEMENT = {{ (host_engagement_series|default({"labels": [], "keys": [], "hosts": []}, true))|tojson }};
 
-        function fmtNum(n) { return (Math.round(n || 0)).toLocaleString('id-ID'); }
+        function fmtNum(n) {
+            var num = Number(n || 0);
+            if (!isFinite(num)) num = 0;
+            if (Math.abs(num - Math.round(num)) < 1e-9) {
+                return Math.round(num).toLocaleString('id-ID');
+            }
+            return num.toLocaleString('id-ID', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+        }
         function niceCeil(v) {
             if (!v || v <= 0) return 1;
             var exp = Math.pow(10, Math.floor(Math.log10(v)));
@@ -2367,8 +2386,15 @@ def view_analytics():
             };
             return units[metric] || '';
         }
+        function isHourlyMode() { return GROUP_BY === 'hour' || GROUP_BY === 'hour_of_day'; }
+        function showOverallAvgEnabled() {
+            if (!isHourlyMode()) return true;
+            var cb = document.getElementById('show-overall-avg');
+            return !cb || !!cb.checked;
+        }
         function avgPeriodLabel() {
             if (GROUP_BY === 'hour') return '/hour';
+            if (GROUP_BY === 'hour_of_day') return '/hour (avg/day)';
             if (GROUP_BY === 'week') return '/week';
             if (GROUP_BY === 'month') return '/month';
             return '/day';
@@ -2436,10 +2462,11 @@ def view_analytics():
                 }
             }
 
-            if (avg > 0) {
+            if (avg > 0 && showOverallAvgEnabled()) {
                 var yAvg = yOf(avg);
+                var avgLabelPrefix = isHourlyMode() ? 'Avg (all hours): ' : 'Avg: ';
                 parts.push('<line x1="' + pad.l + '" y1="' + yAvg + '" x2="' + (pad.l + pw) + '" y2="' + yAvg + '" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="6 4"/>');
-                parts.push('<text x="' + (pad.l + pw - 4) + '" y="' + (yAvg - 5) + '" text-anchor="end" fill="#fbbf24" font-size="10">Avg: ' + fmtNum(avg) + escHtml(avgPeriodLabel()) + '</text>');
+                parts.push('<text x="' + (pad.l + pw - 4) + '" y="' + (yAvg - 5) + '" text-anchor="end" fill="#fbbf24" font-size="10">' + avgLabelPrefix + fmtNum(avg) + escHtml(avgPeriodLabel()) + '</text>');
             }
 
             var step = Math.max(1, Math.ceil(n / 12));
@@ -2592,10 +2619,11 @@ def view_analytics():
                 }
             }
 
-            if (avg > 0) {
+            if (avg > 0 && showOverallAvgEnabled()) {
                 var yAvg = yOf(avg);
+                var avgLabelPrefix = isHourlyMode() ? 'Avg (all hours): ' : 'Avg: ';
                 parts.push('<line x1="' + pad.l + '" y1="' + yAvg + '" x2="' + (pad.l + pw) + '" y2="' + yAvg + '" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="6 4"/>');
-                parts.push('<text x="' + (pad.l + pw - 4) + '" y="' + (yAvg - 5) + '" text-anchor="end" fill="#fbbf24" font-size="10">Avg: ' + fmtNum(avg) + escHtml(avgPeriodLabel()) + '</text>');
+                parts.push('<text x="' + (pad.l + pw - 4) + '" y="' + (yAvg - 5) + '" text-anchor="end" fill="#fbbf24" font-size="10">' + avgLabelPrefix + fmtNum(avg) + escHtml(avgPeriodLabel()) + '</text>');
             }
 
             var step = Math.max(1, Math.ceil(n / 12));
@@ -2653,6 +2681,11 @@ def view_analytics():
             var hostMetricSel = document.getElementById('host-eng-metric');
             if (hostMetricSel) hostMetricSel.addEventListener('change', function () { renderHostSelector(); drawHostFreq(); });
             renderHostSelector();
+
+            var avgWrap = document.getElementById('avg-all-wrap');
+            var avgCb = document.getElementById('show-overall-avg');
+            if (avgWrap) { avgWrap.style.display = isHourlyMode() ? 'inline-flex' : 'none'; }
+            if (avgCb) { avgCb.addEventListener('change', function () { drawAll(); }); }
 
             function drawAll() { drawMain(); drawFreq(); }
             window.addEventListener('resize', function () { drawAll(); });

@@ -574,11 +574,14 @@ def _analytics_next_bucket(value, group_by):
 
 def get_analytics_timeseries(start_date, end_date, group_by="day", host=None,
                              account=None, viewer=None) -> list:
-    """Deret waktu koin/gift/viewer/sesi per hari, minggu, bulan, atau jam (dalam sehari).
+    """Deret waktu koin/gift/viewer/sesi per hari, minggu, bulan, jam (dalam sehari),
+    atau hour_of_day (rata-rata per jam tertentu/clock hour di seluruh rentang).
 
     Bucket kosong tetap disertakan (nilai 0) supaya grafik tidak bolong.
+    Untuk hour_of_day, metrik aditif dirata-ratakan per hari kalender dalam rentang;
+    viewer/sesi/akun/host adalah rata-rata jumlah unik per hari pada jam tersebut.
     """
-    group_by = group_by if group_by in ("day", "week", "month", "hour") else "day"
+    group_by = group_by if group_by in ("day", "week", "month", "hour", "hour_of_day") else "day"
     start_d = _analytics_parse_date(start_date)
     end_d = _analytics_parse_date(end_date)
     if not start_d or not end_d or start_d > end_d:
@@ -586,6 +589,113 @@ def get_analytics_timeseries(start_date, end_date, group_by="day", host=None,
 
     where, params = _analytics_gift_where(start_date, end_date, host, account, viewer)
     swhere, sparams = _analytics_session_where(start_date, end_date, host, account)
+
+    if group_by == "hour_of_day":
+        days_count = max(1, (end_d - start_d).days + 1)
+        order = [f"{h:02d}" for h in range(24)]
+        buckets = {
+            k: {
+                "key": k, "label": f"{k}:00",
+                "coins": 0.0, "gifts": 0.0, "gift_events": 0.0, "sessions": 0.0,
+                "viewers": 0.0, "active_accounts": 0.0, "active_hosts": 0.0,
+            } for k in order
+        }
+        hour_expr = "substr(COALESCE(NULLIF(g.log_time, ''), substr(COALESCE(g.log_datetime, ''), 12, 8), '00:00:00'), 1, 2)"
+        day_expr = "substr(COALESCE(g.log_date, substr(COALESCE(g.log_datetime, ''), 1, 10), ''), 1, 10)"
+        conn = get_db_connection()
+        try:
+            cur = conn.cursor()
+            # Additive gift metrics: average per calendar day for each clock hour
+            for hour_key, coins, gifts, events in cur.execute(f"""
+                SELECT h, COALESCE(SUM(coins), 0), COALESCE(SUM(gifts), 0), COALESCE(SUM(events), 0)
+                FROM (
+                    SELECT {hour_expr} AS h, {day_expr} AS d,
+                           COALESCE(SUM(g.coins), 0) AS coins,
+                           COALESCE(SUM(g.gift_count), 0) AS gifts,
+                           COUNT(*) AS events
+                    FROM gift_logs g
+                    WHERE {where}
+                    GROUP BY h, d
+                )
+                GROUP BY h
+            """, params).fetchall():
+                hk = str(hour_key or "00")[:2].zfill(2)
+                bucket = buckets.get(hk)
+                if not bucket:
+                    continue
+                bucket["coins"] = float(coins or 0) / days_count
+                bucket["gifts"] = float(gifts or 0) / days_count
+                bucket["gift_events"] = float(events or 0) / days_count
+
+            # Unique viewers per day-hour, averaged across days
+            for hour_key, viewer_sum in cur.execute(f"""
+                SELECT h, COALESCE(SUM(daily_viewers), 0)
+                FROM (
+                    SELECT {hour_expr} AS h, {day_expr} AS d,
+                           COUNT(DISTINCT LOWER(g.viewer_username)) AS daily_viewers
+                    FROM gift_logs g
+                    WHERE {where}
+                    GROUP BY h, d
+                )
+                GROUP BY h
+            """, params).fetchall():
+                hk = str(hour_key or "00")[:2].zfill(2)
+                bucket = buckets.get(hk)
+                if bucket:
+                    bucket["viewers"] = float(viewer_sum or 0) / days_count
+
+            shour_expr = "substr(COALESCE(start_time, ''), 12, 2)"
+            sday_expr = "substr(COALESCE(start_time, ''), 1, 10)"
+            # Sessions and active accounts/hosts per day-hour, averaged across days
+            for hour_key, sess_sum, acc_sum, host_sum in cur.execute(f"""
+                SELECT h,
+                       COALESCE(SUM(sessions), 0),
+                       COALESCE(SUM(active_accounts), 0),
+                       COALESCE(SUM(active_hosts), 0)
+                FROM (
+                    SELECT {shour_expr} AS h, {sday_expr} AS d,
+                           COUNT(*) AS sessions,
+                           COUNT(DISTINCT LOWER(tiktok_username)) AS active_accounts,
+                           COUNT(DISTINCT LOWER(COALESCE(NULLIF(scheduled_host, ''), tiktok_username))) AS active_hosts
+                    FROM live_sessions
+                    WHERE {swhere}
+                    GROUP BY h, d
+                )
+                GROUP BY h
+            """, sparams).fetchall():
+                hk = str(hour_key or "00")[:2].zfill(2)
+                bucket = buckets.get(hk)
+                if not bucket:
+                    continue
+                bucket["sessions"] = float(sess_sum or 0) / days_count
+                bucket["active_accounts"] = float(acc_sum or 0) / days_count
+                bucket["active_hosts"] = float(host_sum or 0) / days_count
+
+            def _fmt_avg(v):
+                # keep decimals where meaningful, avoid noisy floats for near-integers
+                if abs(v - round(v)) < 1e-9:
+                    return int(round(v))
+                return round(v, 2)
+
+            return [
+                {
+                    "key": buckets[k]["key"],
+                    "label": buckets[k]["label"],
+                    "coins": _fmt_avg(buckets[k]["coins"]),
+                    "gifts": _fmt_avg(buckets[k]["gifts"]),
+                    "gift_events": _fmt_avg(buckets[k]["gift_events"]),
+                    "viewers": _fmt_avg(buckets[k]["viewers"]),
+                    "sessions": _fmt_avg(buckets[k]["sessions"]),
+                    "active_accounts": _fmt_avg(buckets[k]["active_accounts"]),
+                    "active_hosts": _fmt_avg(buckets[k]["active_hosts"]),
+                }
+                for k in order
+            ]
+        except Exception as e:
+            print(f"[Analytics] timeseries (hour_of_day) failed: {e}")
+            return []
+        finally:
+            conn.close()
 
     if group_by == "hour":
         day_str = start_d.strftime("%Y-%m-%d")
@@ -773,16 +883,127 @@ def get_analytics_host_engagement_timeseries(start_date, end_date, group_by="day
     """Per-host gift engagement over time buckets (from gift_logs).
 
     Engagement metrics per bucket per host: transactions (gift rows), coins, unique viewers.
-    group_by: day/week/month/hour (hour = rentetan waktu dalam satu hari).
+    group_by: day/week/month/hour/hour_of_day.
+    hour_of_day = rata-rata per jam tertentu (00-23) di seluruh rentang tanggal.
     Returns {"labels": [...], "keys": [...], "hosts": [{key,name,transactions[],coins[],viewers[],totals...}, ...]}.
     """
-    group_by = group_by if group_by in ("day", "week", "month", "hour") else "day"
+    group_by = group_by if group_by in ("day", "week", "month", "hour", "hour_of_day") else "day"
     start_d = _analytics_parse_date(start_date)
     end_d = _analytics_parse_date(end_date)
     if not start_d or not end_d or start_d > end_d:
         return {"labels": [], "keys": [], "hosts": []}
 
     where, params = _analytics_gift_where(start_date, end_date, host, account, viewer)
+
+    def _fmt_avg(v):
+        if abs(v - round(v)) < 1e-9:
+            return int(round(v))
+        return round(v, 2)
+
+    if group_by == "hour_of_day":
+        days_count = max(1, (end_d - start_d).days + 1)
+        order = [f"{h:02d}" for h in range(24)]
+        buckets = {k: {"key": k, "label": f"{k}:00"} for k in order}
+        hour_expr = "substr(COALESCE(NULLIF(g.log_time, ''), substr(COALESCE(g.log_datetime, ''), 12, 8), '00:00:00'), 1, 2)"
+        day_expr = "substr(COALESCE(g.log_date, substr(COALESCE(g.log_datetime, ''), 1, 10), ''), 1, 10)"
+        per_host = {}
+        conn = get_db_connection()
+        try:
+            cur = conn.cursor()
+            rows = cur.execute(f"""
+                SELECT h, host_key, host_name,
+                       COALESCE(SUM(transactions), 0) AS transactions_sum,
+                       COALESCE(SUM(coins), 0) AS coins_sum
+                FROM (
+                    SELECT {hour_expr} AS h,
+                           {day_expr} AS d,
+                           {_ANALYTICS_HOST_KEY} AS host_key,
+                           {_ANALYTICS_HOST_LABEL} AS host_name,
+                           COUNT(*) AS transactions,
+                           COALESCE(SUM(g.coins), 0) AS coins
+                    FROM gift_logs g
+                    WHERE {where}
+                    GROUP BY h, d, {_ANALYTICS_HOST_KEY}
+                )
+                GROUP BY h, host_key
+            """, params).fetchall()
+            for hour_key, hkey, hname, tr_sum, coins_sum in rows:
+                bkey = str(hour_key or "00")[:2].zfill(2)
+                if bkey not in buckets:
+                    continue
+                hk = (str(hkey or "").lower().strip()) or "-"
+                if hk not in per_host:
+                    per_host[hk] = {
+                        "key": hk, "name": str(hname or hk or "-").strip() or "-",
+                        "transactions": {}, "coins": {}, "viewers": {},
+                    }
+                item = per_host[hk]
+                if hname and (not item["name"] or item["name"] == hk):
+                    item["name"] = str(hname).strip()
+                item["transactions"][bkey] = float(tr_sum or 0) / days_count
+                item["coins"][bkey] = float(coins_sum or 0) / days_count
+
+            vrows = cur.execute(f"""
+                SELECT h, host_key, COALESCE(SUM(daily_viewers), 0) AS viewer_sum
+                FROM (
+                    SELECT {hour_expr} AS h,
+                           {day_expr} AS d,
+                           {_ANALYTICS_HOST_KEY} AS host_key,
+                           COUNT(DISTINCT LOWER(g.viewer_username)) AS daily_viewers
+                    FROM gift_logs g
+                    WHERE {where}
+                    GROUP BY h, d, {_ANALYTICS_HOST_KEY}
+                )
+                GROUP BY h, host_key
+            """, params).fetchall()
+            for hour_key, hkey, viewer_sum in vrows:
+                bkey = str(hour_key or "00")[:2].zfill(2)
+                if bkey not in buckets:
+                    continue
+                hk = (str(hkey or "").lower().strip()) or "-"
+                if hk not in per_host:
+                    per_host[hk] = {
+                        "key": hk, "name": hk or "-",
+                        "transactions": {}, "coins": {}, "viewers": {},
+                    }
+                per_host[hk]["viewers"][bkey] = float(viewer_sum or 0) / days_count
+        except Exception as e:
+            print(f"[Analytics] host engagement timeseries (hour_of_day) failed: {e}")
+            return {"labels": [buckets[k]["label"] for k in order], "keys": list(order), "hosts": []}
+        finally:
+            conn.close()
+
+        try:
+            limit_n = max(1, min(int(limit or 12), 20))
+        except Exception:
+            limit_n = 12
+        # rank by sum of averaged coins across 24h
+        def _rank(item):
+            return sum(float(item["coins"].get(k, 0) or 0) for k in order)
+        ranked = sorted(per_host.values(), key=lambda x: (-_rank(x), str(x.get("name") or "").lower()))
+        selected = ranked[:limit_n]
+        if host:
+            h = str(host).strip().lower().lstrip("@")
+            if h and all(x["key"] != h for x in selected):
+                match = per_host.get(h)
+                if match:
+                    selected = [match] + selected[: max(0, limit_n - 1)]
+        hosts_out = []
+        for item in selected:
+            tr_arr = [_fmt_avg(float(item["transactions"].get(k, 0) or 0)) for k in order]
+            coins_arr = [_fmt_avg(float(item["coins"].get(k, 0) or 0)) for k in order]
+            viewers_arr = [_fmt_avg(float(item["viewers"].get(k, 0) or 0)) for k in order]
+            hosts_out.append({
+                "key": item["key"],
+                "name": item["name"],
+                "transactions": tr_arr,
+                "coins": coins_arr,
+                "viewers": viewers_arr,
+                "total_transactions": _fmt_avg(sum(float(item["transactions"].get(k, 0) or 0) for k in order)),
+                "total_coins": _fmt_avg(sum(float(item["coins"].get(k, 0) or 0) for k in order)),
+                "total_viewers": _fmt_avg(sum(float(item["viewers"].get(k, 0) or 0) for k in order)),
+            })
+        return {"labels": [buckets[k]["label"] for k in order], "keys": list(order), "hosts": hosts_out}
 
     if group_by == "hour":
         order = [f"{h:02d}" for h in range(24)]
