@@ -15,6 +15,21 @@ app = Flask(__name__)
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
 log = log_setup.get_logger("bot.web")
 
+# Identifies the running process, so a redeploy can be told apart from a restart
+# (and a stale deploy can be told apart from a crashed one) without server logs.
+BOOT_TS = time.time()
+BOOT_ID = uuid.uuid4().hex[:8]
+
+
+def _build_version():
+    """Short build id shown in the UI and /health (7 chars when available)."""
+    return (
+        os.environ.get("PUSH_CODE")
+        or os.environ.get("BOT_VERSION")
+        or (os.environ.get("RENDER_GIT_COMMIT") or "")[:7]
+        or "unknown"
+    )
+
 # Optional basic auth for admin panel (recommended for production/public hosting).
 # Set ADMIN_USERNAME and ADMIN_PASSWORD to enable protection for /admin routes.
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "")
@@ -175,7 +190,7 @@ def pwa_static(filename):
 
 @app.route('/robots.txt')
 def robots_txt():
-    body = "User-agent: *\nDisallow: /admin/\nDisallow: /api/\nDisallow: /health\n"
+    body = "User-agent: *\nDisallow: /admin/\nDisallow: /api/\nDisallow: /health\nDisallow: /version\n"
     return Response(body, mimetype='text/plain')
 
 
@@ -232,12 +247,7 @@ def health():
         env = "stable"
     elif env in ("testing", "staging", "dev", "development"):
         env = "test"
-    version = (
-        os.environ.get("PUSH_CODE")
-        or os.environ.get("BOT_VERSION")
-        or (os.environ.get("RENDER_GIT_COMMIT") or "")[:7]
-        or "unknown"
-    )
+    version = _build_version()
     return jsonify({
         "ok": db_ok,
         "db": db_ok,
@@ -246,7 +256,32 @@ def health():
         "env": env or "stable",
         "version": version,
         "live_tracked": live_count,
+        "boot_id": BOOT_ID,
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(BOOT_TS)),
     }), (200 if db_ok else 503)
+
+
+@app.route('/version')
+def version_info():
+    """Which code is actually running right now.
+
+    Deploy checks compare ``boot_id``/``started_at`` before and after a deploy:
+    a real redeploy changes both. ``version`` comes from the platform's commit
+    env var, so it can lag behind (or be pinned by PUSH_CODE).
+    """
+    import platform
+    import sys
+    return jsonify({
+        "version": _build_version(),
+        "commit": os.environ.get("RENDER_GIT_COMMIT", ""),
+        "env": os.environ.get("BOT_ENV", ""),
+        "boot_id": BOOT_ID,
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(BOOT_TS)),
+        "uptime_seconds": int(time.time() - BOOT_TS),
+        "pid": os.getpid(),
+        "python": platform.python_version(),
+        "executable": sys.executable,
+    })
 
 
 def run():

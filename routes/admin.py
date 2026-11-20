@@ -1442,21 +1442,35 @@ def view_analytics():
         except Exception:
             return 0
 
-    top_gift_items = []
-    for row in top_gift_items_raw:
+    def _int(value):
         try:
-            name, unit_coins, item_count, total_coins, transactions, top_sender = row
+            return int(value or 0)
         except Exception:
-            name, unit_coins, item_count, total_coins, transactions = row[:5]
-            top_sender = '-'
-        top_gift_items.append({
-            'name': name or 'Unknown',
-            'unit_coins': _coin_value(unit_coins, total_coins, item_count),
-            'count': int(item_count or 0),
-            'coins': int(total_coins or 0),
-            'events': int(transactions or 0),
-            'sender': (top_sender or '-'),
-        })
+            return 0
+
+    top_gift_items = []
+    try:
+        for row in top_gift_items_raw or []:
+            try:
+                name, unit_coins, item_count, total_coins, transactions, top_sender = row
+            except Exception:
+                try:
+                    name, unit_coins, item_count, total_coins, transactions = row[:5]
+                except Exception:
+                    # Unknown row shape: skip it instead of failing the page.
+                    continue
+                top_sender = '-'
+            top_gift_items.append({
+                'name': name or 'Unknown',
+                'unit_coins': _coin_value(unit_coins, total_coins, item_count),
+                'count': _int(item_count),
+                'coins': _int(total_coins),
+                'events': _int(transactions),
+                'sender': (top_sender or '-'),
+            })
+    except Exception as exc:
+        print(f"[Analytics] top gift items render failed: {exc}")
+        top_gift_items = []
 
     total_coins = summary.get('coins', 0) or 0
 
