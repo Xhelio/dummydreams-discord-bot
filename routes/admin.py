@@ -807,8 +807,13 @@ def view_monitor():
         })
 
     sessions = []
+    unresolved_count = 0
     for s in session_rows:
         uname = (s[1] or "").lower()
+        host_val = s[6]
+        unresolved = host_val in (None, "", "Host", "-")
+        if unresolved:
+            unresolved_count += 1
         sessions.append({
             "session_id": s[0],
             "username": s[1],
@@ -818,7 +823,39 @@ def view_monitor():
             "total_coins": s[5] or 0,
             "scheduled_host": s[6],
             "is_live_now": uname in live_snapshot,
+            "host_unresolved": unresolved,
         })
+
+    # Host options for resolving "utang host" (unresolved sessions)
+    host_options = []
+    try:
+        from db import get_host_aliases
+        conn2 = get_db_connection()
+        try:
+            rows = conn2.execute(
+                "SELECT DISTINCT display_name FROM hosts WHERE display_name IS NOT NULL AND TRIM(display_name) != ''"
+            ).fetchall()
+            for (n,) in rows:
+                if n and str(n).strip() not in ("-", "Host"):
+                    host_options.append(str(n).strip())
+            rows = conn2.execute(
+                "SELECT DISTINCT scheduled_host FROM live_sessions "
+                "WHERE scheduled_host IS NOT NULL AND TRIM(scheduled_host) NOT IN ('', '-', 'Host')"
+            ).fetchall()
+            for (n,) in rows:
+                if n and str(n).strip():
+                    host_options.append(str(n).strip())
+        finally:
+            conn2.close()
+        try:
+            for _alias, hname in (get_host_aliases() or []):
+                if hname and str(hname).strip() not in ("-", "Host"):
+                    host_options.append(str(hname).strip())
+        except Exception:
+            pass
+    except Exception:
+        pass
+    host_options = sorted({h for h in host_options if h})
 
     html = """
     <!DOCTYPE html>
@@ -947,6 +984,14 @@ def view_monitor():
 
         <div class="card">
             <h2>📹 Live Session History</h2>
+            {% if unresolved_count %}
+            <div class="notice-warning" style="margin-bottom:10px;">
+                ⏳ <strong>Utang host: {{ unresolved_count }}</strong> sesi belum terdeteksi nama host-nya.
+                Bot akan terus mencoba saat koneksi LiveIntro tersedia; untuk sesi yang sudah lewat, pilih host di kolom <em>Resolve</em> untuk melunasi utang.
+            </div>
+            {% else %}
+            <div class="section-note">Host terdeteksi otomatis dari LiveIntro. Jika tidak tertangkap, sesi ditandai sebagai utang dan bisa di-resolve manual.</div>
+            {% endif %}
             <div class="table-scroll">
             <table>
                 <tr>
@@ -956,6 +1001,7 @@ def view_monitor():
                     <th>Duration</th>
                     <th>Coins</th>
                     <th>Detected Host</th>
+                    <th>Resolve (utang)</th>
                 </tr>
                 {% for s in sessions %}
                 <tr>
@@ -983,13 +1029,30 @@ def view_monitor():
                     <td>
                         {% if s.scheduled_host and s.scheduled_host != '-' and s.scheduled_host != 'Host' %}
                             <a href="/admin/host/{{ s.scheduled_host }}" class="host-link" title="Click to view shift history">{{ s.scheduled_host }} ↗</a>
+                        {% elif s.host_unresolved %}
+                            <span class="badge" style="background:#92400e; color:#fef3c7;">⏳ Utang (belum terdeteksi)</span>
+                            {% if s.is_live_now %}<div class="field-help">Mencoba deteksi otomatis (LiveIntro)…</div>{% endif %}
                         {% else %}
                             <strong>{{ s.scheduled_host or '-' }}</strong>
                         {% endif %}
                     </td>
+                    <td>
+                        {% if s.host_unresolved %}
+                        <form action="/admin/resolve-session-host" method="POST" class="edit-form" style="gap:4px;">
+                            <input type="hidden" name="session_id" value="{{ s.session_id }}">
+                            <input type="text" name="host_name" list="host-options-{{ s.session_id }}" placeholder="Nama host" style="min-width:110px; max-width:150px;">
+                            <datalist id="host-options-{{ s.session_id }}">
+                                {% for opt in host_options %}<option value="{{ opt }}">{% endfor %}
+                            </datalist>
+                            <button type="submit" class="icon-btn" title="Simpan host">💾</button>
+                        </form>
+                        {% else %}
+                        <span class="muted">—</span>
+                        {% endif %}
+                    </td>
                 </tr>
                 {% else %}
-                <tr><td colspan="6">No live session history yet.</td></tr>
+                <tr><td colspan="7">No live session history yet.</td></tr>
                 {% endfor %}
             </table>
             </div>
@@ -998,7 +1061,7 @@ def view_monitor():
     </body>
     </html>
     """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
-    return render_template_string(html, hosts=hosts, sessions=sessions, conn_states=conn_states, rate_limited_any=rate_limited_any, signer_configured=signer_configured)
+    return render_template_string(html, hosts=hosts, sessions=sessions, conn_states=conn_states, rate_limited_any=rate_limited_any, signer_configured=signer_configured, unresolved_count=unresolved_count, host_options=host_options)
 
 # Handlers Form Admin
 @admin_bp.route('/add-host', methods=['POST'])
@@ -1025,6 +1088,64 @@ def delete_host(host_id):
     conn.commit()
     conn.close()
     return redirect('/admin/monitor?msg=' + quote_plus('Host dihapus.') + '&msg_type=success')
+
+
+@admin_bp.route('/resolve-session-host', methods=['POST'])
+def resolve_session_host():
+    """Resolve host-detection debt by manually assigning a host to a session."""
+    from db import update_live_session_host, set_current_host_for_account
+    try:
+        session_id = int(request.form.get("session_id") or 0)
+    except Exception:
+        session_id = 0
+    host_name = (request.form.get("host_name") or "").strip()
+    if not session_id or not host_name or host_name in ("-", "Host"):
+        return redirect('/admin/monitor?msg=' + quote_plus('Pilih/isi nama host untuk melunasi utang sesi ini.') + '&msg_type=warning')
+
+    conn = get_db_connection()
+    try:
+        row = conn.execute(
+            "SELECT tiktok_username, end_time, scheduled_host FROM live_sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return redirect('/admin/monitor?msg=' + quote_plus('Sesi tidak ditemukan.') + '&msg_type=danger')
+
+    username = (row[0] or "").lower().lstrip("@")
+    is_open = row[1] is None
+    updated = update_live_session_host(session_id, host_name, allow_closed=True)
+    if not updated:
+        return redirect('/admin/monitor?msg=' + quote_plus('Gagal memperbarui host sesi.') + '&msg_type=danger')
+
+    try:
+        set_current_host_for_account(username, host_name)
+    except Exception:
+        pass
+
+    # If this account is currently live, reflect the resolved host immediately.
+    try:
+        live = get_live_snapshot() or {}
+        if username in live or is_open:
+            try:
+                from runtime_status import set_live
+                set_live(username, host_name, source="manual_resolve")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    try:
+        log_activity_event(
+            "host_detected",
+            f"Host debt resolved manually: session {session_id} @{username} -> {host_name} (was: {row[2] or 'Host'}).",
+            username,
+        )
+    except Exception:
+        pass
+
+    return redirect('/admin/monitor?msg=' + quote_plus(f'Utang host sesi #{session_id} dilunasi: {host_name}.') + '&msg_type=success')
 
 @admin_bp.route('/edit-coin', methods=['POST'])
 def edit_coin():

@@ -2593,20 +2593,26 @@ def touch_current_host_detection(tiktok_username: str):
         datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S'),
     )
 
-def update_live_session_host(session_id: int, host_name: str):
-    """Memperbarui nama host di live_sessions saat terdeteksi dari welcome message."""
+def update_live_session_host(session_id: int, host_name: str, allow_closed: bool = False):
+    """Update the detected host for a live session.
+
+    By default only open sessions are updated (auto-detection during a live).
+    Pass ``allow_closed=True`` for manual/admin resolution of ended sessions
+    (host-detection "debt").
+    """
     if not session_id:
-        return
+        return False
     wib = pytz.timezone('Asia/Jakarta')
     now_str = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
     conn = get_db_connection()
     try:
-        conn.execute(
-            "UPDATE live_sessions SET scheduled_host = ?, last_seen_at = ? "
-            "WHERE session_id = ? AND end_time IS NULL",
+        where = "WHERE session_id = ?" + ("" if allow_closed else " AND end_time IS NULL")
+        cur = conn.execute(
+            "UPDATE live_sessions SET scheduled_host = ?, last_seen_at = ? " + where,
             (host_name, now_str, session_id),
         )
         conn.commit()
+        return (cur.rowcount or 0) > 0
     finally:
         conn.close()
 

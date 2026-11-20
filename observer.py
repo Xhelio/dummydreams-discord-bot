@@ -762,6 +762,18 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             nonlocal is_connected, current_session_id, probed_live
             runtime_status.clear_live(username_clean)
             probed_live = False
+            unresolved_host = (current_host in (None, "", "Host", "-"))
+            if unresolved_host:
+                print(f"[{username_clean}] Host debt: live ended with unresolved host (session {session_to_close}).")
+                try:
+                    await asyncio.to_thread(
+                        log_activity_event,
+                        "host_check",
+                        f"Host debt unresolved: session {session_to_close} ended without detected host on @{username_clean}. Resolve manually in Live Monitor if needed.",
+                        username_clean,
+                    )
+                except Exception:
+                    pass
             if session_to_close:
                 await asyncio.to_thread(end_live_session, session_to_close, end_time=disconnected_at)
             # Saat offline, bot Discord akan MENGHAPUS pesan pengumuman lewat sesi tersimpan.
@@ -772,7 +784,10 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 # Fallback only when no callback exists; this cannot delete Discord messages.
                 clear_active_live_status(username_clean)
                 print(f"[{username_clean}] No announcement callback; cleared announcement DB status only.")
-            print(f"[{username_clean}] Live confirmed offline after grace period.")
+            if unresolved_host:
+                print(f"[{username_clean}] Live confirmed offline after grace period (host debt unresolved).")
+            else:
+                print(f"[{username_clean}] Live confirmed offline after grace period.")
         except asyncio.CancelledError:
             # Reconnected within grace period
             pass
