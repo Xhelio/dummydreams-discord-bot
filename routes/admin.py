@@ -986,11 +986,11 @@ def view_monitor():
             <h2>📹 Live Session History</h2>
             {% if unresolved_count %}
             <div class="notice-warning" style="margin-bottom:10px;">
-                ⏳ <strong>Utang host: {{ unresolved_count }}</strong> sesi belum terdeteksi nama host-nya.
-                Bot akan terus mencoba saat koneksi LiveIntro tersedia; untuk sesi yang sudah lewat, pilih host di kolom <em>Resolve</em> untuk melunasi utang.
+                ⏳ <strong>Host pending: {{ unresolved_count }}</strong> sesi belum terdeteksi nama host-nya.
+                Bot akan terus mencoba saat koneksi LiveIntro tersedia; untuk sesi yang sudah lewat, pilih host di kolom <em>Resolve</em> untuk menyelesaikannya.
             </div>
             {% else %}
-            <div class="section-note">Host terdeteksi otomatis dari LiveIntro. Jika tidak tertangkap, sesi ditandai sebagai utang dan bisa di-resolve manual.</div>
+            <div class="section-note">Host terdeteksi otomatis dari LiveIntro. Jika tidak tertangkap, sesi ditandai sebagai pending dan bisa di-resolve manual.</div>
             {% endif %}
             <div class="table-scroll">
             <table>
@@ -1001,7 +1001,7 @@ def view_monitor():
                     <th>Duration</th>
                     <th>Coins</th>
                     <th>Detected Host</th>
-                    <th>Resolve (utang)</th>
+                    <th>Resolve (pending)</th>
                 </tr>
                 {% for s in sessions %}
                 <tr>
@@ -1030,7 +1030,7 @@ def view_monitor():
                         {% if s.scheduled_host and s.scheduled_host != '-' and s.scheduled_host != 'Host' %}
                             <a href="/admin/host/{{ s.scheduled_host }}" class="host-link" title="Click to view shift history">{{ s.scheduled_host }} ↗</a>
                         {% elif s.host_unresolved %}
-                            <span class="badge" style="background:#92400e; color:#fef3c7;">⏳ Utang (belum terdeteksi)</span>
+                            <span class="badge" style="background:#92400e; color:#fef3c7;">⏳ Pending (belum terdeteksi)</span>
                             {% if s.is_live_now %}<div class="field-help">Mencoba deteksi otomatis (LiveIntro)…</div>{% endif %}
                         {% else %}
                             <strong>{{ s.scheduled_host or '-' }}</strong>
@@ -1100,7 +1100,7 @@ def resolve_session_host():
         session_id = 0
     host_name = (request.form.get("host_name") or "").strip()
     if not session_id or not host_name or host_name in ("-", "Host"):
-        return redirect('/admin/monitor?msg=' + quote_plus('Pilih/isi nama host untuk melunasi utang sesi ini.') + '&msg_type=warning')
+        return redirect('/admin/monitor?msg=' + quote_plus('Pilih/isi nama host untuk menyelesaikan pending sesi ini.') + '&msg_type=warning')
 
     conn = get_db_connection()
     try:
@@ -1139,13 +1139,13 @@ def resolve_session_host():
     try:
         log_activity_event(
             "host_detected",
-            f"Host debt resolved manually: session {session_id} @{username} -> {host_name} (was: {row[2] or 'Host'}).",
+            f"Host pending resolved manually: session {session_id} @{username} -> {host_name} (was: {row[2] or 'Host'}).",
             username,
         )
     except Exception:
         pass
 
-    return redirect('/admin/monitor?msg=' + quote_plus(f'Utang host sesi #{session_id} dilunasi: {host_name}.') + '&msg_type=success')
+    return redirect('/admin/monitor?msg=' + quote_plus(f'Host pending sesi #{session_id} diselesaikan: {host_name}.') + '&msg_type=success')
 
 @admin_bp.route('/edit-coin', methods=['POST'])
 def edit_coin():
