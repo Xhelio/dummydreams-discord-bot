@@ -962,7 +962,7 @@ def view_monitor():
             </div>
             <div class="table-scroll">
             <table>
-                <tr><th>Account</th><th>Mode</th><th>Status</th><th>Limit / Percobaan (estimasi)</th><th>Last Live Intro (host detection source)</th><th>Last Error</th></tr>
+                <tr><th>Account</th><th>Mode</th><th>Status</th><th>Limit / Percobaan (estimasi)</th><th>Last Live Intro (host detection source)</th><th>Last Error</th><th>Action</th></tr>
                 {% for c in conn_states %}
                 <tr>
                     <td>@{{ c.username }}</td>
@@ -989,9 +989,15 @@ def view_monitor():
                         {% endif %}
                     </td>
                     <td style="max-width: 280px; white-space: normal; word-break: break-word; color: #94a3b8;">{{ c.last_error or '-' }}</td>
+                    <td>
+                        <form action="/admin/tiktok-reconnect" method="POST" class="inline-form" onsubmit="return confirm('Reconnect observer untuk @{{ c.username }} sekarang? (pakai kuota)');">
+                            <input type="hidden" name="username" value="{{ c.username }}">
+                            <button type="submit" class="btn-action" style="background:#7c3aed;" title="Reconnect akun ini">🔌 Reconnect</button>
+                        </form>
+                    </td>
                 </tr>
                 {% else %}
-                <tr><td colspan="6">No observer data yet.</td></tr>
+                <tr><td colspan="7">No observer data yet.</td></tr>
                 {% endfor %}
             </table>
             </div>
@@ -1036,9 +1042,15 @@ def view_monitor():
                         {% endif %}
                     </td>
                     <td>
-                        <form action="/admin/delete-host/{{ h.host_id }}" method="POST" class="inline-form" onsubmit="return confirm('Delete this target?');">
-                            <button type="submit" class="btn-action btn-del">Delete</button>
-                        </form>
+                        <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                            <form action="/admin/tiktok-reconnect" method="POST" class="inline-form" onsubmit="return confirm('Reconnect observer untuk @{{ h.username }} sekarang? (pakai kuota)');">
+                                <input type="hidden" name="username" value="{{ h.username }}">
+                                <button type="submit" class="btn-action" style="background:#7c3aed;" title="Reconnect akun ini">🔌 Reconnect</button>
+                            </form>
+                            <form action="/admin/delete-host/{{ h.host_id }}" method="POST" class="inline-form" onsubmit="return confirm('Delete this target?');">
+                                <button type="submit" class="btn-action btn-del">Delete</button>
+                            </form>
+                        </div>
                     </td>
                 </tr>
                 {% else %}
@@ -3402,12 +3414,19 @@ def reset_db():
 
 @admin_bp.route('/tiktok-reconnect', methods=['POST'])
 def tiktok_reconnect():
+    username = (request.form.get("username") or request.args.get("username") or "").strip().lower().lstrip("@")
     try:
-        targets = request_tiktok_reconnect()
+        if username:
+            targets = request_tiktok_reconnect(username)
+            msg = f"Reconnect diminta untuk @{username}."
+        else:
+            targets = request_tiktok_reconnect()
+            msg = "Reconnect observer diminta untuk semua akun target."
         print(f"[Admin] TikTok reconnect requested for: {targets}")
     except Exception as e:
         print(f"[Admin] Failed to request TikTok reconnect: {e}")
-    return redirect('/admin/monitor?msg=' + quote_plus('Reconnect observer diminta.') + '&msg_type=info')
+        msg = "Gagal meminta reconnect observer."
+    return redirect('/admin/monitor?msg=' + quote_plus(msg) + '&msg_type=info')
 
 
 @admin_bp.route('/reset-live-state', methods=['POST'])
