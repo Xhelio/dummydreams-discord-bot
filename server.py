@@ -174,11 +174,29 @@ def _reject_cross_origin_admin_mutations():
         return None
     try:
         src_host = (urlparse(source).hostname or "").lower()
-        req_host = (urlparse(request.host_url).hostname or request.host.split(":")[0] or "").lower()
+        allowed = set()
+        for cand in (
+            request.host,
+            request.headers.get("Host"),
+            request.headers.get("X-Forwarded-Host"),
+            urlparse(request.host_url).hostname,
+        ):
+            if not cand:
+                continue
+            # X-Forwarded-Host/Host may include port or be a comma-separated list.
+            for part in str(cand).split(","):
+                part = part.strip().lower()
+                if not part:
+                    continue
+                host_only = part.split(":", 1)[0]
+                if host_only:
+                    allowed.add(host_only)
+        if not src_host or not allowed:
+            return jsonify({"ok": False, "error": "Invalid request origin"}), 403
+        if src_host not in allowed:
+            return jsonify({"ok": False, "error": "Cross-origin request blocked"}), 403
     except Exception:
         return jsonify({"ok": False, "error": "Invalid request origin"}), 403
-    if not src_host or not req_host or src_host != req_host:
-        return jsonify({"ok": False, "error": "Cross-origin request blocked"}), 403
     return None
 
 
