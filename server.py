@@ -48,6 +48,13 @@ def _check_admin_auth(auth) -> bool:
     return user_ok and pass_ok
 
 
+if not _is_admin_auth_enabled():
+    log.warning(
+        "[Security] Admin panel has NO basic auth (ADMIN_USERNAME/ADMIN_PASSWORD not set). "
+        "Set both to protect /admin/* on public deployments."
+    )
+
+
 @app.before_request
 def _log_request_start():
     g.log_request_id = uuid.uuid4().hex[:12]
@@ -258,6 +265,7 @@ def health():
         "live_tracked": live_count,
         "boot_id": BOOT_ID,
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(BOOT_TS)),
+        "admin_auth": _is_admin_auth_enabled(),
     }), (200 if db_ok else 503)
 
 
@@ -281,6 +289,7 @@ def version_info():
         "pid": os.getpid(),
         "python": platform.python_version(),
         "executable": sys.executable,
+        "admin_auth": _is_admin_auth_enabled(),
     })
 
 

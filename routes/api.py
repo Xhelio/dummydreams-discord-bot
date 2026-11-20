@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify
 import os
 import json
+import hmac
 from db import check_database_health, get_bool_setting
 from runtime_status import get_bot_status, get_live_snapshot, get_observer_diag
 
@@ -41,12 +42,16 @@ def health_check():
     }
     return jsonify(payload), 200
 
+def _api_key_valid(secret_key: str) -> bool:
+    expected_key = os.environ.get("API_SECRET_KEY")
+    if not expected_key:
+        return True
+    return hmac.compare_digest(str(secret_key or ""), str(expected_key))
+
+
 @api_bp.route('/config', methods=['GET'])
 def get_bot_config():
-    secret_key = request.headers.get("X-API-KEY")
-    expected_key = os.environ.get("API_SECRET_KEY")
-
-    if expected_key and secret_key != expected_key:
+    if not _api_key_valid(request.headers.get("X-API-KEY")):
         return jsonify({"status": "error", "message": "Unauthorized"}), 401
 
     target_username = request.args.get("username", "").lower()
@@ -75,10 +80,7 @@ def get_bot_config():
 
 @api_bp.route('/heartbeat', methods=['POST'])
 def handle_heartbeat():
-    secret_key = request.headers.get("X-API-KEY")
-    expected_key = os.environ.get("API_SECRET_KEY")
-
-    if expected_key and secret_key != expected_key:
+    if not _api_key_valid(request.headers.get("X-API-KEY")):
         return jsonify({"status": "error", "message": "Unauthorized"}), 401
 
     data = request.get_json() or {}
@@ -89,10 +91,7 @@ def handle_heartbeat():
 @api_bp.route('/announcement', methods=['POST'])
 def trigger_announcement():
     data = request.get_json() or {}
-    secret_key = request.headers.get("X-API-KEY")
-    expected_key = os.environ.get("API_SECRET_KEY")
-
-    if expected_key and secret_key != expected_key:
+    if not _api_key_valid(request.headers.get("X-API-KEY")):
         return jsonify({"status": "error", "message": "Unauthorized"}), 401
 
     username = data.get("username")

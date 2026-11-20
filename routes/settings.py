@@ -711,7 +711,7 @@ def save_hosts_batch():
     return redirect("/admin/settings?msg=" + _url_q(f"Host changes saved (changed={changed}, deleted={deleted}).") + "&msg_type=success")
 
 
-@settings_bp.route("/toggle-host-priority/<int:host_id>", methods=["GET", "POST"])
+@settings_bp.route("/toggle-host-priority/<int:host_id>", methods=["POST"])
 def toggle_host_priority_route(host_id):
     # Kept for backward compatibility; settings UI now uses batch save.
     conn = get_db_connection()

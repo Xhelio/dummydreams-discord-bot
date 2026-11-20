@@ -933,7 +933,9 @@ def view_monitor():
                         {% endif %}
                     </td>
                     <td>
-                        <a href="/admin/delete-host/{{ h.host_id }}" class="btn-action btn-del" onclick="return confirm('Delete this target?')">Delete</a>
+                        <form action="/admin/delete-host/{{ h.host_id }}" method="POST" class="inline-form" onsubmit="return confirm('Delete this target?');">
+                            <button type="submit" class="btn-action btn-del">Delete</button>
+                        </form>
                     </td>
                 </tr>
                 {% else %}
@@ -1016,7 +1018,7 @@ def add_host():
     return redirect('/admin/monitor?msg=' + quote_plus('Host ditambahkan/diperbarui.') + '&msg_type=success')
 
 
-@admin_bp.route('/delete-host/<int:host_id>', methods=['GET', 'POST'])
+@admin_bp.route('/delete-host/<int:host_id>', methods=['POST'])
 def delete_host(host_id):
     conn = get_db_connection()
     conn.execute("DELETE FROM hosts WHERE host_id = ?", (host_id,))
@@ -4070,11 +4072,11 @@ def view_timeline():
                 render();
             }, { passive: false });
 
-            // init from server
-            modeSel.value = {{ mode_json|safe }};
-            dateInput.value = {{ date_json|safe }};
-            startInput.value = {{ start_json|safe }};
-            endInput.value = {{ end_json|safe }};
+            // init from server (|tojson avoids script-context breakout)
+            modeSel.value = {{ mode_json|tojson }};
+            dateInput.value = {{ date_json|tojson }};
+            startInput.value = {{ start_json|tojson }};
+            endInput.value = {{ end_json|tojson }};
             updateModeUI();
             load();
             // Keep "now" line accurate without refetching; recompute from server baseline.
@@ -4085,15 +4087,14 @@ def view_timeline():
     </html>
     """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML).replace("AUTO_REFRESH_JS_PLACEHOLDER", AUTO_REFRESH_JS)
 
-    import json as _json
     return render_template_string(
         html,
         date_str=date_str,
         start_str=start,
         end_str=end,
         _today=today,
-        mode_json=_json.dumps(mode),
-        date_json=_json.dumps(date_str),
-        start_json=_json.dumps(start),
-        end_json=_json.dumps(end),
+        mode_json=mode,
+        date_json=date_str,
+        start_json=start,
+        end_json=end,
     )
