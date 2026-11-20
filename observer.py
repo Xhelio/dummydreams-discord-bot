@@ -749,6 +749,10 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
 
     consecutive_failures = 0
     probed_live = False
+    # Consecutive cycles where live could not be confirmed by websocket or probe.
+    # Safety net so a stale "Live" badge cannot stay forever when the probe keeps
+    # failing (rate limits) and no DisconnectEvent arrived.
+    live_unconfirmed_cycles = 0
     attempts_total = 0
     attempts_since_success = 0
 
@@ -1432,16 +1436,29 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 or "never gone live" in err_lower
                 or "does not exist" in err_lower
             )
+            is_offline_error = (not is_rate_limited) and (
+                not is_unavailable
+                and ("offline" in err_lower or "useroffline" in err_lower or "not found" in err_lower)
+            )
             runtime_status.update_observer_diag(
                 username_clean,
                 status=(
                     "rate_limited" if is_rate_limited
-                    else ("unavailable" if is_unavailable else "error")
+                    else ("unavailable" if is_unavailable
+                          else ("offline" if is_offline_error else "error"))
                 ),
                 consecutive_failures=consecutive_failures,
                 last_error=err_detail[:300],
                 rate_limited=is_rate_limited,
             )
+            # Offline/not-live-capable is normal polling, not a failure streak.
+            if is_unavailable or is_offline_error:
+                runtime_status.update_observer_diag(
+                    username_clean,
+                    limit_progress={"used": 0, "next": 0, "label": ""},
+                    wait_seconds=0,
+                    retry_at=None,
+                )
             if is_rate_limited:
                 print(f"[{username_clean}] Websocket rate-limited (failures={consecutive_failures}): {err_detail}")
                 log_activity_event(
@@ -1599,21 +1616,23 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 if not (("rate_limit" in last_err) or ("too many connections" in last_err) or ("eulerstream" in last_err)):
                     consecutive_failures = 0
             elif probe_result is False and not grace_pending:
-                if probed_live:
-                    if current_session_id:
-                        # Probe bisa false sesaat (network hiccup). Jangan tutup
-                        # sesi langsung; pakai grace period yang sama seperti
-                        # DisconnectEvent, dan catat disconnect terakhir.
-                        schedule_disconnect(current_session_id)
-                        log_activity_event(
-                            "disconnect",
-                            f"Disconnected from @{username_clean}'s live (probe confirmed offline; "
-                            f"grace {LIVE_DISCONNECT_GRACE_SECONDS // 60}m started)",
-                            username_clean,
-                        )
-                    else:
-                        runtime_status.clear_live(username_clean)
-                    probed_live = False
+                # Probe confirmed offline. The live marker can come from the
+                # websocket/LiveIntro (probed_live stays False), so never gate
+                # this on the probe flag: that left a stale "Live" badge forever
+                # when DisconnectEvent was missed (e.g. UserOfflineError).
+                if current_session_id:
+                    # Keep session/announcement grace, but make the badge honest
+                    # immediately; a reconnect within grace restores it.
+                    schedule_disconnect(current_session_id)
+                    log_activity_event(
+                        "disconnect",
+                        f"Disconnected from @{username_clean}'s live (probe confirmed offline; "
+                        f"grace {LIVE_DISCONNECT_GRACE_SECONDS // 60}m started)",
+                        username_clean,
+                    )
+                runtime_status.clear_live(username_clean)
+                probed_live = False
+                live_unconfirmed_cycles = 0
                 if cycle_error is None:
                     runtime_status.update_observer_diag(
                         username_clean, status="offline", consecutive_failures=0, last_error=None,
@@ -1627,6 +1646,28 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             probe_result = False if connected_this_cycle else None
             _clear_rate_limit_state(username_clean)
             _LAST_OFFLINE_LOG.pop(username_clean, None)
+
+        # Safety net: when neither the websocket nor the probe confirms live and
+        # no grace timer is pending, a lingering live marker is stale (the probe
+        # may be failing/rate-limited). Drop it after a few cycles so the
+        # dashboard stops showing "Live" for an offline account.
+        if connected_this_cycle or probe_result is True or grace_pending:
+            live_unconfirmed_cycles = 0
+        elif probe_result is None:
+            live_unconfirmed_cycles += 1
+            if live_unconfirmed_cycles >= 3:
+                live_unconfirmed_cycles = 0
+                if username_clean in runtime_status.get_live_usernames():
+                    if current_session_id:
+                        schedule_disconnect(current_session_id)
+                    runtime_status.clear_live(username_clean)
+                    probed_live = False
+                    log_activity_event(
+                        "system",
+                        f"[Debug @{username_clean}] Live not confirmed for 3 cycles "
+                        f"(websocket/probe unavailable); cleared stale live marker.",
+                        username_clean,
+                    )
 
         # Adaptive retry: back off slightly on repeated failures, but keep checking.
         err_lower_cycle = str(cycle_error or "").lower()
@@ -1712,6 +1753,8 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             runtime_status.update_observer_diag(
                 username_clean, status="unavailable", wait_seconds=wait_seconds,
                 attempts_total=attempts_total, attempts_since_success=attempts_since_success,
+                consecutive_failures=consecutive_failures,
+                limit_progress={"used": 0, "next": 0, "label": ""},
             )
         elif probe_result is True and not connected_this_cycle:
             # Account is online (probe) but websocket event client not connected: retry to receive LiveIntroEvent.
@@ -1729,12 +1772,34 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 wait_seconds = max(wait_seconds, 60)
             if not connected_this_cycle and consecutive_failures >= 10:
                 wait_seconds = max(wait_seconds, 120)
-            prog = _limit_progress("retry", consecutive_failures, 0, False) if consecutive_failures > 0 else {"used": 0, "next": 0, "label": ""}
-            runtime_status.update_observer_diag(
-                username_clean, wait_seconds=wait_seconds,
-                attempts_total=attempts_total, attempts_since_success=attempts_since_success,
-                consecutive_failures=consecutive_failures, limit_progress=prog,
+            # "User is offline" is a normal polling state, not a failure streak:
+            # report it as offline with no limit estimate.
+            offline_cycle = (
+                "offline" in err_lower_cycle or "useroffline" in err_lower_cycle
+                or "not found" in err_lower_cycle
             )
+            if offline_cycle:
+                prog = {"used": 0, "next": 0, "label": ""}
+                diag_fields = {
+                    "status": "offline",
+                    "wait_seconds": wait_seconds,
+                    "attempts_total": attempts_total,
+                    "attempts_since_success": attempts_since_success,
+                    "consecutive_failures": consecutive_failures,
+                    "limit_progress": prog,
+                    "rate_limited": False,
+                    "retry_at": None,
+                }
+            else:
+                prog = _limit_progress("retry", consecutive_failures, 0, False) if consecutive_failures > 0 else {"used": 0, "next": 0, "label": ""}
+                diag_fields = {
+                    "wait_seconds": wait_seconds,
+                    "attempts_total": attempts_total,
+                    "attempts_since_success": attempts_since_success,
+                    "consecutive_failures": consecutive_failures,
+                    "limit_progress": prog,
+                }
+            runtime_status.update_observer_diag(username_clean, **diag_fields)
         # If reconnect was requested while waiting, skip delay.
         for _ in range(wait_seconds):
             with _RECONNECT_REQUESTED_LOCK:

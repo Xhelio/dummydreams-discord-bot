@@ -817,7 +817,9 @@ def view_monitor():
         # from a previous failed attempt (root cause of "10/10 gagal beruntun"
         # showing while a host name was already detected).
         connected_status = status in ("connected", "connected_with_handler_error", "reconnected")
-        healthy_status = connected_status or status in ("offline", "non_priority_off", "checking", "online_waiting_websocket")
+        healthy_status = connected_status or status in (
+            "offline", "unavailable", "non_priority_off", "checking", "online_waiting_websocket"
+        )
         rate_limited = (not healthy_status) and (
             bool(d.get("rate_limited"))
             or status.startswith("rate_limited")
@@ -841,6 +843,8 @@ def view_monitor():
             label = "🟡 Online (probe) — waiting websocket for LiveIntro"
         elif status in ("offline",):
             label = "⚪ Offline (polling)"
+        elif status == "unavailable":
+            label = "⚪ Offline (akun belum/tidak bisa live)"
         elif status in ("connected", "connected_with_handler_error"):
             label = "🟢 Connected (websocket)"
         elif status == "non_priority_off":
@@ -854,7 +858,7 @@ def view_monitor():
         limit_indicator = ""
         if lp_label:
             limit_indicator = f"Estimasi: {lp_label}"
-        elif attempts is not None and status not in ("connected", "connected_with_handler_error", "offline", "non_priority_off"):
+        elif attempts is not None and not healthy_status:
             try:
                 limit_indicator = f"Percobaan: {int(attempts)}"
             except Exception:
