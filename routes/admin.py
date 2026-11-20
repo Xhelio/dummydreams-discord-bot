@@ -3258,25 +3258,32 @@ def _timeline_today_wib() -> str:
 
 
 def _parse_date_arg(value, default):
+    raw = str(value or "")[:10].strip()
+    if not raw:
+        return default, False
     try:
-        return datetime.strptime(str(value or default)[:10], "%Y-%m-%d").strftime("%Y-%m-%d")
+        parsed = datetime.strptime(raw, "%Y-%m-%d").strftime("%Y-%m-%d")
+        return parsed, (parsed != raw)
     except Exception:
-        return default
+        return default, True
 
 
 @admin_bp.route('/timeline/data', methods=['GET'])
 def timeline_data():
     today = _timeline_today_wib()
-    mode = (request.args.get("mode") or "day").strip().lower()
-    if mode not in ("day", "week", "month", "custom"):
-        mode = "day"
-    date_str = _parse_date_arg(request.args.get("date"), today)
-    start = _parse_date_arg(request.args.get("start"), date_str)
-    end = _parse_date_arg(request.args.get("end"), start)
+    raw_mode = (request.args.get("mode") or "day").strip().lower()
+    mode = raw_mode if raw_mode in ("day", "week", "month", "custom") else "day"
+    mode_adjusted = raw_mode not in ("", "day", "week", "month", "custom")
+    date_str, date_adj = _parse_date_arg(request.args.get("date"), today)
+    start, start_adj = _parse_date_arg(request.args.get("start"), date_str)
+    end, end_adj = _parse_date_arg(request.args.get("end"), start)
     try:
         data = get_timeline_data(date_str=date_str, mode=mode, start=start, end=end)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    adjusted = bool(mode_adjusted or date_adj or start_adj or end_adj)
+    if isinstance(data, dict):
+        data["input_adjusted"] = adjusted
     return jsonify(data)
 
 
@@ -3286,9 +3293,9 @@ def view_timeline():
     mode = (request.args.get("mode") or "day").strip().lower()
     if mode not in ("day", "week", "month", "custom"):
         mode = "day"
-    date_str = _parse_date_arg(request.args.get("date"), today)
-    start = _parse_date_arg(request.args.get("start"), date_str)
-    end = _parse_date_arg(request.args.get("end"), start)
+    date_str, _ = _parse_date_arg(request.args.get("date"), today)
+    start, _ = _parse_date_arg(request.args.get("start"), date_str)
+    end, _ = _parse_date_arg(request.args.get("end"), start)
 
     html = r"""
     <!DOCTYPE html>

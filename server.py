@@ -1,5 +1,6 @@
 from flask import Flask, redirect, request, Response, jsonify, g, send_from_directory
 from threading import Thread
+from urllib.parse import urlparse
 from werkzeug.exceptions import HTTPException
 import logging
 import os
@@ -151,6 +152,33 @@ def _protect_admin_routes():
                 401,
                 {"WWW-Authenticate": 'Basic realm="Admin Panel"'},
             )
+    return None
+
+
+@app.before_request
+def _reject_cross_origin_admin_mutations():
+    """Defense-in-depth against CSRF on browser-based admin actions.
+
+    Rejects unsafe cross-site requests to /admin/* when an Origin/Referer header
+    is present and does not match this host. Requests without either header are
+    allowed (e.g. CLI/monitor probes) and still rely on admin auth when enabled.
+    """
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return None
+    path = request.path or ""
+    if not (path == "/admin" or path.startswith("/admin/")):
+        return None
+    origin = (request.headers.get("Origin") or "").strip()
+    source = origin or (request.headers.get("Referer") or "").strip()
+    if not source:
+        return None
+    try:
+        src_host = (urlparse(source).hostname or "").lower()
+        req_host = (urlparse(request.host_url).hostname or request.host.split(":")[0] or "").lower()
+    except Exception:
+        return jsonify({"ok": False, "error": "Invalid request origin"}), 403
+    if not src_host or not req_host or src_host != req_host:
+        return jsonify({"ok": False, "error": "Cross-origin request blocked"}), 403
     return None
 
 
