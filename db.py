@@ -286,8 +286,13 @@ def get_channel_display_name(tiktok_username: str) -> str:
         conn.close()
     return u_clean
 
-def sync_valid_hosts(conn=None):
-    """Ensure the 6 official target accounts exist without deleting custom hosts."""
+def sync_valid_hosts(conn=None, reactivate: bool = False):
+    """Ensure the 6 official target accounts exist without deleting custom hosts.
+
+    Existing rows are left alone unless ``reactivate=True`` (the manual
+    "Sync 6 Official Accounts" button). Startup must not re-enable hosts the
+    admin turned off, otherwise every deploy resets the host connection setup.
+    """
     own = conn is None
     if own:
         conn = get_db_connection()
@@ -299,10 +304,17 @@ def sync_valid_hosts(conn=None):
                 (uname,),
             ).fetchone()
             if row:
+                # Only fill an empty channel name; never overwrite an edited one.
                 cur.execute(
-                    "UPDATE hosts SET display_name = ?, is_active = 1 WHERE host_id = ?",
+                    "UPDATE hosts SET display_name = ? "
+                    "WHERE host_id = ? AND (display_name IS NULL OR TRIM(display_name) = '')",
                     (dname, row[0]),
                 )
+                if reactivate:
+                    cur.execute(
+                        "UPDATE hosts SET is_active = 1 WHERE host_id = ?",
+                        (row[0],),
+                    )
             else:
                 try:
                     cur.execute("""
@@ -2473,34 +2485,113 @@ def detect_host_from_welcome_message(text: str):
     host_name, _alias = detect_host_match_from_welcome_message(text)
     return host_name
 
-def get_current_host_for_account(tiktok_username: str) -> str:
+def live_host_detected_at(tiktok_username: str) -> str:
+    """Kapan host untuk akun ini terakhir terdeteksi (format WIB)."""
+    u_clean = tiktok_username.lower().lstrip("@")
+    return str(get_setting(f"current_host_at_{u_clean}") or "")
+
+
+def _parse_wib_ts(value):
+    try:
+        text = str(value or "")[:19]
+        if not text:
+            return None
+        return pytz.timezone('Asia/Jakarta').localize(
+            datetime.strptime(text, '%Y-%m-%d %H:%M:%S')
+        )
+    except Exception:
+        return None
+
+
+# A live session that has not heartbeated for this long is treated as gone.
+LIVE_HOST_STALE_AFTER_SECONDS = 900
+
+
+def host_belongs_to_current_live(tiktok_username: str) -> bool:
+    """True kalau host tersimpan dideteksi di sesi live yang masih berjalan.
+
+    ``current_host_<account>`` disimpan per akun, bukan per sesi, sehingga saat
+    live baru dimulai panel/scheduled_host bisa menampilkan host dari live
+    sebelumnya (mis. "Yosa" padahal yang live "Windy"). Host hanya dianggap
+    valid kalau deteksinya terjadi setelah sesi terbuka dimulai dan sesi itu
+    masih mengirim heartbeat.
+    """
+    u_clean = tiktok_username.lower().lstrip("@")
+    detected = _parse_wib_ts(live_host_detected_at(u_clean))
+    if not detected:
+        return False
+    conn = get_db_connection()
+    try:
+        row = conn.execute("""
+            SELECT start_time, last_seen_at FROM live_sessions
+            WHERE tiktok_username = ? AND end_time IS NULL
+            ORDER BY session_id DESC LIMIT 1
+        """, (u_clean,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return False
+    started = _parse_wib_ts(row[0])
+    if not started or detected < started:
+        return False
+    heartbeat = _parse_wib_ts(row[1]) or started
+    now = datetime.now(pytz.timezone('Asia/Jakarta'))
+    return (now - heartbeat).total_seconds() <= LIVE_HOST_STALE_AFTER_SECONDS
+
+
+def get_current_host_for_account(tiktok_username: str, fresh_only: bool = False) -> str:
     """Mengambil nama host live yang sedang/terakhir terdeteksi untuk akun TikTok ini.
 
     Jangan fallback ke hosts.display_name karena itu nama channel/akun, bukan host live terdeteksi.
+
+    ``fresh_only`` dipakai saat memulai/menyambung live: host dari live sebelumnya
+    diabaikan supaya panel menampilkan "Host" (belum terdeteksi) alih-alih nama
+    host yang salah sampai LiveIntro untuk live baru diterima.
     """
     u_clean = tiktok_username.lower().lstrip("@")
     val = get_setting(f"current_host_{u_clean}")
     if val and val != "Host":
-        return val
+        if not fresh_only or host_belongs_to_current_live(u_clean):
+            return val
+        return "Host"
 
     conn = get_db_connection()
     try:
         cur = conn.cursor()
         row = cur.execute("""
-            SELECT scheduled_host FROM live_sessions 
+            SELECT scheduled_host, start_time, last_seen_at FROM live_sessions 
             WHERE tiktok_username = ? AND end_time IS NULL 
             ORDER BY session_id DESC LIMIT 1
         """, (u_clean,)).fetchone()
         if row and row[0] and row[0] != "Host":
-            return row[0]
+            if not fresh_only:
+                return row[0]
+            started = _parse_wib_ts(row[1])
+            heartbeat = _parse_wib_ts(row[2]) or started
+            now = datetime.now(pytz.timezone('Asia/Jakarta'))
+            if started and (now - heartbeat).total_seconds() <= LIVE_HOST_STALE_AFTER_SECONDS:
+                return row[0]
     finally:
         conn.close()
     return "Host"
 
 def set_current_host_for_account(tiktok_username: str, host_name: str):
-    """Menyimpan nama host yang terdeteksi untuk akun TikTok ini."""
+    """Menyimpan nama host yang terdeteksi untuk akun TikTok ini (beserta waktunya)."""
     u_clean = tiktok_username.lower().lstrip("@")
     set_setting(f"current_host_{u_clean}", host_name)
+    wib = pytz.timezone('Asia/Jakarta')
+    set_setting(f"current_host_at_{u_clean}", datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S'))
+
+
+def touch_current_host_detection(tiktok_username: str):
+    """Perbarui waktu deteksi host tanpa mengubah namanya (LiveIntro berulang)."""
+    if not str(get_setting(f"current_host_{tiktok_username.lower().lstrip('@')}") or ""):
+        return
+    wib = pytz.timezone('Asia/Jakarta')
+    set_setting(
+        f"current_host_at_{tiktok_username.lower().lstrip('@')}",
+        datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S'),
+    )
 
 def update_live_session_host(session_id: int, host_name: str):
     """Memperbarui nama host di live_sessions saat terdeteksi dari welcome message."""
@@ -2605,7 +2696,7 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
     now_str = now_dt.strftime('%Y-%m-%d %H:%M:%S')
     user_clean = tiktok_username.lower().lstrip("@")
     explicit_host = initial_host is not None
-    current_host = initial_host if explicit_host else get_current_host_for_account(user_clean)
+    current_host = initial_host if explicit_host else get_current_host_for_account(user_clean, fresh_only=True)
 
     conn = get_db_connection()
     try:

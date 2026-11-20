@@ -102,7 +102,15 @@ button:disabled, .btn:disabled { opacity: 0.55; cursor: not-allowed; transform: 
 .inline-form { display: inline-block; margin: 0; }
 .btn-save { width: 100%; padding: 13px 16px; font-size: 0.98rem; background: #15803d; border-radius: 10px; margin-bottom: 18px; }
 .btn-save:hover { background: #166534; }
-.table-scroll { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: 8px; }
+.table-scroll { width: 100%; max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: 8px; overscroll-behavior-x: contain; }
+/* Always-visible scrollbars: desktop Chrome/Android can hide overlay bars,
+   which makes wide tables look unscrollable. */
+html { scrollbar-color: #475569 #0b1220; scrollbar-width: thin; }
+html::-webkit-scrollbar, body::-webkit-scrollbar, .table-scroll::-webkit-scrollbar, .terminal-container::-webkit-scrollbar { width: 11px; height: 11px; }
+html::-webkit-scrollbar-track, body::-webkit-scrollbar-track, .table-scroll::-webkit-scrollbar-track, .terminal-container::-webkit-scrollbar-track { background: #0b1220; }
+html::-webkit-scrollbar-thumb, body::-webkit-scrollbar-thumb, .table-scroll::-webkit-scrollbar-thumb, .terminal-container::-webkit-scrollbar-thumb { background: #475569; border-radius: 8px; border: 2px solid #0b1220; }
+html::-webkit-scrollbar-thumb:hover, body::-webkit-scrollbar-thumb:hover, .table-scroll::-webkit-scrollbar-thumb:hover, .terminal-container::-webkit-scrollbar-thumb:hover { background: #64748b; }
+.table-scroll { scrollbar-width: thin; scrollbar-color: #475569 #0b1220; }
 .tt-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; justify-content: flex-end; margin: 0 0 8px; font-size: 0.78rem; color: #94a3b8; }
 .tt-bar .tt-count { margin-right: auto; color: #94a3b8; }
 .tt-bar .tt-pager { display: inline-flex; align-items: center; gap: 6px; }
@@ -333,7 +341,9 @@ AUTO_REFRESH_JS = r"""
                 const names = Object.keys(accounts);
                 const liveHosts = names.map(u => {
                     const info = accounts[u] || {};
-                    return info.host || u || 'Host';
+                    // Show the account when the host is not detected yet instead
+                    // of an empty/"Host" label.
+                    return (info.host && info.host !== 'Host') ? info.host : ('@' + u);
                 });
                 const uniqueHosts = [...new Set(liveHosts.filter(Boolean))];
                 const liveText = uniqueHosts.length ? ('Live: ' + uniqueHosts.join(', ')) : 'Live: none';
@@ -374,12 +384,15 @@ AUTO_REFRESH_JS = r"""
                 const currentCards = document.querySelectorAll('.card');
                 const newCards = doc.querySelectorAll('.card');
 
+                const hasControls = (el) => !!(el && el.querySelector('input, select, textarea, button'));
                 currentCards.forEach((card, index) => {
                     if (!newCards[index]) return;
-                    if (card.querySelector('form')) return; // don't replace cards containing forms
                     const currentTable = card.querySelector('table');
                     const newTable = newCards[index].querySelector('table');
-                    if (currentTable && newTable) {
+                    // Refresh tables even inside cards that contain forms (e.g. the
+                    // Live Monitor target list, whose buttons sit above the table),
+                    // but never tables with form controls so unsaved edits survive.
+                    if (currentTable && newTable && !hasControls(currentTable)) {
                         currentTable.innerHTML = newTable.innerHTML;
                     }
                     const currentTerminal = card.querySelector('.terminal-container');

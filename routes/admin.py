@@ -920,7 +920,11 @@ def view_monitor():
                     <td>{{ h.host_id }}</td>
                     <td>@{{ h.username }}</td>
                     <td>{{ h.display_name }}</td>
-                    <td><strong>{{ h.host_name }}</strong></td>
+                    <td><strong>{{ h.host_name }}</strong>
+                        {% if h.is_live and h.host_name == '-' %}
+                        <div class="field-help">Waiting for LiveIntro…</div>
+                        {% endif %}
+                    </td>
                     <td>
                         {% if h.is_live %}
                         <a href="https://www.tiktok.com/@{{ h.username }}/live" target="_blank" class="badge badge-active" title="Click to watch the live">🔴 Live Now ↗</a>
@@ -1062,7 +1066,8 @@ def edit_coin():
 
 @admin_bp.route('/sync-hosts', methods=['POST'])
 def sync_hosts_action():
-    sync_valid_hosts()
+    # The explicit button re-enables the official accounts; startup sync does not.
+    sync_valid_hosts(reactivate=True)
     return redirect('/admin/monitor?msg=' + quote_plus('Host sync complete.') + '&msg_type=success')
 
 @admin_bp.route('/activity', methods=['GET'])
