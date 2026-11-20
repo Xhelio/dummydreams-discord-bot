@@ -2012,7 +2012,7 @@ def view_analytics():
                         <button type="submit" class="btn-save" style="background:#0e7490;">Apply Filter</button>
                     </label>
                 </div>
-                <p class="muted" style="font-size:0.76rem; margin-top:8px;">"Custom" uses the From/To dates <span class="info-i" data-tip="Viewer filter applies to viewer spending analysis and its charts.">!</span></p>
+                <p class="muted" style="font-size:0.76rem; margin-top:8px;">"Custom" uses the From/To dates. "Hour of day (avg)" shows per-clock-hour averages (00–23) across the selected days as a dashed line. <span class="info-i" data-tip="Viewer filter applies to viewer spending analysis and its charts.">!</span></p>
             </form>
         </div>
 
@@ -2441,7 +2441,9 @@ def view_analytics():
             }
             if (unit) parts.push('<text x="' + (pad.l - 8) + '" y="' + (pad.t - 6) + '" text-anchor="end" fill="#94a3b8" font-size="9" font-style="italic">' + escHtml(unit) + '</text>');
 
-            if (type === 'bar') {
+            var dashedProfile = (GROUP_BY === 'hour_of_day');
+            var drawType = dashedProfile ? 'line' : type;
+            if (drawType === 'bar') {
                 var bw = Math.max(2, Math.min(44, slot * 0.62));
                 for (var i = 0; i < n; i++) {
                     var bh = ph * ((values[i] || 0) / top);
@@ -2452,11 +2454,12 @@ def view_analytics():
             } else {
                 var pts = [];
                 for (var j = 0; j < n; j++) pts.push([xOf(j), yOf(values[j] || 0)]);
-                if (type === 'area') {
+                if (drawType === 'area') {
                     var area = 'M' + pts[0][0] + ',' + (pad.t + ph) + ' L' + pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' L') + ' L' + pts[n - 1][0] + ',' + (pad.t + ph) + ' Z';
                     parts.push('<path d="' + area + '" fill="url(#' + gradId + ')" stroke="none"/>');
                 }
-                parts.push('<polyline fill="none" stroke="#38bdf8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" points="' + pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' ') + '"/>');
+                var dashAttr = dashedProfile ? ' stroke-dasharray="7 5"' : '';
+                parts.push('<polyline fill="none" stroke="#38bdf8" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"' + dashAttr + ' points="' + pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' ') + '"/>');
                 for (var k = 0; k < n; k++) {
                     parts.push('<circle cx="' + pts[k][0] + '" cy="' + pts[k][1] + '" r="3.2" fill="#0b1220" stroke="#38bdf8" stroke-width="2"><title>' + escHtml(labels[k]) + ': ' + fmtNum(values[k]) + '</title></circle>');
                 }
@@ -2606,6 +2609,8 @@ def view_analytics():
             }
             if (unit) parts.push('<text x="' + (pad.l - 8) + '" y="' + (pad.t - 6) + '" text-anchor="end" fill="#94a3b8" font-size="9" font-style="italic">' + escHtml(unit) + '</text>');
 
+            var dashedProfile = (GROUP_BY === 'hour_of_day');
+            var hostDashAttr = dashedProfile ? ' stroke-dasharray="7 5"' : '';
             for (var s = 0; s < hosts.length; s++) {
                 var item = hosts[s];
                 var series = item.host;
@@ -2613,7 +2618,7 @@ def view_analytics():
                 var valsS = hostEngValues(series, metric);
                 var pts = [];
                 for (var j = 0; j < n; j++) pts.push([xOf(j), yOf(valsS[j] || 0)]);
-                parts.push('<polyline fill="none" stroke="' + color + '" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" points="' + pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' ') + '"/>');
+                parts.push('<polyline fill="none" stroke="' + color + '" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"' + hostDashAttr + ' points="' + pts.map(function (p) { return p[0] + ',' + p[1]; }).join(' ') + '"/>');
                 for (var k = 0; k < n; k++) {
                     parts.push('<circle cx="' + pts[k][0] + '" cy="' + pts[k][1] + '" r="3" fill="#0b1220" stroke="' + color + '" stroke-width="2"><title>' + escHtml(series.name) + ' · ' + escHtml(labels[k]) + ': ' + fmtNum(valsS[k] || 0) + ' ' + escHtml(metricLabel.toLowerCase()) + '</title></circle>');
                 }
@@ -2659,7 +2664,11 @@ def view_analytics():
 
             function drawMain() { renderChart('chart-svg', mainMetric, mainType); }
             if (metricSelect) { metricSelect.value = mainMetric; metricSelect.addEventListener('change', function () { mainMetric = this.value; drawMain(); }); }
-            if (typeSelect) { typeSelect.value = mainType; typeSelect.addEventListener('change', function () { mainType = this.value; drawMain(); }); }
+            if (typeSelect) {
+                if (GROUP_BY === 'hour_of_day') { mainType = 'line'; typeSelect.value = 'line'; typeSelect.disabled = true; typeSelect.title = 'Hour-of-day average is shown as a dashed line.'; }
+                else { typeSelect.value = mainType; }
+                typeSelect.addEventListener('change', function () { mainType = this.value; drawMain(); });
+            }
 
             function drawFreq() {
                 var charts = document.querySelectorAll('.freq-chart');
