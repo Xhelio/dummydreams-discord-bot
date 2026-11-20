@@ -1443,13 +1443,19 @@ def view_analytics():
             return 0
 
     top_gift_items = []
-    for name, unit_coins, item_count, total_coins, transactions in top_gift_items_raw:
+    for row in top_gift_items_raw:
+        try:
+            name, unit_coins, item_count, total_coins, transactions, top_sender = row
+        except Exception:
+            name, unit_coins, item_count, total_coins, transactions = row[:5]
+            top_sender = '-'
         top_gift_items.append({
             'name': name or 'Unknown',
             'unit_coins': _coin_value(unit_coins, total_coins, item_count),
             'count': int(item_count or 0),
             'coins': int(total_coins or 0),
             'events': int(transactions or 0),
+            'sender': (top_sender or '-'),
         })
 
     total_coins = summary.get('coins', 0) or 0
@@ -1994,11 +2000,11 @@ def view_analytics():
         <div class="card">
             <div class="card-header">
                 <h2>🎁 Top Gift Objects (Spent)</h2>
-                <span class="info-i" data-tip="Gift objects ranked by total coins in this range.">!</span>
+                <span class="info-i" data-tip="Gift objects ranked by total coins in this range. Sender = top sender for that object.">!</span>
             </div>
             <div class="table-scroll analytics-scroll">
                 <table>
-                    <tr><th>#</th><th>Object</th><th>Coin value</th><th>Count</th><th>Total coins</th></tr>
+                    <tr><th>#</th><th>Object</th><th>Coin value</th><th>Count</th><th>Total coins</th><th>Top sender</th></tr>
                     {% for g in top_gift_items %}
                     <tr>
                         <td>{{ loop.index }}</td>
@@ -2006,9 +2012,10 @@ def view_analytics():
                         <td><span class="badge" style="background:#ca8a04;">{{ g.unit_coins }} c</span></td>
                         <td>{{ g.count }}</td>
                         <td><span class="badge" style="background:#0e7490;">{{ g.coins }} c</span></td>
+                        <td>{{ g.sender }}</td>
                     </tr>
                     {% else %}
-                    <tr><td colspan="5" class="muted">No gift object data in this range.</td></tr>
+                    <tr><td colspan="6" class="muted">No gift object data in this range.</td></tr>
                     {% endfor %}
                 </table>
             </div>
