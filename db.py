@@ -2696,6 +2696,23 @@ def get_scheduled_host_name(tiktok_username: str, dt_obj: datetime = None) -> st
 LIVE_RESUME_GRACE_SECONDS = 600
 
 
+def get_open_live_session_id(tiktok_username: str):
+    """Return the latest open live session id for an account, or None."""
+    user_clean = (tiktok_username or "").lower().lstrip("@")
+    if not user_clean:
+        return None
+    conn = get_db_connection()
+    try:
+        row = conn.execute(
+            "SELECT session_id FROM live_sessions WHERE tiktok_username = ? AND end_time IS NULL "
+            "ORDER BY session_id DESC LIMIT 1",
+            (user_clean,),
+        ).fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+    finally:
+        conn.close()
+
+
 def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
     wib = pytz.timezone('Asia/Jakarta')
     now_dt = datetime.now(wib)

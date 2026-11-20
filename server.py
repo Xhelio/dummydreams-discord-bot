@@ -1,4 +1,4 @@
-from flask import Flask, redirect, request, Response, jsonify, g, send_from_directory
+from flask import Flask, redirect, request, Response, jsonify, g, send_from_directory, session
 from threading import Thread
 from urllib.parse import urlparse
 from werkzeug.exceptions import HTTPException
@@ -7,6 +7,7 @@ import os
 import hmac
 import time
 import uuid
+import secrets
 from routes.admin import admin_bp
 from routes.api import api_bp, set_announcement_handler
 from routes.settings import settings_bp
@@ -15,6 +16,23 @@ import log_setup
 app = Flask(__name__)
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
 log = log_setup.get_logger("bot.web")
+
+# Secret key is required for signed sessions and CSRF tokens.
+# Prefer an explicit SECRET_KEY; fall back to API_SECRET_KEY for continuity.
+_secret_key = (os.environ.get("SECRET_KEY") or os.environ.get("API_SECRET_KEY") or "").strip()
+if _secret_key:
+    app.secret_key = _secret_key
+else:
+    app.secret_key = secrets.token_hex(32)
+    log.warning(
+        "[Security] SECRET_KEY/API_SECRET_KEY not set; using ephemeral secret key. "
+        "CSRF/session tokens will be invalidated on restart."
+    )
+app.config.setdefault("SESSION_COOKIE_HTTPONLY", True)
+app.config.setdefault("SESSION_COOKIE_SAMESITE", "Lax")
+# Secure cookie in production when behind HTTPS/proxy; still works on local HTTP.
+if (os.environ.get("BOT_ENV") or "").strip().lower() in ("stable", "prod", "production", "live"):
+    app.config.setdefault("SESSION_COOKIE_SECURE", True)
 
 # Identifies the running process, so a redeploy can be told apart from a restart
 # (and a stale deploy can be told apart from a crashed one) without server logs.
@@ -227,6 +245,57 @@ def _reject_cross_origin_admin_mutations():
     except Exception:
         # Fail open on validation errors to avoid breaking legitimate admin use.
         return None
+    return None
+
+
+def _get_csrf_token() -> str:
+    token = session.get("_csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["_csrf_token"] = token
+    return token
+
+
+def _is_valid_csrf_token(token: str) -> bool:
+    expected = session.get("_csrf_token")
+    if not expected or not token:
+        return False
+    try:
+        return hmac.compare_digest(str(expected), str(token))
+    except Exception:
+        return False
+
+
+@app.context_processor
+def _inject_csrf_token():
+    # Lazily create/read session token so templates can render {{ csrf_token }}.
+    return {"csrf_token": lambda: _get_csrf_token()}
+
+
+@app.before_request
+def _validate_csrf_admin_mutations():
+    """Require a valid CSRF token for state-changing admin actions."""
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return None
+    path = request.path or ""
+    if not (path == "/admin" or path.startswith("/admin/")):
+        return None
+
+    # Accept token from form field or explicit header (for future JS POSTs).
+    supplied = (request.form.get("csrf_token") or "").strip()
+    if not supplied:
+        supplied = (request.headers.get("X-CSRF-Token") or request.headers.get("X-CSRFToken") or "").strip()
+
+    if not _is_valid_csrf_token(supplied):
+        wants_json = (
+            request.is_json
+            or "application/json" in (request.headers.get("Accept") or "")
+            or request.headers.get("X-Requested-With") == "XMLHttpRequest"
+        )
+        if wants_json:
+            return jsonify({"ok": False, "error": "Invalid or missing CSRF token"}), 403
+        return Response("Invalid or missing CSRF token.", 403, mimetype="text/plain")
+
     return None
 
 

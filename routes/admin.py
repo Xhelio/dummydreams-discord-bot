@@ -168,12 +168,15 @@ def view_data():
             </div>
             {% endif %}
             <form action="/admin/gift-log-selftest" method="POST" style="display:inline-block; margin-top: 12px; margin-right: 8px;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button type="submit" class="btn-action" style="background:#7c3aed;">🧪 Test Gift Log Write</button>
             </form>
             <form action="/admin/backfill-gift-logs" method="POST" onsubmit="return confirm('Fill historical gift log from daily data and stored starting balances? Generated rows are marked Backfill and will not overwrite original details.');" style="display:inline-block; margin-top: 12px; margin-right: 8px;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button type="submit" class="btn-action" style="background:#b45309;">🧩 Backfill Gift Log</button>
             </form>
             <form action="/admin/recalculate-coins" method="POST" onsubmit="return confirm('Recalculate ALL coin totals from the gift log? Manual totals without logs will be lost.');" style="display:inline-block; margin-top: 12px;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button type="submit" class="btn-save" style="background:#0e7490;">🔄 Recalculate Coin Totals</button>
             </form>
             {% endif %}
@@ -182,6 +185,7 @@ def view_data():
         <div class="card" style="border-color: #ef4444;">
             <h2 style="color: #ef4444;">⚠️ Danger Zone</h2>
             <form action="/admin/reset-db" method="POST" onsubmit="return confirm('DELETE ALL GIFT AND LIVE SESSION DATA?')">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button type="submit" class="btn-danger">🔥 Reset Gift & Live Session Data</button>
             </form>
         </div>
@@ -504,6 +508,7 @@ def view_viewers():
                     </td>
                     <td>
                         <form action="/admin/edit-coin" method="POST" class="edit-form">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                             <input type="hidden" name="tiktok_user" value="{{ v[0] }}">
                             <input type="number" name="new_coins" value="{{ v[2] }}" required>
                             <button type="submit" class="icon-btn" title="Save" aria-label="Save">💾</button>
@@ -991,6 +996,7 @@ def view_monitor():
                     <td style="max-width: 280px; white-space: normal; word-break: break-word; color: #94a3b8;">{{ c.last_error or '-' }}</td>
                     <td>
                         <form action="/admin/tiktok-reconnect" method="POST" class="inline-form" onsubmit="return confirm('Reconnect observer untuk @{{ c.username }} sekarang? (pakai kuota)');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                             <input type="hidden" name="username" value="{{ c.username }}">
                             <button type="submit" class="btn-action" style="background:#7c3aed;" title="Reconnect akun ini">🔌 Reconnect</button>
                         </form>
@@ -1007,16 +1013,20 @@ def view_monitor():
             <h2>🎙️ TikTok Target Accounts</h2>
             <div style="display: flex; gap: 10px; margin-bottom: 12px; flex-wrap: wrap;">
                 <form action="/admin/sync-hosts" method="POST" onsubmit="return confirm('Reorganize and sync the 6 official target accounts with IDs 1-6?');" style="margin: 0;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <button type="submit" style="background: #15803d; padding: 8px 14px;">🔄 Sync 6 Official Accounts (IDs 1-6)</button>
                 </form>
                 <form action="/admin/tiktok-reconnect" method="POST" onsubmit="return confirm('Disconnect and reconnect TikTok livestream observers now?');" style="margin: 0;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <button type="submit" style="background: #7c3aed; padding: 8px 14px;">🔌 Refresh TikTok Connection</button>
                 </form>
                 <form action="/admin/reset-live-state" method="POST" onsubmit="return confirm('Clear live sessions/announcements/host state and activity logs, then reconnect observers from scratch? Gift totals are not deleted.');" style="margin: 0;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <button type="submit" style="background: #b45309; padding: 8px 14px;">🧹 Reset Live State & Reconnect</button>
                 </form>
             </div>
             <form action="/admin/add-host" method="POST" class="form-grid" style="grid-template-columns: 1fr auto;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="text" name="tiktok_username" placeholder="TikTok username (@...) — channel name is fetched automatically" required>
                 <button type="submit">+ Add Target Host</button>
             </form>
@@ -1044,10 +1054,12 @@ def view_monitor():
                     <td>
                         <div style="display:flex; gap:6px; flex-wrap:wrap;">
                             <form action="/admin/tiktok-reconnect" method="POST" class="inline-form" onsubmit="return confirm('Reconnect observer untuk @{{ h.username }} sekarang? (pakai kuota)');">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                                 <input type="hidden" name="username" value="{{ h.username }}">
                                 <button type="submit" class="btn-action" style="background:#7c3aed;" title="Reconnect akun ini">🔌 Reconnect</button>
                             </form>
                             <form action="/admin/delete-host/{{ h.host_id }}" method="POST" class="inline-form" onsubmit="return confirm('Delete this target?');">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                                 <button type="submit" class="btn-action btn-del">Delete</button>
                             </form>
                         </div>
@@ -1117,6 +1129,7 @@ def view_monitor():
                     <td>
                         {% if s.host_unresolved %}
                         <form action="/admin/resolve-session-host" method="POST" class="edit-form" style="gap:4px;">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                             <input type="hidden" name="session_id" value="{{ s.session_id }}">
                             <input type="text" name="host_name" list="host-options-{{ s.session_id }}" placeholder="Nama host" style="min-width:110px; max-width:150px;">
                             <datalist id="host-options-{{ s.session_id }}">
@@ -1308,6 +1321,7 @@ def view_activity():
             <h1>📊 Realtime Activity Log</h1>
             <div style="display: flex; gap: 10px; align-items: center;">
                 <form action="/admin/clear-activity-logs" method="POST" onsubmit="return confirm('Clear the entire activity log?');" style="margin: 0;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <button type="submit" class="btn-danger" style="padding: 6px 12px; font-size: 0.8rem;">🗑️ Clear Log</button>
                 </form>
             </div>
@@ -3029,9 +3043,11 @@ def view_verifications():
                 <span class="info-i" data-tip="Role Status checks Discord directly. Method shows how the role was obtained, Note holds the detail (coins, bio code, live message), and Verified At is when the role was granted.">!</span>
             </p>
             <form action="/admin/reverify-all" method="POST" onsubmit="return confirm('Re-verify roles for all verified accounts?');" style="margin-bottom: 12px; display:inline-block; margin-right:8px;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button type="submit" class="btn-save" style="background:#0e7490;">🔁 Re-verify All</button>
             </form>
             <form action="/admin/grant-role-all" method="POST" onsubmit="return confirm('Grant the verified role to all verified accounts that are missing it?');" style="margin-bottom: 12px; display:inline-block;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button type="submit" class="btn-save" style="background:#15803d;">🛡️ Grant Role to All</button>
             </form>
             <div class="table-scroll">
@@ -3104,15 +3120,19 @@ def view_verifications():
                     </td>
                     <td>
                         <form action="/admin/reverify-user/{{ u[0] }}" method="POST" style="display:inline;">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                             <button type="submit" class="btn-action" style="background:#0e7490;">🔁 Re-verify</button>
                         </form>
                         <form action="/admin/grant-role/{{ u[0] }}" method="POST" style="display:inline;" onsubmit="return confirm('Grant the verified role to Discord ID {{ u[0] }}?');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                             <button type="submit" class="btn-action" style="background:#15803d; margin-left: 6px;">🛡️ Grant Role</button>
                         </form>
                         <form action="/admin/revoke-role/{{ u[0] }}" method="POST" onsubmit="return confirm('Revoke the verified + tier roles for Discord ID {{ u[0] }}? The TikTok link is kept.');" style="display:inline; margin-left: 6px;">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                             <button type="submit" class="btn-action btn-del">🚫 Revoke Role</button>
                         </form>
                         <form action="/admin/unclaim-user/{{ u[0] }}" method="POST" onsubmit="return confirm('Remove the account link and revoke the verified + tier roles for Discord ID {{ u[0] }}?');" style="display:inline; margin-left: 6px;">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                             <button type="submit" class="btn-action btn-del">Unclaim</button>
                         </form>
                     </td>

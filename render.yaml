@@ -52,6 +52,10 @@ services:
         sync: false
       - key: API_SECRET_KEY
         sync: false
+      - key: SECRET_KEY
+        sync: false
+      - key: EULER_WEBHOOK_SECRET
+        sync: false
       - key: LOG_ERROR_CHANNEL_ID
         value: "1572123726839947305"
 
@@ -88,6 +92,10 @@ services:
       - key: VERIFIED_ROLE_ID
         sync: false
       - key: API_SECRET_KEY
+        sync: false
+      - key: SECRET_KEY
+        sync: false
+      - key: EULER_WEBHOOK_SECRET
         sync: false
       - key: LOG_ERROR_CHANNEL_ID
         value: "1572123726839947305"

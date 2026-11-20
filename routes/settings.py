@@ -141,6 +141,7 @@ def view_settings():
         {# Flash messages are rendered by NAV_HTML from ?msg= to avoid duplicates. #}
 
         <form action="/admin/settings/save" method="POST">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div class="card">
                 <h2>🎛️ Feature Controls</h2>
                 <div class="switch-row master-row">
@@ -314,6 +315,7 @@ def view_settings():
             <h2>🏅 Reset Tier List</h2>
             <p class="muted">Roles in this list are granted by coin amount and revoked by the scheduled reset.</p>
             <form action="/admin/settings/tier/add" method="POST" class="form-grid tier-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="group_key" value="reset">
                 <input type="text" name="role_id" placeholder="Role ID" required inputmode="numeric">
                 <input type="number" name="min_coins" placeholder="Minimum coins" min="0" required>
@@ -329,6 +331,7 @@ def view_settings():
                         <td><span class="badge" style="background:#ca8a04;">{{ t.min_coins }} c</span></td>
                         <td>
                             <form action="/admin/settings/tier/delete/{{ t.id }}" method="POST" class="inline-form" onsubmit="return confirm('Delete {{ t.tier_name }}?');">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                                 <button type="submit" class="btn-action btn-del">Delete</button>
                             </form>
                         </td>
@@ -344,6 +347,7 @@ def view_settings():
             <h2>♾️ All-the-Time Tier List</h2>
             <p class="muted">These roles use the same coin rules but are never removed by a reset.</p>
             <form action="/admin/settings/tier/add" method="POST" class="form-grid tier-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="group_key" value="permanent">
                 <input type="text" name="role_id" placeholder="Role ID" required inputmode="numeric">
                 <input type="number" name="min_coins" placeholder="Minimum coins" min="0" required>
@@ -359,6 +363,7 @@ def view_settings():
                         <td><span class="badge" style="background:#15803d;">{{ t.min_coins }} c</span></td>
                         <td>
                             <form action="/admin/settings/tier/delete/{{ t.id }}" method="POST" class="inline-form" onsubmit="return confirm('Delete {{ t.tier_name }}?');">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                                 <button type="submit" class="btn-action btn-del">Delete</button>
                             </form>
                         </td>
@@ -382,6 +387,7 @@ def view_settings():
             </div>
             <p class="muted" style="margin-top:8px;">Priority accounts use normal detection. Others follow the mode below. <span class="info-i" data-tip="Non-priority accounts can run slow or be disabled to reduce rate limits/load.">!</span></p>
             <form action="/admin/settings/host-priority-mode" method="POST" class="form-grid" style="grid-template-columns: 1fr 1fr auto; margin-bottom: 14px; align-items:end;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <div>
                     <label for="non_priority_mode" class="muted" style="display:block; margin-bottom:4px;">Non-priority mode</label>
                     <select id="non_priority_mode" name="non_priority_mode">
@@ -396,10 +402,12 @@ def view_settings():
                 <button type="submit">Save Mode</button>
             </form>
             <form action="/admin/settings/host/add" method="POST" class="form-grid" style="grid-template-columns: 1fr auto; margin-bottom: 12px;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="text" name="tiktok_username" placeholder="TikTok username (@...) — channel name is fetched automatically" required>
                 <button type="submit">+ Add Host</button>
             </form>
             <form action="/admin/settings/hosts/save" method="POST">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <div class="table-scroll">
                     <table>
                         <tr><th>ID</th><th>Username</th><th>Channel Name</th><th style="text-align:center;">Active</th><th style="text-align:center;">Priority</th><th>Delete</th></tr>
@@ -437,6 +445,7 @@ def view_settings():
             <h2>🏷️ Host Aliases</h2>
             <p class="muted">Case-insensitive names detected in live welcome messages and chat. Example: <code>mommy</code> → <strong>Sinta</strong>.</p>
             <form action="/admin/settings/alias/add" method="POST" class="form-grid alias-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="text" name="alias" placeholder="Alias (e.g. mommy)" required>
                 <input type="text" name="host_name" placeholder="Host name (e.g. Sinta)" required>
                 <button type="submit">+ Add Alias</button>
@@ -450,6 +459,7 @@ def view_settings():
                         <td><strong>{{ host }}</strong></td>
                         <td>
                             <form action="/admin/settings/alias/delete" method="POST" class="inline-form" onsubmit="return confirm('Delete alias {{ alias }}?');">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                                 <input type="hidden" name="alias" value="{{ alias }}">
                                 <button type="submit" class="btn-action btn-del">Delete</button>
                             </form>
