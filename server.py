@@ -87,6 +87,14 @@ def _log_request_end(response):
             request_id,
         )
         response.headers.setdefault("X-Request-Id", request_id)
+        # Security headers: reduce browser trust issues and harden the admin origin.
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+        if request.is_secure:
+            response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
     except Exception:
         pass
     return response
@@ -163,6 +171,25 @@ def pwa_static(filename):
     else:
         resp.headers.setdefault('Cache-Control', 'public, max-age=604800')
     return resp
+
+
+@app.route('/robots.txt')
+def robots_txt():
+    body = "User-agent: *\nDisallow: /admin/\nDisallow: /api/\nDisallow: /health\n"
+    return Response(body, mimetype='text/plain')
+
+
+@app.route('/security.txt')
+@app.route('/.well-known/security.txt')
+def security_txt():
+    contact = (os.environ.get('SECURITY_CONTACT') or 'mailto:security@example.com').strip()
+    body = (
+        "Contact: " + contact + "\n"
+        "Canonical: https://dummydreams-discord-bot.onrender.com/.well-known/security.txt\n"
+        "Preferred-Languages: en, id\n"
+        "Expires: 2027-12-31T00:00:00Z\n"
+    )
+    return Response(body, mimetype='text/plain')
 
 
 # Register Blueprints
