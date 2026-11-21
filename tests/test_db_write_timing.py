@@ -39,7 +39,7 @@ def test_write_transaction_emits_slow_stage_timings(monkeypatch, capsys):
 
 def test_write_transaction_without_timing_label_remains_quiet(monkeypatch, capsys):
     monkeypatch.setattr(db, "_DB_WRITE_LOCK", _FakeLock())
-    monkeypatch.setattr(db, "get_db_connection", _FakeConnection)
+    monkeypatch.setattr(db, "get_db_connection", lambda: _FakeConnection())
 
     assert db.write_transaction(lambda _conn: 42) == 42
     assert capsys.readouterr().out == ""
