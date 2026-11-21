@@ -3399,8 +3399,8 @@ def end_live_session(session_id: int, end_time: str = None):
         if last_seen:
             try:
                 seen_dt = wib.localize(datetime.strptime(last_seen, "%Y-%m-%d %H:%M:%S"))
-                if end_dt > seen_dt + timedelta(minutes=2):
-                    end_dt = seen_dt
+                if effective_end_dt > seen_dt + timedelta(minutes=2):
+                    effective_end_dt = seen_dt
                     end_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
                 pass
