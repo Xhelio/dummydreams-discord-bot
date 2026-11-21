@@ -44,6 +44,8 @@ def test_activity_log_writer_recovers_after_batch_failure(monkeypatch):
 def test_setting_writer_continues_after_one_write_fails(monkeypatch):
     work_queue = queue.Queue()
     monkeypatch.setattr(db, "_SETTING_WRITE_QUEUE", work_queue)
+    monkeypatch.setattr(db, "_SETTING_WRITER_STARTED", False)
+    monkeypatch.setattr(db, "_SETTING_WRITER_LOCK", threading.Lock())
     attempts = []
     first_failed = threading.Event()
 
