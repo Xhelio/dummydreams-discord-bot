@@ -4021,6 +4021,15 @@ def _cache_setting_value(key: str, value: str) -> None:
         _SETTINGS_REFRESHING.discard(key)
 
 
+def _invalidate_setting_cache_if_value(key: str, value: str) -> None:
+    """Remove an optimistic cache value only if it still matches a failed write."""
+    with _SETTINGS_CACHE_LOCK:
+        cached = _SETTINGS_CACHE.get(key)
+        if cached is not None and cached[0] == str(value):
+            _SETTINGS_CACHE.pop(key, None)
+        _SETTINGS_REFRESHING.discard(key)
+
+
 def set_setting(key: str, value: str):
     """Menyimpan setting secara sinkron (dipakai dari thread non-event-loop).
 
@@ -4056,6 +4065,8 @@ def _ensure_setting_writer() -> None:
                 key, value = item
                 _write_setting_row(key, value)
             except Exception as e:
+                if item is not None:
+                    _invalidate_setting_cache_if_value(key, value)
                 print(
                     f"[DB] Deferred setting write failed: "
                     f"{type(e).__name__}: {e}"
@@ -4072,14 +4083,16 @@ def queue_setting(key: str, value: str) -> bool:
     Nilai langsung masuk cache sehingga pembacaan berikutnya sudah melihat nilai
     baru; penulisan ke Turso dilakukan satu thread penulis di latar belakang.
     """
-    _cache_setting_value(key, value)
     _ensure_setting_writer()
     try:
         _SETTING_WRITE_QUEUE.put_nowait((key, str(value)))
-        return True
     except queue.Full:
         print(f"[DB] Setting write queue full; dropping update for {key!r}.")
         return False
+
+    # Publish the optimistic value only after the queue accepts the write.
+    _cache_setting_value(key, value)
+    return True
 
 
 def get_bool_setting(key: str, default: bool = True) -> bool:
