@@ -54,12 +54,23 @@ def test_setting_writer_continues_after_one_write_fails(monkeypatch):
             raise RuntimeError("temporary database outage")
 
     monkeypatch.setattr(db, "_write_setting_row", fake_write_setting)
+    real_thread = threading.Thread
+    created = []
+
+    def tracking_thread(*args, **kwargs):
+        thread = real_thread(*args, **kwargs)
+        created.append(thread)
+        return thread
+
+    monkeypatch.setattr(db.threading, "Thread", tracking_thread)
     db._ensure_setting_writer()
 
     work_queue.put(("first", "one"))
     assert first_failed.wait(timeout=2)
     work_queue.put(("second", "two"))
-    _join_worker(db._SETTING_WRITER_TEST_THREAD, work_queue)
+    _join_worker(created[0], work_queue)
+
+    assert attempts == [("first", "one"), ("second", "two")]
 
 
 def test_activity_log_writer_starts_only_once_under_concurrency(monkeypatch):
