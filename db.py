@@ -195,7 +195,7 @@ def write_transaction(
         raise ValueError("attempts and base_delay must be numeric")
 
     def _log_stage(stage: str, elapsed: float, attempt: int) -> None:
-        if timing_label and elapsed >= 0.5:
+        if timing_label and elapsed >= 0.1:
             print(
                 f"[DB Timing] operation={timing_label} stage={stage} "
                 f"elapsed={elapsed:.3f}s attempt={attempt}"
@@ -3153,7 +3153,7 @@ def touch_live_session(session_id: int, when: str = None):
         )
 
     try:
-        write_transaction(_store)
+        write_transaction(_store, timing_label="live_session_touch")
     except Exception as e:
         print(f"[DB] Failed to touch live session {session_id}: {type(e).__name__}: {e}")
 
@@ -3388,7 +3388,7 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
             VALUES (?, ?, ?, ?)
         """, (user_clean, now_str, current_host, now_str))
         return cur.lastrowid
-    return write_transaction(_start)
+    return write_transaction(_start, timing_label="live_session_start")
 def end_live_session(session_id: int, end_time: str = None):
     """Close a live session. ``end_time`` lets callers record the actual
     disconnect moment instead of the moment the grace timer fired."""
