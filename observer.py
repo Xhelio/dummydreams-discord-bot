@@ -3,13 +3,13 @@ import os
 import time
 from datetime import datetime, timedelta
 import pytz
+import log_setup
 from TikTokLive import TikTokLiveClient
 from proto_performance import install_proto_type_hint_caches
 
 # betterproto2 resolves typing annotations during nested protobuf parsing.
 # Cache those immutable class hints to avoid repeating get_type_hints() per event.
 _PROTO_TYPE_HINT_CACHES = install_proto_type_hint_caches()
-import log_setup
 from TikTokLive.events import (
     ConnectEvent, 
     DisconnectEvent, 
