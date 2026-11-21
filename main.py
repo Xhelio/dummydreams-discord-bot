@@ -2931,15 +2931,21 @@ async def on_resumed():
     print("[Gateway] Resumed Discord session.")
 
 
-_LOOP_BEAT = {"at": time.monotonic(), "reported": 0.0}
+_LOOP_BEAT = {
+    "at": time.monotonic(),
+    "reported": 0.0,
+    "last_confirmed_lag_at": 0.0,
+    "last_confirmed_lag_seconds": 0.0,
+}
 
 
 def _start_loop_stack_watchdog() -> None:
-    """Dump the main thread's Python stack when the event loop is stalled.
+    """Take a diagnostic stack sample only after the loop monitor confirms lag.
 
-    The task-name list from ``_loop_lag_monitor`` cannot say which call blocked
-    the loop. A separate OS thread keeps ticking while the loop is frozen and
-    can capture the exact stack, which is what turns "blocked ~7s" into a fix.
+    The loop's heartbeat is intentionally refreshed only by the event loop.
+    A stale heartbeat by itself is not proof of a block: sampling can coincide
+    with selector waits or scheduler jitter. The lag monitor is the source of
+    truth; this thread adds a best-effort stack sample after a confirmed delay.
     """
     import threading
     import traceback
@@ -2950,11 +2956,12 @@ def _start_loop_stack_watchdog() -> None:
 
     def _watch() -> None:
         while True:
-            time.sleep(1.0)
-            stalled = time.monotonic() - _LOOP_BEAT["at"]
-            if stalled < 2.0:
-                continue
+            time.sleep(0.5)
             now = time.monotonic()
+            lag_at = _LOOP_BEAT["last_confirmed_lag_at"]
+            lag_seconds = _LOOP_BEAT["last_confirmed_lag_seconds"]
+            if not lag_at or now - lag_at > 3.0:
+                continue
             if now - _LOOP_BEAT["reported"] < 10.0:
                 continue
             _LOOP_BEAT["reported"] = now
@@ -2964,8 +2971,9 @@ def _start_loop_stack_watchdog() -> None:
             else:
                 stack = "(main thread frame unavailable)"
             log.warning(
-                "[EventLoop Stack] main thread blocked ~%.1fs; innermost Python frames:\n%s",
-                stalled,
+                "[EventLoop Stack] diagnostic sample after confirmed %.2fs loop lag "
+                "(sample may be post-recovery; do not treat selector waits as the cause):\\n%s",
+                lag_seconds,
                 stack,
             )
 
@@ -2975,28 +2983,24 @@ def _start_loop_stack_watchdog() -> None:
 
 
 async def _loop_lag_monitor() -> None:
-    """Detect synchronous work blocking the Discord event loop.
-
-    A healthy loop wakes every ~1s. Overshoot means some coroutine performed
-    blocking I/O or heavy CPU work without yielding -- the usual reason an
-    interaction is not acknowledged within Discord's 3-second window.
-    """
+    """Measure event-loop scheduling delay without treating idle waits as blocks."""
     interval = 1.0
     while True:
         started = time.perf_counter()
         await asyncio.sleep(interval)
-        _LOOP_BEAT["at"] = time.monotonic()
-        lag = (time.perf_counter() - started) - interval
+        now = time.monotonic()
+        _LOOP_BEAT["at"] = now
+        lag = max(0.0, (time.perf_counter() - started) - interval)
         if lag >= 1.0:
+            _LOOP_BEAT["last_confirmed_lag_at"] = now
+            _LOOP_BEAT["last_confirmed_lag_seconds"] = lag
             current = asyncio.current_task()
             tasks = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
             names = sorted({getattr(t.get_coro(), "__qualname__", "?") for t in tasks})[:12]
-            # Only lag near Discord's 3s ACK deadline is page-worthy; smaller
-            # stalls stay at INFO so the error channel is not flooded.
             level = logging.WARNING if lag >= 2.5 else logging.INFO
             log.log(
                 level,
-                "[EventLoop] blocked ~%.2fs; active_tasks=%d names=%s",
+                "[EventLoop] scheduling delay %.2fs; active_tasks=%d names=%s",
                 lag,
                 len(tasks),
                 ", ".join(names),
