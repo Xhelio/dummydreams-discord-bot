@@ -1850,6 +1850,26 @@ def reset_live_state(clear_logs: bool = True):
     except Exception:
         pass
 
+def _ensure_analytics_indexes(conn):
+    """Create indexes matching the date expressions used by analytics filters."""
+    statements = (
+        "CREATE INDEX IF NOT EXISTS idx_gift_logs_analytics_date "
+        "ON gift_logs(substr(log_date, 1, 10))",
+        "CREATE INDEX IF NOT EXISTS idx_live_sessions_analytics_date "
+        "ON live_sessions(substr(start_time, 1, 10))",
+    )
+    for statement in statements:
+        try:
+            conn.execute(statement)
+            conn.commit()
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            print(f"[DB Migration] analytics date index skipped: {exc}")
+
+
 def init_db():
     """Initialize schema and seed defaults.
 
@@ -2214,6 +2234,10 @@ def init_db():
             except Exception:
                 pass
             print(f"[DB Migration] gift_logs date backfill skipped: {e}")
+
+        # Date-range analytics filters wrap these columns in substr(), so
+        # matching expression indexes avoid full-table scans on narrower ranges.
+        _ensure_analytics_indexes(conn)
 
         # Normalize viewer names to lowercase so the same viewer never gets two
         # separate coin rows ("Alice" vs "alice"). Idempotent & safe.
