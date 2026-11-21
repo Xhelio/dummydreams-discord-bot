@@ -4,6 +4,7 @@ import asyncio
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 try:
     import libsql_experimental as libsql
 except ImportError:
@@ -61,6 +62,28 @@ admin_bp = Blueprint('admin', __name__, url_prefix='/admin')
 _ANALYTICS_PROFILE_CACHE = {}
 _ANALYTICS_PROFILE_CACHE_LOCK = threading.Lock()
 _ANALYTICS_PROFILE_CACHE_TTL = 60.0
+
+# Analytics reads are independent and spend most of their time waiting on the
+# remote database. Bound concurrency to avoid overwhelming the small Turso
+# instance while overlapping network round-trips.
+_ANALYTICS_QUERY_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="analytics-query"
+)
+
+
+def _run_analytics_bundle(tasks):
+    """Run independent analytics reads concurrently with bounded fan-out.
+
+    tasks maps a stage name to (callable, positional_args, keyword_args).
+    Each stage retains its own timing record and database connection.
+    """
+    futures = {
+        stage: _ANALYTICS_QUERY_EXECUTOR.submit(
+            _run_analytics_stage, stage, func, *args, **kwargs
+        )
+        for stage, (func, args, kwargs) in tasks.items()
+    }
+    return {stage: future.result() for stage, future in futures.items()}
 
 def _run_analytics_stage(stage, func, *args, **kwargs):
     started = time.monotonic()
@@ -1812,18 +1835,32 @@ def view_analytics():
     viewer_arg = viewer_filter or None
 
     analytics_started = time.monotonic()
-    summary = _run_analytics_stage("summary", get_analytics_summary, start_str, end_str, host_arg, account_arg, viewer_arg)
-    session_summary = _run_analytics_stage("sessions", get_analytics_sessions, start_str, end_str, host_arg, account_arg)
-    session_break = _run_analytics_stage("session_breakdown", get_analytics_session_breakdown, start_str, end_str, host_arg, account_arg)
-    series = _run_analytics_stage("timeseries", get_analytics_timeseries, start_str, end_str, chart_group, host_arg, account_arg, viewer_arg)
-    host_engagement_series = _run_analytics_stage("host_engagement", get_analytics_host_engagement_timeseries, start_str, end_str, chart_group, host_arg, account_arg, viewer_arg, limit=12)
-    gift_by_host = _run_analytics_stage("gift_by_host", get_analytics_gift_by_host, start_str, end_str, account_arg, viewer_arg)
-    gift_by_account = _run_analytics_stage("gift_by_account", get_analytics_gift_by_account, start_str, end_str, host_arg, viewer_arg)
-    viewer_rows_raw = _run_analytics_stage("viewer_ranking", get_analytics_viewer_ranking, start_str, end_str, host_arg, account_arg, 100)
-    spend_rows_raw = _run_analytics_stage("viewer_host_spend", get_analytics_viewer_host_spend, start_str, end_str, viewer_arg, host_arg, account_arg, 200)
-    host_options = _run_analytics_stage("host_options", get_analytics_host_options)
-    account_options = _run_analytics_stage("account_options", get_analytics_account_options)
-    top_gift_items_raw = _run_analytics_stage("top_gift_items", get_analytics_top_gift_items, start_str, end_str, host_arg, account_arg, viewer_arg, 12)
+    analytics_results = _run_analytics_bundle({
+        "summary": (get_analytics_summary, (start_str, end_str, host_arg, account_arg, viewer_arg), {}),
+        "sessions": (get_analytics_sessions, (start_str, end_str, host_arg, account_arg), {}),
+        "session_breakdown": (get_analytics_session_breakdown, (start_str, end_str, host_arg, account_arg), {}),
+        "timeseries": (get_analytics_timeseries, (start_str, end_str, chart_group, host_arg, account_arg, viewer_arg), {}),
+        "host_engagement": (get_analytics_host_engagement_timeseries, (start_str, end_str, chart_group, host_arg, account_arg, viewer_arg), {"limit": 12}),
+        "gift_by_host": (get_analytics_gift_by_host, (start_str, end_str, account_arg, viewer_arg), {}),
+        "gift_by_account": (get_analytics_gift_by_account, (start_str, end_str, host_arg, viewer_arg), {}),
+        "viewer_ranking": (get_analytics_viewer_ranking, (start_str, end_str, host_arg, account_arg, 100), {}),
+        "viewer_host_spend": (get_analytics_viewer_host_spend, (start_str, end_str, viewer_arg, host_arg, account_arg, 200), {}),
+        "host_options": (get_analytics_host_options, (), {}),
+        "account_options": (get_analytics_account_options, (), {}),
+        "top_gift_items": (get_analytics_top_gift_items, (start_str, end_str, host_arg, account_arg, viewer_arg, 12), {}),
+    })
+    summary = analytics_results["summary"]
+    session_summary = analytics_results["sessions"]
+    session_break = analytics_results["session_breakdown"]
+    series = analytics_results["timeseries"]
+    host_engagement_series = analytics_results["host_engagement"]
+    gift_by_host = analytics_results["gift_by_host"]
+    gift_by_account = analytics_results["gift_by_account"]
+    viewer_rows_raw = analytics_results["viewer_ranking"]
+    spend_rows_raw = analytics_results["viewer_host_spend"]
+    host_options = analytics_results["host_options"]
+    account_options = analytics_results["account_options"]
+    top_gift_items_raw = analytics_results["top_gift_items"]
     print(f"[AnalyticsTiming] stage=query_bundle_total duration={time.monotonic() - analytics_started:.3f}s")
 
     if host_filter:
