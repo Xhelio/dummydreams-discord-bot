@@ -66,16 +66,30 @@ def health_check():
     return jsonify(payload), 200
 
 def _api_key_valid(secret_key: str) -> bool:
-    expected_key = os.environ.get("API_SECRET_KEY")
-    if not expected_key:
-        return True
-    return hmac.compare_digest(str(secret_key or ""), str(expected_key))
+    expected_key = (os.environ.get("API_SECRET_KEY") or "").strip()
+    supplied_key = (secret_key or "").strip()
+    if not expected_key or not supplied_key:
+        return False
+    return hmac.compare_digest(supplied_key, expected_key)
+
+
+def _api_auth_error():
+    """Fail closed when API authentication is missing or not configured."""
+    if not (os.environ.get("API_SECRET_KEY") or "").strip():
+        return jsonify({
+            "status": "error",
+            "message": "API authentication is not configured"
+        }), 503
+    if _api_key_valid(request.headers.get("X-API-KEY")):
+        return None
+    return jsonify({"status": "error", "message": "Unauthorized"}), 401
 
 
 @api_bp.route('/config', methods=['GET'])
 def get_bot_config():
-    if not _api_key_valid(request.headers.get("X-API-KEY")):
-        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+    auth_error = _api_auth_error()
+    if auth_error is not None:
+        return auth_error
 
     target_username = request.args.get("username", "").lower()
 
@@ -103,8 +117,9 @@ def get_bot_config():
 
 @api_bp.route('/heartbeat', methods=['POST'])
 def handle_heartbeat():
-    if not _api_key_valid(request.headers.get("X-API-KEY")):
-        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+    auth_error = _api_auth_error()
+    if auth_error is not None:
+        return auth_error
 
     data = request.get_json() or {}
     username = str(data.get("username") or "").lower().lstrip("@")
@@ -124,9 +139,11 @@ def handle_heartbeat():
 
 @api_bp.route('/announcement', methods=['POST'])
 def trigger_announcement():
+    auth_error = _api_auth_error()
+    if auth_error is not None:
+        return auth_error
+
     data = request.get_json() or {}
-    if not _api_key_valid(request.headers.get("X-API-KEY")):
-        return jsonify({"status": "error", "message": "Unauthorized"}), 401
 
     username = data.get("username")
     is_live = data.get("is_live")
