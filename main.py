@@ -2969,15 +2969,37 @@ def _start_loop_stack_watchdog() -> None:
             if now - _LOOP_BEAT["reported"] < 10.0:
                 continue
             _LOOP_BEAT["reported"] = now
-            frame = sys._current_frames().get(main_ident)
-            if frame is not None:
-                stack = "".join(traceback.format_stack(frame)[-18:])
-            else:
-                stack = "(main thread frame unavailable)"
+            frames = sys._current_frames()
+            threads = threading.enumerate()
+            # Prioritize the event-loop thread and likely executor/DB workers,
+            # then include other threads so a saturated or blocked pool is visible.
+            def _thread_priority(thread):
+                if thread.ident == main_ident:
+                    return (0, thread.name)
+                name = thread.name.lower()
+                if any(token in name for token in ("asyncio", "db", "turso", "host", "log")):
+                    return (1, thread.name)
+                return (2, thread.name)
+
+            threads.sort(key=_thread_priority)
+            captured = []
+            for thread in threads[:20]:
+                frame = frames.get(thread.ident)
+                if frame is None:
+                    continue
+                thread_stack = "".join(traceback.format_stack(frame, limit=12))
+                captured.append(
+                    f"--- thread={thread.name!r} ident={thread.ident} "
+                    f"daemon={thread.daemon} ---\\n{thread_stack}"
+                )
+            stack = "\\n".join(captured) or "(no thread frames available)"
             log.warning(
-                "[EventLoop Stack] live main-thread snapshot: heartbeat overdue "
-                "by %.2fs (may also reflect OS/process scheduling pause):\\n%s",
+                "[EventLoop Stack] live thread snapshots: heartbeat overdue "
+                "by %.2fs (may also reflect OS/process scheduling pause; "
+                "captured %d/%d threads):\\n%s",
                 stale_seconds,
+                len(captured),
+                len(threads),
                 stack,
             )
 
