@@ -3632,7 +3632,28 @@ def record_gift_event_transaction(
             "total_coins": int(total_row[0]) if total_row else 0,
         }
 
-    result = write_transaction(_store, timing_label="gift_event")
+    try:
+        result = write_transaction(_store, timing_label="gift_event")
+    except Exception as exc:
+        error_text = f"{type(exc).__name__}: {exc}"
+        print(
+            f"[GiftLog] Atomic write failed for @{viewer_user} "
+            f"({gift_name}, {coins}c): {error_text}"
+        )
+        try:
+            set_setting("gift_log_last_error", f"{log_datetime} | {error_text}")
+        except Exception:
+            pass
+        try:
+            log_activity_event(
+                "system",
+                f"[GiftLog] GAGAL menulis gift dan memperbarui total koin "
+                f"untuk @{viewer_user} ({gift_name}, {coins}c): {error_text}",
+                target_clean,
+            )
+        except Exception:
+            pass
+        return {"status": "failed", "error": error_text}
     if result["status"] == "ok":
         try:
             set_setting("gift_log_last_ok", log_datetime)
