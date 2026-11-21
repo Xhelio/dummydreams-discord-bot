@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from db import get_db_connection, get_current_host_for_account, get_channel_display_name
@@ -27,3 +28,8 @@ def load_summary_config():
         except Exception:
             pass
     return {}
+
+
+async def get_schedule_info_async(tiktok_username: str):
+    """Run synchronous schedule/database lookups outside the asyncio event loop."""
+    return await asyncio.to_thread(get_schedule_info, tiktok_username)
