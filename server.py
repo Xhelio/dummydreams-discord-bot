@@ -160,16 +160,23 @@ def _handle_unexpected_error(error):
 
 @app.before_request
 def _protect_admin_routes():
-    if not _is_admin_auth_enabled():
-        return None
     path = request.path or ""
-    if path == "/admin" or path.startswith("/admin/"):
-        if not _check_admin_auth(request.authorization):
-            return Response(
-                "Authentication required.",
-                401,
-                {"WWW-Authenticate": 'Basic realm="Admin Panel"'},
-            )
+    if not (path == "/admin" or path.startswith("/admin/")):
+        return None
+
+    # Fail closed: never expose admin routes without configured credentials.
+    if not _is_admin_auth_enabled():
+        return jsonify({
+            "ok": False,
+            "error": "Admin authentication is not configured"
+        }), 503
+
+    if not _check_admin_auth(request.authorization):
+        return Response(
+            "Authentication required.",
+            401,
+            {"WWW-Authenticate": 'Basic realm="Admin Panel"'},
+        )
     return None
 
 
