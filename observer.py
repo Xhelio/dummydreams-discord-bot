@@ -558,6 +558,7 @@ def _record_gift_event_db(session_id, username_clean, user, display_name, gift_n
     event loop Discord memblokir ACK interaksi (3 detik) sehingga muncul
     "The application did not respond".
     """
+    stage_started = time.perf_counter()
     log_status = log_gift_transaction(
         session_id=session_id,
         target_user=username_clean,
@@ -569,6 +570,7 @@ def _record_gift_event_db(session_id, username_clean, user, display_name, gift_n
         msg_id=msg_id,
         host_name=current_host,
     )
+    _log_gift_timing(username_clean, "database.gift_log", time.perf_counter() - stage_started)
     if log_status is False:
         return {"status": "duplicate"}
     if log_status is None:
@@ -591,8 +593,12 @@ def _record_gift_event_db(session_id, username_clean, user, display_name, gift_n
         return {"status": "log_failed"}
 
     try:
+        stage_started = time.perf_counter()
         total_coins = save_gift_data(user, display_name, coins)
+        _log_gift_timing(username_clean, "database.all_time_total", time.perf_counter() - stage_started)
+        stage_started = time.perf_counter()
         save_daily_gift_data(user, display_name, coins)
+        _log_gift_timing(username_clean, "database.daily_total", time.perf_counter() - stage_started)
     except Exception as aggregate_error:
         print(
             f"[GiftLog] Gift log stored but coin totals failed for @{user} "
@@ -615,10 +621,18 @@ def _record_gift_event_db(session_id, username_clean, user, display_name, gift_n
     full_datetime = now_wib.strftime('%Y-%m-%d %H:%M:%S')
     today_str = now_wib.strftime('%Y-%m-%d')
 
+    stage_started = time.perf_counter()
     channel_spent = get_user_channel_spent(user, username_clean)
+    _log_gift_timing(username_clean, "database.channel_spent", time.perf_counter() - stage_started)
+    stage_started = time.perf_counter()
     today_spent = get_user_today_spent(user, today_str)
+    _log_gift_timing(username_clean, "database.today_spent", time.perf_counter() - stage_started)
+    stage_started = time.perf_counter()
     total_all = get_user_total_spent(user)
+    _log_gift_timing(username_clean, "database.total_spent", time.perf_counter() - stage_started)
+    stage_started = time.perf_counter()
     channel_name = get_channel_display_name(username_clean)
+    _log_gift_timing(username_clean, "database.channel_name", time.perf_counter() - stage_started)
 
     gift_msg = (
         f"[{full_datetime}] [{channel_name} (@{username_clean})] "
