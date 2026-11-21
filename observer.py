@@ -47,7 +47,7 @@ from db import (
     save_daily_gift_data, 
     start_live_session, 
     end_live_session, 
-    log_gift_transaction,
+    record_gift_event_transaction,
     get_active_hosts,
     get_observable_hosts,
     get_db_connection,
@@ -560,7 +560,7 @@ def _record_gift_event_db(session_id, username_clean, user, display_name, gift_n
     "The application did not respond".
     """
     stage_started = time.perf_counter()
-    log_status = log_gift_transaction(
+    result = record_gift_event_transaction(
         session_id=session_id,
         target_user=username_clean,
         viewer_user=user,
@@ -571,51 +571,20 @@ def _record_gift_event_db(session_id, username_clean, user, display_name, gift_n
         msg_id=msg_id,
         host_name=current_host,
     )
-    _log_gift_timing(username_clean, "database.gift_log", time.perf_counter() - stage_started)
-    if log_status is False:
+    _log_gift_timing(
+        username_clean,
+        "database.gift_event_write",
+        time.perf_counter() - stage_started,
+    )
+    if result["status"] == "duplicate":
         return {"status": "duplicate"}
-    if log_status is None:
-        # The detailed log could not be written. Do not update coin aggregates
-        # afterwards: coins without a matching gift log row cause permanent
-        # stored-vs-log drift. The event is reported so it can be investigated.
+    if result["status"] != "ok":
         print(
-            f"[GiftLog] Skipping coin totals for @{user} ({gift_name}, {coins}c, "
-            f"msg_id={msg_id or 'n/a'}) because the gift log write failed."
+            f"[GiftLog] Atomic gift write failed for @{user} "
+            f"({gift_name}, {coins}c, msg_id={msg_id or 'n/a'})."
         )
-        try:
-            log_activity_event(
-                "system",
-                f"[GiftLog] Koin TIDAK ditambahkan untuk @{user} ({gift_name}, {coins}c, "
-                f"msg_id={msg_id or 'n/a'}) karena gift log gagal ditulis.",
-                username_clean,
-            )
-        except Exception:
-            pass
         return {"status": "log_failed"}
-
-    try:
-        stage_started = time.perf_counter()
-        total_coins = save_gift_data(user, display_name, coins)
-        _log_gift_timing(username_clean, "database.all_time_total", time.perf_counter() - stage_started)
-        stage_started = time.perf_counter()
-        save_daily_gift_data(user, display_name, coins)
-        _log_gift_timing(username_clean, "database.daily_total", time.perf_counter() - stage_started)
-    except Exception as aggregate_error:
-        print(
-            f"[GiftLog] Gift log stored but coin totals failed for @{user} "
-            f"({gift_name}, {coins}c, msg_id={msg_id or 'n/a'}): "
-            f"{type(aggregate_error).__name__}: {aggregate_error}"
-        )
-        try:
-            log_activity_event(
-                "system",
-                f"[GiftLog] Gift log tersimpan tetapi update total koin GAGAL untuk @{user} "
-                f"({gift_name}, {coins}c, msg_id={msg_id or 'n/a'}): {aggregate_error}",
-                username_clean,
-            )
-        except Exception:
-            pass
-        return {"status": "aggregate_failed"}
+    total_coins = result["total_coins"]
 
     wib = pytz.timezone('Asia/Jakarta')
     now_wib = datetime.now(wib)
