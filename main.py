@@ -60,7 +60,7 @@ from db import (
 )
 from utils import get_schedule_info_async, load_summary_config
 from server import keep_alive
-from observer import run_all_observers, get_current_live_hosts, is_any_host_live, probe_room_live, probe_priority_targets_once
+from observer import run_all_observers, get_current_live_hosts, is_any_host_live, probe_room_live, probe_priority_targets_once, _log_gift_timing
 from verification import async_verify_tiktok_bio
 from routes.settings import set_verification_refresh_handler, set_presence_refresh_handler
 import runtime_status
@@ -714,11 +714,15 @@ async def auto_assign_role(tiktok_user: str, total_coins: int):
     if not is_feature_enabled("role_tiers"):
         return
 
+    stage_started = time.perf_counter()
     discord_id = await asyncio.to_thread(get_discord_id_from_tiktok, tiktok_user)
+    _log_gift_timing(tiktok_user, "role.db_mapping", time.perf_counter() - stage_started)
     if not discord_id:
         return
 
+    stage_started = time.perf_counter()
     tier_cfg = await asyncio.to_thread(get_tier_settings)
+    _log_gift_timing(tiktok_user, "role.db_settings", time.perf_counter() - stage_started)
     groups = []
     if tier_cfg["enabled"]:
         groups.append("reset")
@@ -733,13 +737,18 @@ async def auto_assign_role(tiktok_user: str, total_coins: int):
     # Turso connection; this runs after every gift event).
     tiers_by_group = {}
     for group_key in groups:
+        stage_started = time.perf_counter()
         tiers_by_group[group_key] = await asyncio.to_thread(get_role_tiers, group_key)
+        _log_gift_timing(tiktok_user, f"role.db_tiers_{group_key}", time.perf_counter() - stage_started)
 
     for guild in bot.guilds:
+        stage_started = time.perf_counter()
         try:
             member = await guild.fetch_member(int(discord_id))
         except (discord.NotFound, discord.HTTPException):
             continue
+        finally:
+            _log_gift_timing(tiktok_user, "role.discord_fetch_member", time.perf_counter() - stage_started)
 
         roles_to_add = []
         roles_to_remove = []
@@ -779,24 +788,32 @@ async def auto_assign_role(tiktok_user: str, total_coins: int):
                         roles_to_remove.append(role)
 
         if roles_to_add:
+            stage_started = time.perf_counter()
             try:
                 await member.add_roles(*roles_to_add, reason="Coin tier update")
                 role_names = ", ".join([r.name for r in roles_to_add])
                 print(f"[Discord] Assigned tier role(s) {role_names} to {member.display_name} in '{guild.name}'!")
             except Exception as e:
                 print(f"[Discord] Error assigning tier roles: {e}")
+            finally:
+                _log_gift_timing(tiktok_user, "role.discord_add_roles", time.perf_counter() - stage_started)
 
         if roles_to_remove:
+            stage_started = time.perf_counter()
             try:
                 await member.remove_roles(*roles_to_remove, reason="Coin tier replacement")
                 role_names = ", ".join([r.name for r in roles_to_remove])
                 print(f"[Discord] Removed previous tier role(s) ({role_names}) from {member.display_name} in '{guild.name}'.")
             except Exception as e:
                 print(f"[Discord] Error removing previous tier roles: {e}")
+            finally:
+                _log_gift_timing(tiktok_user, "role.discord_remove_roles", time.perf_counter() - stage_started)
 
         if added_tiers:
             best_tier, best_role = max(added_tiers, key=lambda x: x[0]["min_coins"])
+            stage_started = time.perf_counter()
             await _announce_tier_up(member, best_role, tiktok_user, total_coins)
+            _log_gift_timing(tiktok_user, "role.discord_announcement", time.perf_counter() - stage_started)
 
 async def _resolve_announcement_channel(announcement_session: dict = None):
     """Menentukan channel Discord tempat sesi pengumuman tersimpan (fallback ke env)."""
