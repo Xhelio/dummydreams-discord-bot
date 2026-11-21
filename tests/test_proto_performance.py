@@ -58,3 +58,16 @@ def test_type_hint_cache_installation_is_idempotent():
     second_cache = _cache_classmethod(ProtoMessage)
 
     assert first_cache is second_cache
+
+
+def test_installation_caches_real_tiktok_and_betterproto_resolvers():
+    from betterproto2 import Message
+    from TikTokLive.events.base_event import BaseEvent
+
+    from proto_performance import install_proto_type_hint_caches
+
+    caches = install_proto_type_hint_caches()
+
+    assert Message._type_hints.__func__ is caches["betterproto2"]
+    assert BaseEvent._type_hints.__func__ is caches["tiktoklive"]
+    assert Message._type_hints() == Message._type_hints()
