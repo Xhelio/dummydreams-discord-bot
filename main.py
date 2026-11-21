@@ -58,7 +58,7 @@ from db import (
     record_verification_method,
     get_last_gift_for_tiktok
 )
-from utils import get_schedule_info, load_summary_config
+from utils import get_schedule_info_async, load_summary_config
 from server import keep_alive
 from observer import run_all_observers, get_current_live_hosts, is_any_host_live, probe_room_live, probe_priority_targets_once
 from verification import async_verify_tiktok_bio
@@ -904,7 +904,7 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
                 deduped_channels.append(cid)
             configured_channels = deduped_channels
 
-            sched_host, account_name = get_schedule_info(user_key)
+            sched_host, account_name = await get_schedule_info_async(user_key)
             final_host_name = host_name or sched_host or account_name or "Host"
             live_url = f"https://www.tiktok.com/@{user_key}/live"
             live_content = (
