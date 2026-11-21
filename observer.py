@@ -99,7 +99,7 @@ _GIFT_TIMING_THRESHOLD_SECONDS = 0.5
 _GIFT_TIMING_COOLDOWN_SECONDS = 30.0
 
 
-def _log_gift_timing(username: str, stage: str, elapsed: float) -> bool:
+def _log_gift_timing(username: str, stage: str, elapsed: float, context: str = "host") -> bool:
     """Log a slow gift-processing stage at most once per host/stage per cooldown."""
     if elapsed < _GIFT_TIMING_THRESHOLD_SECONDS:
         return False
@@ -110,7 +110,8 @@ def _log_gift_timing(username: str, stage: str, elapsed: float) -> bool:
             return False
         _GIFT_TIMING_LAST_LOG[key] = now
     _GIFT_TIMING_LOG.info(
-        "[GiftEvent Timing] host=%s stage=%s elapsed=%.3fs",
+        "[GiftEvent Timing] %s=%s stage=%s elapsed=%.3fs",
+        context,
         username,
         stage,
         elapsed,
