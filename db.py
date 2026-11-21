@@ -3538,14 +3538,20 @@ def _fallback_gift_log_value(name: str, col_type: str, data: dict):
     return ""
 
 
-def _insert_gift_log_row(cur, data: dict, or_ignore: bool = True) -> list:
+def _insert_gift_log_row(
+    cur, data: dict, or_ignore: bool = True, column_info: list = None
+) -> list:
     """Insert gift log hanya memakai kolom yang benar-benar ada di DB.
 
     Ini membuat penulisan gift log tetap berhasil walau schema produksi
     tertinggal/korup. Kolom NOT NULL lama (mis. ``tiktok_username``) otomatis
     diisi supaya constraint tidak menggagalkan insert.
     """
-    info = _get_table_column_info(cur, "gift_logs")
+    info = (
+        column_info
+        if column_info is not None
+        else _get_table_column_info(cur, "gift_logs")
+    )
     existing = {col["name"] for col in info}
     if not existing:
         existing = set(data.keys())
@@ -3631,7 +3637,10 @@ def record_gift_event_transaction(
 
     def _store(conn):
         cur = conn.cursor()
-        columns = _get_table_columns(cur, "gift_logs")
+        # Read schema metadata once; the insert helper reuses it instead
+        # of issuing a second PRAGMA table_info round-trip on every gift.
+        column_info = _get_table_column_info(cur, "gift_logs")
+        columns = {col["name"] for col in column_info}
         msg_id_clean = data["msg_id"]
         if msg_id_clean and "msg_id" in columns:
             already = cur.execute(
@@ -3641,7 +3650,9 @@ def record_gift_event_transaction(
             if already:
                 return {"status": "duplicate"}
 
-        _insert_gift_log_row(cur, data, or_ignore=True)
+        _insert_gift_log_row(
+            cur, data, or_ignore=True, column_info=column_info
+        )
         if cur.rowcount == 0:
             return {"status": "duplicate"}
 
@@ -4176,6 +4187,12 @@ _DISCORD_MAPPING_CACHE_TTL = 10.0
 _DISCORD_MAPPING_CACHE_LOCK = threading.Lock()
 
 
+def invalidate_discord_mapping_cache() -> None:
+    """Clear positive TikTok-to-Discord lookups after a mapping is changed."""
+    with _DISCORD_MAPPING_CACHE_LOCK:
+        _DISCORD_MAPPING_CACHE.clear()
+
+
 def get_discord_id_from_tiktok(tiktok_user: str):
     username = str(tiktok_user or "").lower().lstrip("@").strip()
     if not username:
@@ -4564,6 +4581,7 @@ def bind_user_mapping(discord_id, tiktok_user: str) -> bool:
         """, (did, u_clean))
         conn.execute("DELETE FROM pending_verifications WHERE discord_id = ?", (did,))
         conn.commit()
+        invalidate_discord_mapping_cache()
         return True
     except Exception as e:
         print(f"[DB Error] Failed to bind user mapping: {e}")
