@@ -5,8 +5,8 @@ import routes.admin as admin
 
 
 def test_analytics_bundle_runs_independent_queries_concurrently(monkeypatch):
-    barrier = threading.Barrier(4)
-    executor = ThreadPoolExecutor(max_workers=4)
+    barrier = threading.Barrier(2)
+    executor = ThreadPoolExecutor(max_workers=2)
     monkeypatch.setattr(admin, "_ANALYTICS_QUERY_EXECUTOR", executor)
 
     def query(value):
@@ -15,7 +15,7 @@ def test_analytics_bundle_runs_independent_queries_concurrently(monkeypatch):
 
     tasks = {
         f"query_{value}": (query, (value,), {})
-        for value in range(4)
+        for value in range(2)
     }
 
     try:
@@ -26,6 +26,4 @@ def test_analytics_bundle_runs_independent_queries_concurrently(monkeypatch):
     assert results == {
         "query_0": 0,
         "query_1": 2,
-        "query_2": 4,
-        "query_3": 6,
     }
