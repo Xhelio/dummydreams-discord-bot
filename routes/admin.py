@@ -2,6 +2,8 @@ from flask import Blueprint, render_template_string, request, redirect, jsonify
 from urllib.parse import quote_plus
 import asyncio
 import os
+import threading
+import time
 try:
     import libsql_experimental as libsql
 except ImportError:
@@ -53,6 +55,38 @@ from db import reset_live_state
 from styles import BASE_CSS, NAV_HTML, AUTO_REFRESH_JS
 
 admin_bp = Blueprint('admin', __name__, url_prefix='/admin')
+
+# Historical hourly profile changes slowly; cache it briefly to avoid scanning
+# the full gift/session history on every analytics page refresh.
+_ANALYTICS_PROFILE_CACHE = {}
+_ANALYTICS_PROFILE_CACHE_LOCK = threading.Lock()
+_ANALYTICS_PROFILE_CACHE_TTL = 60.0
+
+
+def _get_cached_analytics_profile(start_date, end_date, host=None, account=None, viewer=None):
+    key = (str(start_date), str(end_date), host or "", account or "", viewer or "")
+    now = time.monotonic()
+    with _ANALYTICS_PROFILE_CACHE_LOCK:
+        cached = _ANALYTICS_PROFILE_CACHE.get(key)
+        if cached and now - cached[0] < _ANALYTICS_PROFILE_CACHE_TTL:
+            return cached[1]
+
+        result = get_analytics_timeseries(
+            start_date, end_date, "hour_of_day", host, account, viewer
+        ) or []
+        # Bound memory if admins explore many different filter combinations.
+        if len(_ANALYTICS_PROFILE_CACHE) >= 64:
+            expired = [
+                cache_key for cache_key, value in _ANALYTICS_PROFILE_CACHE.items()
+                if now - value[0] >= _ANALYTICS_PROFILE_CACHE_TTL
+            ]
+            for cache_key in expired:
+                _ANALYTICS_PROFILE_CACHE.pop(cache_key, None)
+            if len(_ANALYTICS_PROFILE_CACHE) >= 64:
+                _ANALYTICS_PROFILE_CACHE.pop(next(iter(_ANALYTICS_PROFILE_CACHE)))
+        _ANALYTICS_PROFILE_CACHE[key] = (now, result)
+        return result
+
 
 TURSO_URL = os.environ.get("TURSO_DATABASE_URL")
 TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
@@ -1928,10 +1962,12 @@ def view_analytics():
         profile_start, profile_end = bounds[0], bounds[1]
     else:
         profile_start, profile_end = start_str, end_str
-    hourly_baseline_series = []
-    if chart_group == 'hour':
-        hourly_baseline_series = get_analytics_timeseries(profile_start, profile_end, 'hour_of_day', host_arg, account_arg, viewer_arg) or []
-    hourly_profile_series = get_analytics_timeseries(profile_start, profile_end, 'hour_of_day', host_arg, account_arg, viewer_arg) or []
+    # The baseline and profile use the same historical hourly series. Fetch it
+    # once, and reuse a short-lived cached result across dashboard refreshes.
+    hourly_profile_series = _get_cached_analytics_profile(
+        profile_start, profile_end, host_arg, account_arg, viewer_arg
+    )
+    hourly_baseline_series = hourly_profile_series if chart_group == 'hour' else []
 
     chart_payload = {
         'labels': [b['label'] for b in series],
