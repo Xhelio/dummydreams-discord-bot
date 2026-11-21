@@ -3531,6 +3531,116 @@ def _insert_gift_log_row(cur, data: dict, or_ignore: bool = True) -> list:
     return insert_cols
 
 
+def record_gift_event_transaction(
+    session_id: int,
+    target_user: str,
+    viewer_user: str,
+    viewer_display: str,
+    gift_name: str,
+    gift_count: int,
+    coins: int,
+    msg_id: str = None,
+    host_name: str = None,
+) -> dict:
+    """Atomically store a gift log and update all coin aggregates.
+
+    The detailed log remains the source of truth: duplicate/failed inserts never
+    increment session, all-time, or daily totals.
+    """
+    wib = pytz.timezone("Asia/Jakarta")
+    now_dt = datetime.now(wib)
+    log_date = now_dt.strftime("%Y-%m-%d")
+    log_time = now_dt.strftime("%H:%M:%S")
+    log_datetime = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    target_clean = (target_user or "").lower()
+    viewer_clean = (viewer_user or "").lower()
+    scheduled_host = get_scheduled_host_name(
+        target_clean, now_dt, session_id=session_id
+    )
+    host_clean = (
+        (host_name or "").strip()
+        or (scheduled_host or "").strip()
+        or "Host"
+    )
+    data = {
+        "tiktok_username": target_clean,
+        "session_id": session_id,
+        "viewer_username": viewer_clean,
+        "viewer_display_name": viewer_display,
+        "gift_name": gift_name,
+        "gift_count": gift_count,
+        "coins": coins,
+        "log_date": log_date,
+        "log_time": log_time,
+        "log_datetime": log_datetime,
+        "target_username": target_clean,
+        "scheduled_host": scheduled_host,
+        "msg_id": str(msg_id) if msg_id else None,
+        "host_name": host_clean,
+    }
+
+    def _store(conn):
+        cur = conn.cursor()
+        columns = _get_table_columns(cur, "gift_logs")
+        msg_id_clean = data["msg_id"]
+        if msg_id_clean and "msg_id" in columns:
+            already = cur.execute(
+                "SELECT 1 FROM gift_logs WHERE msg_id = ? LIMIT 1",
+                (msg_id_clean,),
+            ).fetchone()
+            if already:
+                return {"status": "duplicate"}
+
+        _insert_gift_log_row(cur, data, or_ignore=True)
+        if cur.rowcount == 0:
+            return {"status": "duplicate"}
+
+        if session_id:
+            cur.execute(
+                "UPDATE live_sessions SET total_coins = total_coins + ? "
+                "WHERE session_id = ?",
+                (coins, session_id),
+            )
+
+        cur.execute(
+            """
+            INSERT INTO tiktok_gifts (tiktok_user, display_name, total_coins)
+            VALUES (?, ?, ?)
+            ON CONFLICT(tiktok_user) DO UPDATE SET
+                total_coins = total_coins + excluded.total_coins,
+                display_name = excluded.display_name
+            """,
+            (viewer_clean, viewer_display, coins),
+        )
+        total_row = cur.execute(
+            "SELECT total_coins FROM tiktok_gifts WHERE tiktok_user = ?",
+            (viewer_clean,),
+        ).fetchone()
+
+        cur.execute(
+            """
+            INSERT INTO daily_tiktok_gifts (tiktok_user, display_name, coins, date)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(tiktok_user, date) DO UPDATE SET
+                coins = coins + excluded.coins,
+                display_name = excluded.display_name
+            """,
+            (viewer_clean, viewer_display, coins, log_date),
+        )
+        return {
+            "status": "ok",
+            "total_coins": int(total_row[0]) if total_row else 0,
+        }
+
+    result = write_transaction(_store, timing_label="gift_event")
+    if result["status"] == "ok":
+        try:
+            set_setting("gift_log_last_ok", log_datetime)
+        except Exception:
+            pass
+    return result
+
+
 def log_gift_transaction(session_id: int, target_user: str, viewer_user: str, viewer_display: str, gift_name: str, gift_count: int, coins: int, msg_id: str = None, host_name: str = None):
     """Mencatat log gift secara terperinci sesuai waktu WIB & host terjadwal.
 
