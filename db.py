@@ -2650,6 +2650,56 @@ def prune_activity_logs(max_operational: int = 4000, max_technical: int = 6000):
         _ACTIVITY_LOGGER.error("[ActivityLog] Prune failed: %s", e)
 
 
+def get_gift_event_summary(viewer_user: str, target_user: str, date_str: str = "") -> dict:
+    """Fetch gift spending totals and channel name with one Turso query."""
+    viewer_clean = (viewer_user or "").lower().lstrip("@")
+    target_clean = (target_user or "").lower().lstrip("@")
+    if not date_str:
+        date_str = datetime.now(pytz.timezone("Asia/Jakarta")).strftime("%Y-%m-%d")
+
+    channel_name = next(
+        (name for _, username, name in VALID_TARGET_ACCOUNTS if username == target_clean),
+        None,
+    )
+    conn = get_db_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT
+                COALESCE((
+                    SELECT SUM(coins) FROM gift_logs
+                    WHERE LOWER(viewer_username) = ?
+                      AND LOWER(target_username) = ?
+                ), 0),
+                COALESCE((
+                    SELECT coins FROM daily_tiktok_gifts
+                    WHERE LOWER(tiktok_user) = ? AND date = ?
+                    LIMIT 1
+                ), 0),
+                COALESCE((
+                    SELECT SUM(total_coins) FROM tiktok_gifts
+                    WHERE LOWER(tiktok_user) = ?
+                ), 0),
+                (
+                    SELECT display_name FROM hosts
+                    WHERE LOWER(tiktok_username) = ?
+                    LIMIT 1
+                )
+            """,
+            (viewer_clean, target_clean, viewer_clean, date_str, viewer_clean, target_clean),
+        ).fetchone()
+        if row and not channel_name:
+            channel_name = row[3]
+        return {
+            "channel_spent": int(row[0] or 0) if row else 0,
+            "today_spent": int(row[1] or 0) if row else 0,
+            "total_spent": int(row[2] or 0) if row else 0,
+            "channel_name": str(channel_name or target_clean),
+        }
+    finally:
+        conn.close()
+
+
 def get_user_channel_spent(viewer_user: str, target_user: str) -> int:
     """Menghitung total koin yang sudah di-spent oleh viewer di target channel ini."""
     conn = get_db_connection()

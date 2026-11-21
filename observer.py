@@ -52,9 +52,7 @@ from db import (
     get_observable_hosts,
     get_db_connection,
     log_activity_event,
-    get_user_channel_spent,
-    get_user_today_spent,
-    get_user_total_spent,
+    get_gift_event_summary,
     detect_host_from_welcome_message,
     detect_host_match_from_welcome_message,
     get_current_host_for_account,
@@ -65,7 +63,6 @@ from db import (
     touch_live_session,
     get_open_live_session_id,
     invalidate_settings_cache,
-    get_channel_display_name,
     get_host_aliases,
     get_host_connect_mode,
     is_feature_enabled,
@@ -592,17 +589,16 @@ def _record_gift_event_db(session_id, username_clean, user, display_name, gift_n
     today_str = now_wib.strftime('%Y-%m-%d')
 
     stage_started = time.perf_counter()
-    channel_spent = get_user_channel_spent(user, username_clean)
-    _log_gift_timing(username_clean, "database.channel_spent", time.perf_counter() - stage_started)
-    stage_started = time.perf_counter()
-    today_spent = get_user_today_spent(user, today_str)
-    _log_gift_timing(username_clean, "database.today_spent", time.perf_counter() - stage_started)
-    stage_started = time.perf_counter()
-    total_all = get_user_total_spent(user)
-    _log_gift_timing(username_clean, "database.total_spent", time.perf_counter() - stage_started)
-    stage_started = time.perf_counter()
-    channel_name = get_channel_display_name(username_clean)
-    _log_gift_timing(username_clean, "database.channel_name", time.perf_counter() - stage_started)
+    summary = get_gift_event_summary(user, username_clean, today_str)
+    _log_gift_timing(
+        username_clean,
+        "database.gift_summary",
+        time.perf_counter() - stage_started,
+    )
+    channel_spent = summary["channel_spent"]
+    today_spent = summary["today_spent"]
+    total_all = summary["total_spent"]
+    channel_name = summary["channel_name"]
 
     gift_msg = (
         f"[{full_datetime}] [{channel_name} (@{username_clean})] "
