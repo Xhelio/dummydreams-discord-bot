@@ -1811,6 +1811,12 @@ def reset_live_state(clear_logs: bool = True):
         conn.commit()
     finally:
         conn.close()
+    # Raw DELETE bypasses the settings cache; drop it so a stale host is not
+    # served immediately after Reset Live State.
+    try:
+        invalidate_settings_cache()
+    except Exception:
+        pass
 
 def init_db():
     """Initialize schema and seed defaults.
@@ -3152,9 +3158,31 @@ def add_live_session_paused_seconds(session_id: int, seconds: int) -> int:
     finally:
         conn.close()
 
-def get_scheduled_host_name(tiktok_username: str, dt_obj: datetime = None) -> str:
-    """Mengambil nama host akun TikTok (berdasarkan welcome message yang terdeteksi)."""
-    return get_current_host_for_account(tiktok_username)
+def get_scheduled_host_name(tiktok_username: str, dt_obj: datetime = None, session_id: int = None) -> str:
+    """Host for a gift: fresh detection first, then this live session's host.
+
+    Never fall back to a host from a previous live (that would misattribute
+    gifts at the start of a new stream).
+    """
+    host = str(get_current_host_for_account(tiktok_username, fresh_only=True) or "").strip()
+    if host and host not in ("Host", "-"):
+        return host
+    if session_id:
+        try:
+            conn = get_db_connection()
+            try:
+                row = conn.execute(
+                    "SELECT scheduled_host FROM live_sessions WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                session_host = str((row or [None])[0] or "").strip()
+                if session_host and session_host not in ("Host", "-"):
+                    return session_host
+            finally:
+                conn.close()
+        except Exception:
+            pass
+    return host or "Host"
 
 # Sesi yang ditutup karena proses bot restart/deploy boleh disambung lagi
 # kalau observer sudah reconnect dalam jendela ini. Ini mencegah history live
@@ -3225,15 +3253,18 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                     (resume_id,),
                 ).fetchone()
                 if old and str(old[0] or "").lower() == user_clean and old[1]:
+                    resume_host = str(current_host or "").strip()
+                    if resume_host in ("Host", "-"):
+                        resume_host = None
                     cur.execute("""
                         UPDATE live_sessions
                         SET end_time = NULL,
                             duration_seconds = 0,
                             paused_seconds = COALESCE(paused_seconds, 0) + ?,
-                            scheduled_host = ?,
+                            scheduled_host = CASE WHEN ? IS NULL THEN scheduled_host ELSE ? END,
                             last_seen_at = ?
                         WHERE session_id = ?
-                    """, (gap, current_host, now_str, resume_id))
+                    """, (gap, resume_host, resume_host, now_str, resume_id))
                     cur.execute(
                         "DELETE FROM bot_settings WHERE key IN (?, ?)",
                         (resume_key, resume_last_key),
@@ -3348,12 +3379,12 @@ def end_live_session(session_id: int, end_time: str = None):
         cur = conn.cursor()
         try:
             row = cur.execute(
-                "SELECT start_time, end_time, COALESCE(paused_seconds, 0) FROM live_sessions WHERE session_id = ?",
+                "SELECT start_time, end_time, COALESCE(paused_seconds, 0), last_seen_at FROM live_sessions WHERE session_id = ?",
                 (session_id,),
             ).fetchone()
         except Exception:
             row = cur.execute(
-                "SELECT start_time, end_time, 0 FROM live_sessions WHERE session_id = ?",
+                "SELECT start_time, end_time, 0, NULL FROM live_sessions WHERE session_id = ?",
                 (session_id,),
             ).fetchone()
         if not row:
@@ -3361,6 +3392,17 @@ def end_live_session(session_id: int, end_time: str = None):
         if row[1]:
             # Already closed (idempotent); never overwrite a recorded end.
             return
+        # A late webhook must not inflate duration: heartbeats keep last_seen_at
+        # fresh during a live, so an end far past it is an offline-report delay.
+        last_seen = str((row[3] if len(row) > 3 else None) or "")[:19]
+        if last_seen:
+            try:
+                seen_dt = wib.localize(datetime.strptime(last_seen, "%Y-%m-%d %H:%M:%S"))
+                if end_dt > seen_dt + timedelta(minutes=2):
+                    end_dt = seen_dt
+                    end_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                pass
         paused_sec = max(0, int(row[2] or 0))
         duration_sec = 0
         if row[0]:
@@ -3479,7 +3521,7 @@ def log_gift_transaction(session_id: int, target_user: str, viewer_user: str, vi
     log_datetime = now_dt.strftime('%Y-%m-%d %H:%M:%S')
 
     target_clean = target_user.lower()
-    scheduled_host = get_scheduled_host_name(target_clean, now_dt)
+    scheduled_host = get_scheduled_host_name(target_clean, now_dt, session_id=session_id)
     # Host yang sedang tampil saat gift masuk (hasil LiveIntroEvent). Fallback ke
     # host terjadwal bila observer belum sempat mendeteksi host.
     host_clean = (host_name or "").strip() or (scheduled_host or "").strip() or "Host"
@@ -4740,11 +4782,19 @@ def get_timeline_data(date_str=None, mode="day", start=None, end=None):
         # Attribute by start date falling in the requested period.
         if not (p_start <= start_dt.date() <= p_end):
             continue
+        is_open = r[5] in (None, "")
         end_dt = _parse_wib_dt(r[5], wib)
         if end_dt is None:
             end_dt = now
         if end_dt <= start_dt:
             continue
+        duration_sec = int(r[6] or 0)
+        if is_open:
+            # Open sessions have no stored duration yet: derive it from the
+            # live start up to now (minus paused time) so timeline bars and the
+            # per-period duration summary are not under-reported as zero.
+            paused = int(r[7] or 0)
+            duration_sec = max(0, int((end_dt - start_dt).total_seconds()) - paused)
         host_name = _normalize_timeline_host(r[3])
         raw.append({
             "session_id": int(r[0]),
@@ -4754,9 +4804,9 @@ def get_timeline_data(date_str=None, mode="day", start=None, end=None):
             "host_key": "" if host_name == "-" else host_name.lower(),
             "start_time": str(r[4] or ""),
             "end_time": str(r[5] or "") if r[5] else None,
-            "duration_seconds": int(r[6] or 0),
+            "duration_seconds": duration_sec,
             "total_coins": int(r[8] or 0),
-            "is_open": r[5] in (None, ""),
+            "is_open": is_open,
             "start_dt": start_dt,
             "end_dt": end_dt,
         })

@@ -14,6 +14,7 @@ from db import (
     end_live_session,
     get_open_live_session_id,
     get_current_host_for_account,
+    touch_live_session,
     log_activity_event,
 )
 from runtime_status import (
@@ -22,6 +23,7 @@ from runtime_status import (
     get_observer_diag,
     get_bot_instance,
     set_live,
+    touch_live,
     clear_live,
     update_observer_diag,
 )
@@ -105,8 +107,19 @@ def handle_heartbeat():
         return jsonify({"status": "error", "message": "Unauthorized"}), 401
 
     data = request.get_json() or {}
-    username = data.get("username", "unknown")
-    print(f"[API] Received heartbeat from worker for @{username}")
+    username = str(data.get("username") or "").lower().lstrip("@")
+    print(f"[API] Received heartbeat from worker for @{username or 'unknown'}")
+    if not username:
+        return jsonify({"status": "error", "message": "Missing username"}), 400
+    # A webhook-created live state has no websocket heartbeat of its own: keep
+    # the runtime badge and the open session alive while the worker reports in.
+    try:
+        touch_live(username)
+        session_id = get_open_live_session_id(username)
+        if session_id:
+            touch_live_session(session_id)
+    except Exception as e:
+        print(f"[API] Heartbeat state update failed for @{username}: {e}")
     return jsonify({"status": "ok"}), 200
 
 @api_bp.route('/announcement', methods=['POST'])
@@ -340,9 +353,11 @@ def _handle_euler_live_event(username: str, is_live: bool, source_payload=None):
             pass
 
         # Nudge observer to connect quickly so it can receive LiveIntro/gifts.
+        # Do NOT force host reconfirm here: this webhook is the primary live
+        # signal and a reconnect must not wipe a host just detected.
         try:
             from observer import request_tiktok_reconnect
-            request_tiktok_reconnect(username)
+            request_tiktok_reconnect(username, reconfirm_host=False)
         except Exception:
             pass
 

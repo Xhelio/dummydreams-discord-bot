@@ -63,7 +63,12 @@ def set_live(username: str, host_name: str = None, source: str = "event"):
         return
     with _LOCK:
         item = _LIVE.get(username, {})
-        item["host"] = host_name or item.get("host") or "Host"
+        # "Host"/"-" are placeholders, not detected names: never let them
+        # overwrite a real host already known for this live.
+        clean_host = (host_name or "").strip()
+        if clean_host in ("Host", "-"):
+            clean_host = ""
+        item["host"] = clean_host or item.get("host") or "Host"
         item["since"] = item.get("since") or datetime.now(timezone.utc).isoformat()
         item["last_event"] = datetime.now(timezone.utc).isoformat()
         item["source"] = source
@@ -112,3 +117,13 @@ def update_observer_diag(username: str, **fields):
 def get_observer_diag() -> dict:
     with _LOCK:
         return {username: dict(data) for username, data in _OBSERVER.items()}
+
+
+def clear_observer_diag(username: str = None) -> None:
+    """Drop stale observer diagnostics (all accounts when username is None)."""
+    username = (username or "").lower().lstrip("@")
+    with _LOCK:
+        if username:
+            _OBSERVER.pop(username, None)
+        else:
+            _OBSERVER.clear()

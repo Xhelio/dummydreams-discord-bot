@@ -58,6 +58,8 @@ from db import (
     update_live_session_host,
     add_live_session_paused_seconds,
     touch_live_session,
+    get_open_live_session_id,
+    invalidate_settings_cache,
     get_channel_display_name,
     get_host_aliases,
     get_host_connect_mode,
@@ -459,13 +461,26 @@ def _is_reconnect_requested(username: str) -> bool:
         return username in _RECONNECT_REQUESTED
 
 
+def _consume_reconnect_request(username: str) -> bool:
+    """Take a pending reconnect request so it cannot trigger a second cycle."""
+    with _RECONNECT_REQUESTED_LOCK:
+        if username in _RECONNECT_REQUESTED:
+            _RECONNECT_REQUESTED.discard(username)
+            return True
+    return False
+
+
 def _clear_rate_limit_state(username: str) -> None:
-    """Reset persisted rate-limit strikes/cooldown for an account (cheap no-op if clean)."""
+    """Reset persisted rate-limit strikes/cooldown for an account."""
     try:
-        if str(get_setting(f"rl_strikes:{username}", "0") or "0") == "0":
+        strikes = str(get_setting(f"rl_strikes:{username}", "0") or "0").strip()
+        until = str(get_setting(f"rl_until:{username}", "0") or "0").strip()
+        if strikes in ("0", "") and until in ("0", ""):
             return
-        queue_setting(f"rl_strikes:{username}", "0")
-        queue_setting(f"rl_until:{username}", "0")
+        if strikes not in ("0", ""):
+            queue_setting(f"rl_strikes:{username}", "0")
+        if until not in ("0", ""):
+            queue_setting(f"rl_until:{username}", "0")
     except Exception:
         pass
 
@@ -915,6 +930,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         return True
 
     while True:
+        probe_result = None  # per-cycle: never log a previous cycle's probe result
         try:
             connect_mode = (await asyncio.to_thread(get_host_connect_mode, username_clean) or "normal").lower()
         except Exception:
@@ -954,7 +970,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 username_clean,
             )
             for _ in range(remaining_cooldown):
-                if _is_reconnect_requested(username_clean):
+                if _consume_reconnect_request(username_clean):
                     break
                 await asyncio.sleep(1)
             continue
@@ -1047,7 +1063,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
 
         @client.on(ConnectEvent)
         async def on_connect(event: ConnectEvent):
-            nonlocal current_session_id, is_connected, disconnect_timer_task, current_host, connected_this_cycle, consecutive_failures, probed_live
+            nonlocal current_session_id, is_connected, disconnect_timer_task, current_host, connected_this_cycle, consecutive_failures, probed_live, attempts_since_success
             try:
                 reconnected_in_grace = await resolve_grace_reconnect()
                 if reconnected_in_grace:
@@ -1057,6 +1073,16 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 connected_this_cycle = True
                 consecutive_failures = 0
                 probed_live = False
+
+                # Adopt the DB's currently open session. A webhook offline event
+                # (or admin reset) can close/delete the session while this task
+                # still holds its id; using it would write gifts to a dead row.
+                try:
+                    open_id = await asyncio.to_thread(get_open_live_session_id, username_clean)
+                    if open_id != current_session_id:
+                        current_session_id = open_id
+                except Exception:
+                    pass
 
                 # On manual refresh/reconnect request, reconfirm host instead of trusting stale stored value.
                 force_reconfirm_host = False
@@ -1069,11 +1095,13 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     print(f"[{username_clean}] Reconfirming host on reconnect (clearing stale host state).")
                     try:
                         await asyncio.to_thread(set_setting, f"current_host_{username_clean}", "")
+                        await asyncio.to_thread(invalidate_settings_cache)
                     except Exception:
                         pass
                     # Use neutral placeholder until a real host is detected from LiveIntroEvent.
                     current_host = "Host"
                     _LAST_INTRO_ANALYZED.pop(username_clean, None)
+                    _LAST_INTRO_TEXT.pop(username_clean, None)
                 else:
                     # Refresh host/session context on (re)connect so host detection can continue/update.
                     stored_host = await asyncio.to_thread(
@@ -1087,12 +1115,39 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                         current_host = "Host"
 
                 if not current_session_id:
+                    # Placeholder means "not detected yet"; let start_live_session
+                    # preserve an existing host instead of overwriting it.
+                    initial_host = None if current_host in (None, "", "Host", "-") else current_host
                     current_session_id = await asyncio.to_thread(
-                        start_live_session, username_clean, initial_host=current_host
+                        start_live_session, username_clean, initial_host=initial_host
                     )
-                elif force_reconfirm_host:
+                    # New live session: a repeated LiveIntro text must be analysed
+                    # again, otherwise host detection stays "Host" all live.
+                    _LAST_INTRO_ANALYZED.pop(username_clean, None)
+                    _LAST_INTRO_TEXT.pop(username_clean, None)
+                elif force_reconfirm_host and current_host not in (None, "", "Host", "-"):
                     try:
-                        await asyncio.to_thread(update_live_session_host, current_session_id, "Host")
+                        await asyncio.to_thread(update_live_session_host, current_session_id, current_host)
+                    except Exception:
+                        pass
+                # A resumed/still-open session may already know this live's host
+                # (e.g. after redeploy). Never show the "Host" placeholder when
+                # that confirmed name is available.
+                if current_host in (None, "", "Host", "-") and current_session_id:
+                    try:
+                        def _open_session_host(sid):
+                            conn = get_db_connection()
+                            try:
+                                row = conn.execute(
+                                    "SELECT scheduled_host FROM live_sessions WHERE session_id = ?",
+                                    (sid,),
+                                ).fetchone()
+                                return str((row or [None])[0] or "")
+                            finally:
+                                conn.close()
+                        stored_session_host = await asyncio.to_thread(_open_session_host, current_session_id)
+                        if stored_session_host and stored_session_host not in ("Host", "-"):
+                            current_host = stored_session_host
                     except Exception:
                         pass
                 await asyncio.to_thread(touch_live_session, current_session_id)
@@ -1160,6 +1215,16 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                 await _trigger_announcement(announcement_callback, username_clean, True, host_name=current_host)
                 _start_intro_watch_if_needed()
             except Exception as e:
+                # A connect handler error must still leave a DB session behind,
+                # otherwise the live badge has no backing row and no grace timer
+                # can ever clear it on disconnect (stale "Live" forever).
+                if not current_session_id:
+                    try:
+                        current_session_id = await asyncio.to_thread(
+                            start_live_session, username_clean, initial_host=None
+                        )
+                    except Exception:
+                        pass
                 # Keep runtime live status even if DB/announcement side effects fail.
                 runtime_status.set_live(username_clean, current_host, source="event")
                 runtime_status.update_observer_diag(username_clean, status="connected_with_handler_error", last_error=str(e))
@@ -1419,6 +1484,14 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     await asyncio.to_thread(end_live_session, current_session_id)
                 except Exception:
                     pass
+            # The sessions above are already closed. Clear connection state so
+            # the finally block does not schedule another 10-minute grace timer
+            # (which would fire a duplicate offline announcement after stop).
+            is_connected = False
+            current_session_id = None
+            disconnect_meta["session_id"] = None
+            disconnect_meta["at"] = None
+            disconnect_timer_task = None
             runtime_status.clear_live(username_clean)
             runtime_status.update_observer_diag(username_clean, status="stopped")
             raise
@@ -1800,17 +1873,21 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     "limit_progress": prog,
                 }
             runtime_status.update_observer_diag(username_clean, **diag_fields)
-        # If reconnect was requested while waiting, skip delay.
+        # If reconnect was requested while waiting, skip delay (consume the
+        # flag so the fresh client is not stopped again by the watcher).
         for _ in range(wait_seconds):
-            with _RECONNECT_REQUESTED_LOCK:
-                requested = username_clean in _RECONNECT_REQUESTED
-            if requested:
+            if _consume_reconnect_request(username_clean):
                 break
             await asyncio.sleep(1)
 
 
-def request_tiktok_reconnect(username: str = None):
-    """Request observer reconnect for one host or all active hosts."""
+def request_tiktok_reconnect(username: str = None, reconfirm_host: bool = True):
+    """Request observer reconnect for one host or all active hosts.
+
+    ``reconfirm_host=False`` is used by primary live webhooks: the account is
+    already confirmed live, so forcing host re-detection would wipe the host
+    that LiveIntro just recorded.
+    """
     with _ACTIVE_CLIENTS_LOCK:
         targets = [username.lower().lstrip("@")] if username else list(_ACTIVE_CLIENTS.keys())
     if not targets:
@@ -1828,10 +1905,12 @@ def request_tiktok_reconnect(username: str = None):
         if target:
             _clear_rate_limit_state(target)
             _LAST_INTRO_ANALYZED.pop(target, None)
-    with _HOST_RECONFIRM_REQUESTED_LOCK:
-        for target in targets:
-            if target:
-                _HOST_RECONFIRM_REQUESTED.add(target)
+            _LAST_INTRO_TEXT.pop(target, None)
+    if reconfirm_host:
+        with _HOST_RECONFIRM_REQUESTED_LOCK:
+            for target in targets:
+                if target:
+                    _HOST_RECONFIRM_REQUESTED.add(target)
     try:
         label = ", ".join(f"@{t}" for t in targets if t) or "(no targets)"
         log_activity_event("reconnect", f"TikTok reconnect requested for {label}.", (targets[0] if len(targets) == 1 else ""))

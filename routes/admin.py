@@ -883,20 +883,40 @@ def view_monitor():
 
     sessions = []
     unresolved_count = 0
+    _now_wib = datetime.now(pytz.timezone('Asia/Jakarta'))
     for s in session_rows:
         uname = (s[1] or "").lower()
         host_val = s[6]
+        # A live account may have a real host in runtime (from webhook or
+        # LiveIntro) while its DB session still carries the "Host" placeholder.
+        # Prefer the confirmed runtime host so the monitor does not report a
+        # false host-debt for a stream that is actually live.
+        if host_val in (None, "", "Host", "-") and uname in live_snapshot:
+            live_host = str((live_snapshot.get(uname) or {}).get("host") or "").strip()
+            if live_host and live_host not in ("Host", "-"):
+                host_val = live_host
         unresolved = host_val in (None, "", "Host", "-")
         if unresolved:
             unresolved_count += 1
+        dur = int(s[4] or 0)
+        if s[3] is None and s[2]:
+            # Ongoing sessions have no stored duration yet; derive it so the
+            # monitor and analytics JS do not show 0/dash for a live stream.
+            try:
+                started = pytz.timezone('Asia/Jakarta').localize(
+                    datetime.strptime(str(s[2])[:19], '%Y-%m-%d %H:%M:%S')
+                )
+                dur = max(0, int((_now_wib - started).total_seconds()))
+            except Exception:
+                pass
         sessions.append({
             "session_id": s[0],
             "username": s[1],
             "start_time": s[2],
             "end_time": s[3],
-            "duration_seconds": s[4] or 0,
+            "duration_seconds": dur,
             "total_coins": s[5] or 0,
-            "scheduled_host": s[6],
+            "scheduled_host": host_val,
             "is_live_now": uname in live_snapshot,
             "host_unresolved": unresolved,
         })
@@ -1225,22 +1245,41 @@ def resolve_session_host():
     if not updated:
         return redirect('/admin/monitor?msg=' + quote_plus('Gagal memperbarui host sesi.') + '&msg_type=danger')
 
+    # Only update the account's current host when the resolved session is the
+    # active one. A closed/old session must not overwrite the host that was
+    # detected for a different live stream that is running now.
+    live_snapshot = get_live_snapshot() or {}
+    live_item = live_snapshot.get(username) or {}
+    live_source = str(live_item.get("source") or "")
+    live_host = str(live_item.get("host") or "")
+    open_id = None
     try:
-        set_current_host_for_account(username, host_name)
+        from db import get_open_live_session_id
+        open_id = get_open_live_session_id(username)
     except Exception:
         pass
+    should_update_runtime = (
+        is_open
+        or open_id == session_id
+        or username not in live_snapshot
+        or live_host in ("", "Host", "-")
+    )
+    if should_update_runtime:
+        try:
+            set_current_host_for_account(username, host_name)
+        except Exception:
+            pass
+        try:
+            from runtime_status import set_live
+            set_live(username, host_name, source="manual_resolve")
+        except Exception:
+            pass
+    elif live_host and live_host not in ("Host", "-") and live_host != host_name:
+        print(
+            f"[Admin] Resolved closed session {session_id} -> {host_name} but @{username} "
 
-    # If this account is currently live, reflect the resolved host immediately.
-    try:
-        live = get_live_snapshot() or {}
-        if username in live or is_open:
-            try:
-                from runtime_status import set_live
-                set_live(username, host_name, source="manual_resolve")
-            except Exception:
-                pass
-    except Exception:
-        pass
+            f"is live with host {live_host}; runtime host left unchanged (source={live_source})."
+        )
 
     try:
         log_activity_event(
@@ -3811,7 +3850,14 @@ def reset_live_state_route():
             clear_all_live()
         except Exception:
             pass
-        targets = request_tiktok_reconnect()
+        try:
+            from runtime_status import clear_observer_diag
+            clear_observer_diag()
+        except Exception:
+            pass
+        # Manual reset changes live sessions/host state; allow the reconfirm
+        # path to re-detect host from the next LiveIntro.
+        targets = request_tiktok_reconnect(reconfirm_host=True)
         try:
             from db import log_activity_event
             log_activity_event("system", f"Live state reset completed; reconnect requested for: {targets}", "")
