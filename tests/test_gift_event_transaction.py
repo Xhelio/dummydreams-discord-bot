@@ -136,3 +136,24 @@ def test_atomic_gift_event_rolls_back_log_when_daily_aggregate_fails(
     assert result["status"] == "failed"
     assert "IntegrityError" in result["error"]
     assert (log_count, all_time_count, session_total) == (0, 0, 0)
+
+
+
+def test_atomic_gift_event_reads_gift_log_schema_once(tmp_path, monkeypatch):
+    path = tmp_path / "gift-schema-once.sqlite3"
+    _setup_gift_database(path)
+    _configure_database(monkeypatch, path)
+
+    original = db._get_table_column_info
+    calls = []
+
+    def counted_column_info(cursor, table):
+        calls.append(table)
+        return original(cursor, table)
+
+    monkeypatch.setattr(db, "_get_table_column_info", counted_column_info)
+
+    result = _record(msg_id="gift-schema-once")
+
+    assert result == {"status": "ok", "total_coins": 25}
+    assert calls == ["gift_logs"]
