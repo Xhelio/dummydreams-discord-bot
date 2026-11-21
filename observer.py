@@ -124,6 +124,23 @@ _LAST_INTRO_ANALYZED = {}
 _INTRO_CACHE_TTL_SECONDS = 6 * 3600
 
 
+def _extract_comment_username(event) -> str:
+    """Return a normalized TikTok username across TikTokLive user model versions."""
+    user_obj = event.get("user") if isinstance(event, dict) else getattr(event, "user", None)
+    if user_obj is None:
+        return ""
+    for attribute in ("unique_id", "display_id"):
+        try:
+            value = user_obj.get(attribute) if isinstance(user_obj, dict) else getattr(user_obj, attribute, None)
+        except Exception:
+            value = None
+        if value is not None:
+            username = str(value).strip().lstrip("@").lower()
+            if username:
+                return username
+    return ""
+
+
 def _safe_preview(value, limit: int = 180) -> str:
     try:
         text = str(value).replace("\n", " ").strip()
@@ -1287,12 +1304,16 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         @client.on(CommentEvent)
         async def on_comment(event: CommentEvent):
             try:
-                user = event.user.unique_id.lower()
-                comment_text = event.comment
+                user = _extract_comment_username(event)
+                comment_text = getattr(event, "comment", "") or ""
                 runtime_status.touch_live(username_clean)
                 if current_session_id:
                     await asyncio.to_thread(touch_live_session, current_session_id)
-                
+
+                # Keep the live heartbeat even when TikTok omits a usable user ID.
+                if not user:
+                    return
+
                 # 1. Cek verifikasi live chat akun Discord
                 if comment_callback:
                     if asyncio.iscoroutinefunction(comment_callback):

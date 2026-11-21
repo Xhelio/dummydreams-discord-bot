@@ -88,3 +88,21 @@ def test_extract_live_intro_text_returns_empty_when_no_intro_exists():
 def test_safe_preview_truncates_and_handles_unprintable_values():
     assert observer._safe_preview("line one\nline two") == "line one line two"
     assert observer._safe_preview("x" * 200, limit=20) == ("x" * 17) + "..."
+
+def test_extract_comment_username_prefers_unique_id_and_normalizes():
+    event = SimpleNamespace(user=SimpleNamespace(unique_id="@Creator", display_id="creator_display"))
+    assert observer._extract_comment_username(event) == "creator"
+
+
+def test_extract_comment_username_falls_back_to_display_id():
+    event = SimpleNamespace(user=SimpleNamespace(display_id="@DisplayName"))
+    assert observer._extract_comment_username(event) == "displayname"
+
+
+def test_extract_comment_username_supports_dict_payloads():
+    assert observer._extract_comment_username({"user": {"display_id": "@Viewer"}}) == "viewer"
+
+
+def test_extract_comment_username_returns_empty_for_missing_user_id():
+    assert observer._extract_comment_username(SimpleNamespace(user=SimpleNamespace())) == ""
+    assert observer._extract_comment_username(SimpleNamespace(user=None)) == ""
