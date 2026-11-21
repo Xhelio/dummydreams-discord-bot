@@ -67,7 +67,7 @@ _ANALYTICS_PROFILE_CACHE_TTL = 60.0
 # remote database. Bound concurrency to avoid overwhelming the small Turso
 # instance while overlapping network round-trips.
 _ANALYTICS_QUERY_EXECUTOR = ThreadPoolExecutor(
-    max_workers=4, thread_name_prefix="analytics-query"
+    max_workers=2, thread_name_prefix="analytics-query"
 )
 
 
@@ -2006,15 +2006,19 @@ def view_analytics():
     freq_viewer_rows = sorted(viewer_rows, key=lambda r: (r.get('gifts', 0), r.get('coins', 0)), reverse=True)[:10]
 
     # Baseline/profile: average per clock hour across all days (jam ramai/sepi tendency), respects filters.
-    bounds = get_analytics_date_bounds(host_arg, account_arg, viewer_arg)
+    bounds = _run_analytics_stage(
+        "date_bounds", get_analytics_date_bounds, host_arg, account_arg, viewer_arg
+    )
     if bounds and bounds[0] and bounds[1]:
         profile_start, profile_end = bounds[0], bounds[1]
     else:
         profile_start, profile_end = start_str, end_str
     # The baseline and profile use the same historical hourly series. Fetch it
     # once, and reuse a short-lived cached result across dashboard refreshes.
-    hourly_profile_series = _get_cached_analytics_profile(
-        profile_start, profile_end, host_arg, account_arg, viewer_arg
+    hourly_profile_series = _run_analytics_stage(
+        "hourly_profile",
+        _get_cached_analytics_profile,
+        profile_start, profile_end, host_arg, account_arg, viewer_arg,
     )
     hourly_baseline_series = hourly_profile_series if chart_group == 'hour' else []
 
