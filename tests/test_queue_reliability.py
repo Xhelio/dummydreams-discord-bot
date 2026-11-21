@@ -31,15 +31,51 @@ def test_activity_log_event_drops_when_queue_is_full_without_blocking(monkeypatc
 def test_queue_setting_returns_false_when_queue_is_full(monkeypatch):
     work_queue = queue.Queue(maxsize=1)
     work_queue.put(("existing", "value"))
-    cached = []
+    cache = {"overflow": ("old-value", 0)}
+    cache_lock = threading.Lock()
 
     monkeypatch.setattr(db, "_SETTING_WRITE_QUEUE", work_queue)
-    monkeypatch.setattr(db, "_cache_setting_value", lambda key, value: cached.append((key, value)))
+    monkeypatch.setattr(db, "_SETTINGS_CACHE", cache)
+    monkeypatch.setattr(db, "_SETTINGS_CACHE_LOCK", cache_lock)
     monkeypatch.setattr(db, "_ensure_setting_writer", lambda: None)
 
     assert db.queue_setting("overflow", "new-value") is False
-    assert cached == [("overflow", "new-value")]
+    assert cache["overflow"][0] == "old-value"
     assert work_queue.qsize() == 1
+
+
+def test_failed_setting_write_invalidates_optimistic_cache(monkeypatch):
+    work_queue = queue.Queue(maxsize=2)
+    cache = {}
+    cache_lock = threading.Lock()
+    writer_threads = []
+    real_thread = threading.Thread
+
+    def tracking_thread(*args, **kwargs):
+        thread = real_thread(*args, **kwargs)
+        writer_threads.append(thread)
+        return thread
+
+    def fail_write(_key, _value):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(db, "_SETTING_WRITE_QUEUE", work_queue)
+    monkeypatch.setattr(db, "_SETTINGS_CACHE", cache)
+    monkeypatch.setattr(db, "_SETTINGS_CACHE_LOCK", cache_lock)
+    monkeypatch.setattr(db, "_SETTING_WRITER_STARTED", False)
+    monkeypatch.setattr(db, "_SETTING_WRITER_LOCK", threading.Lock())
+    monkeypatch.setattr(db, "_write_setting_row", fail_write)
+    monkeypatch.setattr(db.threading, "Thread", tracking_thread)
+
+    assert db.queue_setting("feature_enabled", "true") is True
+    assert cache["feature_enabled"][0] == "true"
+
+    work_queue.join()
+    work_queue.put(None)
+    writer_threads[0].join(timeout=3)
+
+    assert not writer_threads[0].is_alive()
+    assert "feature_enabled" not in cache
 
 
 def test_activity_writer_drains_all_queued_events_before_shutdown(monkeypatch):
