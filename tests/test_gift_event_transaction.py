@@ -119,8 +119,7 @@ def test_atomic_gift_event_rolls_back_log_when_daily_aggregate_fails(
     _setup_gift_database(path, daily_check="CHECK(coins < 0)")
     _configure_database(monkeypatch, path)
 
-    with pytest.raises(sqlite3.IntegrityError):
-        _record(msg_id="gift-message-failing", coins=25)
+    result = _record(msg_id="gift-message-failing", coins=25)
 
     connection = sqlite3.connect(path)
     try:
@@ -136,4 +135,6 @@ def test_atomic_gift_event_rolls_back_log_when_daily_aggregate_fails(
     finally:
         connection.close()
 
+    assert result["status"] == "failed"
+    assert "IntegrityError" in result["error"]
     assert (log_count, all_time_count, session_total) == (0, 0, 0)
