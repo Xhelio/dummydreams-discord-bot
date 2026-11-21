@@ -382,8 +382,13 @@ async def probe_room_live(username: str):
             return None
         data = await fetch(web, username)
         payload = data or {}
-        root = payload.get("data") if isinstance(payload, dict) else {}
-        if not isinstance(root, dict):
+        if isinstance(payload, dict) and "data" in payload:
+            root = payload.get("data")
+            # An explicitly present but malformed data envelope is not proof
+            # that the account is offline; keep the probe result unknown.
+            if not isinstance(root, dict):
+                return None
+        else:
             root = payload if isinstance(payload, dict) else {}
 
         user = root.get("user") if isinstance(root.get("user"), dict) else {}
