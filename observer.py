@@ -1462,10 +1462,20 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     nonlocal current_session_id
                     database_started = time.perf_counter()
                     if not current_session_id:
+                        session_started = time.perf_counter()
                         current_session_id = await asyncio.to_thread(
                             start_live_session, username_clean, initial_host=current_host
                         )
+                        _log_gift_timing(
+                            username_clean, "database.session_start",
+                            time.perf_counter() - session_started
+                        )
+                    touch_started = time.perf_counter()
                     await asyncio.to_thread(touch_live_session, current_session_id)
+                    _log_gift_timing(
+                        username_clean, "database.session_touch",
+                        time.perf_counter() - touch_started
+                    )
                     start_session_heartbeat()
 
                     result = await asyncio.to_thread(
