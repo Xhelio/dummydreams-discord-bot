@@ -395,6 +395,8 @@ async def probe_room_live(username: str):
     username = (username or "").lower().lstrip("@")
     if not username or FetchRoomIdAPIRoute is None:
         return None
+
+    client = None
     try:
         # Construct off the loop: httpx loads the certifi CA bundle synchronously
         # (ssl.create_default_context), which blocked the loop for seconds.
@@ -438,6 +440,18 @@ async def probe_room_live(username: str):
     except Exception as e:
         print(f"[{username}] Live probe error: {e}")
         return None
+    finally:
+        # Probe clients are short-lived and do not enter the observer's normal
+        # lifecycle cleanup. Close their HTTP session on every return path.
+        web = getattr(client, "web", None) if client is not None else None
+        closer = getattr(web, "close", None)
+        if closer:
+            try:
+                result = closer()
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as close_error:
+                print(f"[{username}] Live probe HTTP cleanup error: {close_error}")
     return None
 
 def clear_active_live_status(username: str):
@@ -491,6 +505,11 @@ _OBSERVER_ERROR_LOG_INTERVAL_SECONDS = 900
 # TikTokLive raises UserNotFoundError for accounts that cannot go live at all
 # (never live / not found). They are not hosts yet: poll slower, never alert.
 _UNAVAILABLE_RETRY_SECONDS = 300
+
+
+def _should_reset_observer_cycle_state(connected_this_cycle: bool, json_empty_cycle: bool) -> bool:
+    """Only a successful websocket cycle may clear failure/backoff state."""
+    return bool(connected_this_cycle and not json_empty_cycle)
 
 
 def _is_reconnect_requested(username: str) -> bool:
@@ -1767,9 +1786,11 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     )
             elif probe_result is None and cycle_error is None and not grace_pending:
                 runtime_status.update_observer_diag(username_clean, status="checking")
-        else:
+        elif _should_reset_observer_cycle_state(connected_this_cycle, json_empty_cycle):
+            # Preserve consecutive failures and the persisted JSON-response
+            # cooldown when TikTok returns an empty/non-JSON websocket response.
             consecutive_failures = 0
-            probe_result = False if connected_this_cycle else None
+            probe_result = False
             _clear_rate_limit_state(username_clean)
             _LAST_OFFLINE_LOG.pop(username_clean, None)
 
