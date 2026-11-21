@@ -2987,20 +2987,30 @@ def _start_loop_stack_watchdog() -> None:
                 frame = frames.get(thread.ident)
                 if frame is None:
                     continue
-                thread_stack = "".join(traceback.format_stack(frame, limit=12))
-                captured.append(
-                    f"--- thread={thread.name!r} ident={thread.ident} "
-                    f"daemon={thread.daemon} ---\\n{thread_stack}"
+                # Render compact, one-record-per-thread diagnostics. Render's
+                # log ingestion truncates long messages, so a single combined
+                # traceback hides every worker stack after the first frame.
+                extracted = traceback.extract_stack(frame, limit=6)
+                frames_summary = " <- ".join(
+                    f"{os.path.basename(item.filename)}:{item.lineno}:{item.name}"
+                    for item in reversed(extracted)
                 )
-            stack = "\\n".join(captured) or "(no thread frames available)"
+                captured.append(thread)
+                log.warning(
+                    "[EventLoop Stack] thread=%s ident=%s daemon=%s "
+                    "heartbeat_overdue=%.2fs frames=%s",
+                    thread.name,
+                    thread.ident,
+                    thread.daemon,
+                    stale_seconds,
+                    frames_summary,
+                )
             log.warning(
-                "[EventLoop Stack] live thread snapshots: heartbeat overdue "
-                "by %.2fs (may also reflect OS/process scheduling pause; "
-                "captured %d/%d threads):\\n%s",
-                stale_seconds,
+                "[EventLoop Stack] snapshot complete: captured %d/%d threads; "
+                "heartbeat overdue %.2fs",
                 len(captured),
                 len(threads),
-                stack,
+                stale_seconds,
             )
 
     threading.Thread(
