@@ -202,6 +202,8 @@ def _collect_intro_texts_from_room_info(value, path: str = "", depth: int = 0, o
         return out
     if isinstance(value, dict):
         for key, item in value.items():
+            if len(out) >= 5:
+                break
             key_l = str(key).lower()
             child_path = f"{path}.{key}" if path else str(key)
             if "intro" in key_l:
