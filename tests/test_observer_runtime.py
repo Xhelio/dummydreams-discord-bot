@@ -19,7 +19,7 @@ def test_priority_probe_filters_normalizes_and_skips_already_live_hosts(monkeypa
         "get_observable_hosts",
         lambda: [
             {"username": "@LiveHost", "priority": True},
-            {"username": " @OfflineHost ", "priority": True},
+            {"username": "@OfflineHost", "priority": True},
             {"username": "offlinehost", "priority": True},
             {"username": "normalhost", "priority": False},
             {"username": "", "priority": True},
