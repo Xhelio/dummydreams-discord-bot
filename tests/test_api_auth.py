@@ -39,7 +39,7 @@ def test_api_key_accepts_matching_key_with_surrounding_whitespace(monkeypatch):
 def test_api_auth_error_returns_503_when_secret_is_not_configured(monkeypatch):
     monkeypatch.delenv("API_SECRET_KEY", raising=False)
 
-    with api.request.test_request_context("/api/config"):
+    with Flask(__name__).test_request_context("/api/config"):
         response, status = api._api_auth_error()
 
     assert status == 503
@@ -49,13 +49,13 @@ def test_api_auth_error_returns_503_when_secret_is_not_configured(monkeypatch):
 def test_api_auth_error_returns_401_for_missing_or_invalid_key(monkeypatch):
     monkeypatch.setenv("API_SECRET_KEY", "configured-secret")
 
-    with api.request.test_request_context("/api/config"):
+    with Flask(__name__).test_request_context("/api/config"):
         response, status = api._api_auth_error()
 
     assert status == 401
     assert response.get_json()["message"] == "Unauthorized"
 
-    with api.request.test_request_context(
+    with Flask(__name__).test_request_context(
         "/api/config", headers={"X-API-KEY": "incorrect"}
     ):
         response, status = api._api_auth_error()
@@ -66,7 +66,7 @@ def test_api_auth_error_returns_401_for_missing_or_invalid_key(monkeypatch):
 def test_api_auth_error_allows_valid_key(monkeypatch):
     monkeypatch.setenv("API_SECRET_KEY", "configured-secret")
 
-    with api.request.test_request_context(
+    with Flask(__name__).test_request_context(
         "/api/config", headers={"X-API-KEY": "configured-secret"}
     ):
         assert api._api_auth_error() is None
