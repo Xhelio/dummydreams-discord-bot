@@ -47,7 +47,7 @@ from db import (
     save_daily_gift_data, 
     start_live_session, 
     end_live_session, 
-    log_gift_transaction,
+    record_gift_event_transaction,
     get_active_hosts,
     get_observable_hosts,
     get_db_connection,
