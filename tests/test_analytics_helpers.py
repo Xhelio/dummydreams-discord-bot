@@ -41,7 +41,7 @@ def _analytics_db(tmp_path, monkeypatch):
             ("2026-11-20", "10:15:00", "2026-11-20 10:15:00", "Host A", "",
              "creator_a", "viewer_1", "Viewer One", "Rose", 2, 10),
             ("2026-11-20", "11:30:00", "2026-11-20 11:30:00", "",
-             "host_b", "creator_b", "viewer_2", "Heart", 3, 15),
+             "host_b", "creator_b", "viewer_2", "Viewer Two", "Heart", 3, 15),
             ("2026-11-21", "10:45:00", "2026-11-21 10:45:00", "Host A", "",
              "creator_a", "viewer_1", "Viewer One", "Rose", 1, 5),
         ],
