@@ -1641,9 +1641,20 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
 
         # Secondary probe: if the event client didn't connect but TikTok reports live,
         # mark status/announcement so the dashboard is not stuck on "No Live Now".
+        # However, when the websocket handshake already received an empty/non-JSON
+        # response, a second room API request in the same cycle only repeats the
+        # blocked request and can worsen TikTok's rate limiting. Preserve an
+        # unknown probe result and let the existing backoff handle the next retry.
         grace_pending = bool(disconnect_timer_task and not disconnect_timer_task.done())
         probe_result = None
-        if not connected_this_cycle:
+        cycle_error_text = str(cycle_error or "").lower()
+        json_empty_cycle = (
+            "jsondecodeerror" in cycle_error_text
+            or "expecting value" in cycle_error_text
+            or "failedparseroomiderror" in cycle_error_text
+            or "non-json response" in cycle_error_text
+        )
+        if not connected_this_cycle and not json_empty_cycle:
             probe_result = await probe_room_live(username_clean)
             runtime_status.update_observer_diag(
                 username_clean,
