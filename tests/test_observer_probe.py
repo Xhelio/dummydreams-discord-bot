@@ -52,6 +52,36 @@ def test_probe_room_live_classifies_tiktok_payloads(monkeypatch, payload, expect
     assert constructed == ["creator"]
 
 
+def test_probe_room_live_closes_http_session_after_fetch(monkeypatch):
+    closed = []
+
+    class FakeWeb:
+        async def close(self):
+            closed.append(True)
+
+    async def fetch_user_room_data(_web, _username):
+        return {"data": {"user": {"status": 2}}}
+
+    monkeypatch.setattr(
+        observer, "TikTokLiveClient",
+        lambda *, unique_id: SimpleNamespace(web=FakeWeb()),
+    )
+    monkeypatch.setattr(
+        observer, "FetchRoomIdAPIRoute",
+        SimpleNamespace(fetch_user_room_data=fetch_user_room_data),
+    )
+
+    assert asyncio.run(observer.probe_room_live("Creator")) is True
+    assert closed == [True]
+
+
+def test_json_empty_websocket_cycle_preserves_failure_backoff():
+    assert observer._should_reset_observer_cycle_state(False, True) is False
+    assert observer._should_reset_observer_cycle_state(False, False) is False
+    assert observer._should_reset_observer_cycle_state(True, False) is True
+    assert observer._should_reset_observer_cycle_state(True, True) is False
+
+
 def test_probe_room_live_returns_unknown_when_client_has_no_web(monkeypatch):
     constructed = _install_probe(monkeypatch, {"data": {"user": {"status": 2}}}, web=False)
 
