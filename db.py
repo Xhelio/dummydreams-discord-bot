@@ -3665,15 +3665,9 @@ def record_gift_event_transaction(
         # of issuing a second PRAGMA table_info round-trip on every gift.
         column_info = _get_table_column_info(cur, "gift_logs")
         columns = {col["name"] for col in column_info}
-        msg_id_clean = data["msg_id"]
-        if msg_id_clean and "msg_id" in columns:
-            already = cur.execute(
-                "SELECT 1 FROM gift_logs WHERE msg_id = ? LIMIT 1",
-                (msg_id_clean,),
-            ).fetchone()
-            if already:
-                return {"status": "duplicate"}
-
+        # The unique msg_id constraint and INSERT OR IGNORE already provide
+        # atomic deduplication. Avoid a separate SELECT round-trip to Turso
+        # before every insert; rowcount below still detects replayed events.
         _insert_gift_log_row(
             cur, data, or_ignore=True, column_info=column_info
         )
@@ -4203,11 +4197,11 @@ def _normalize_discord_id(value) -> str:
     return s
 
 
-# Role assignment runs after every gift. A short positive-only cache avoids
-# opening a Turso connection for the same TikTok -> Discord mapping on every
-# event, while keeping remapping changes visible within a few seconds.
+# Role assignment runs after every gift. A positive-only cache avoids
+# opening a Turso connection for repeated TikTok -> Discord lookups. Mapping
+# changes made through bind_user_mapping invalidate this cache immediately.
 _DISCORD_MAPPING_CACHE = {}
-_DISCORD_MAPPING_CACHE_TTL = 10.0
+_DISCORD_MAPPING_CACHE_TTL = 60.0
 _DISCORD_MAPPING_CACHE_LOCK = threading.Lock()
 
 
