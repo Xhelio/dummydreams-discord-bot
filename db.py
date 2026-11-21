@@ -4168,14 +4168,49 @@ def _normalize_discord_id(value) -> str:
     return s
 
 
+# Role assignment runs after every gift. A short positive-only cache avoids
+# opening a Turso connection for the same TikTok -> Discord mapping on every
+# event, while keeping remapping changes visible within a few seconds.
+_DISCORD_MAPPING_CACHE = {}
+_DISCORD_MAPPING_CACHE_TTL = 10.0
+_DISCORD_MAPPING_CACHE_LOCK = threading.Lock()
+
+
 def get_discord_id_from_tiktok(tiktok_user: str):
+    username = str(tiktok_user or "").lower().lstrip("@").strip()
+    if not username:
+        return None
+
+    now = time.monotonic()
+    with _DISCORD_MAPPING_CACHE_LOCK:
+        cached = _DISCORD_MAPPING_CACHE.get(username)
+        if cached and now - cached[1] < _DISCORD_MAPPING_CACHE_TTL:
+            return cached[0]
+
     conn = get_db_connection()
     try:
-        res = conn.execute("SELECT discord_id FROM user_mappings WHERE tiktok_user = ?", (tiktok_user.lower(),))
+        res = conn.execute(
+            "SELECT discord_id FROM user_mappings WHERE tiktok_user = ?",
+            (username,),
+        )
         row = res.fetchone()
-        return _normalize_discord_id(row[0]) if row and row[0] is not None else None
+        discord_id = (
+            _normalize_discord_id(row[0])
+            if row and row[0] is not None
+            else None
+        )
     finally:
         conn.close()
+
+    # Cache only positive mappings. Unmapped users can be linked immediately
+    # without waiting for a negative-cache expiry.
+    if discord_id:
+        with _DISCORD_MAPPING_CACHE_LOCK:
+            _DISCORD_MAPPING_CACHE[username] = (discord_id, time.monotonic())
+            if len(_DISCORD_MAPPING_CACHE) > 2000:
+                _DISCORD_MAPPING_CACHE.clear()
+                _DISCORD_MAPPING_CACHE[username] = (discord_id, time.monotonic())
+    return discord_id
 
 import random
 
