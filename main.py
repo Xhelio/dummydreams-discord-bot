@@ -2940,12 +2940,13 @@ _LOOP_BEAT = {
 
 
 def _start_loop_stack_watchdog() -> None:
-    """Take a diagnostic stack sample only after the loop monitor confirms lag.
+    """Capture the main-thread stack while the event-loop heartbeat is overdue.
 
-    The loop's heartbeat is intentionally refreshed only by the event loop.
-    A stale heartbeat by itself is not proof of a block: sampling can coincide
-    with selector waits or scheduler jitter. The lag monitor is the source of
-    truth; this thread adds a best-effort stack sample after a confirmed delay.
+    The heartbeat is refreshed by the event loop every second. Sampling from a
+    separate thread after it has been stale for >2s captures the active frame
+    during a stall, rather than waiting for the loop to recover. A stale
+    heartbeat can also reflect process/OS scheduling pauses, so the stack is
+    diagnostic evidence, not proof that a particular function caused the lag.
     """
     import threading
     import traceback
@@ -2958,22 +2959,25 @@ def _start_loop_stack_watchdog() -> None:
         while True:
             time.sleep(0.5)
             now = time.monotonic()
-            lag_at = _LOOP_BEAT["last_confirmed_lag_at"]
-            lag_seconds = _LOOP_BEAT["last_confirmed_lag_seconds"]
-            if not lag_at or now - lag_at > 3.0:
+            heartbeat_at = _LOOP_BEAT["at"]
+            stale_seconds = max(0.0, now - heartbeat_at)
+            # _loop_lag_monitor sleeps for one second. Two seconds without a
+            # heartbeat is abnormal, while avoiding snapshots on ordinary
+            # selector waits and small scheduler jitter.
+            if stale_seconds < 2.0:
                 continue
             if now - _LOOP_BEAT["reported"] < 10.0:
                 continue
             _LOOP_BEAT["reported"] = now
             frame = sys._current_frames().get(main_ident)
             if frame is not None:
-                stack = "".join(traceback.format_stack(frame)[-14:])
+                stack = "".join(traceback.format_stack(frame)[-18:])
             else:
                 stack = "(main thread frame unavailable)"
             log.warning(
-                "[EventLoop Stack] diagnostic sample after confirmed %.2fs loop lag "
-                "(sample may be post-recovery; do not treat selector waits as the cause):\\n%s",
-                lag_seconds,
+                "[EventLoop Stack] live main-thread snapshot: heartbeat overdue "
+                "by %.2fs (may also reflect OS/process scheduling pause):\\n%s",
+                stale_seconds,
                 stack,
             )
 
