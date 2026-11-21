@@ -39,6 +39,7 @@ def _install_probe(monkeypatch, payload=None, *, error=None, web=True):
         ({"data": {"user": {}, "liveRoom": {"status": 0}}}, False),
         ({}, None),
         ({"data": None}, None),
+        ({"data": []}, None),
         ({"unexpected": "shape"}, False),
     ],
 )
