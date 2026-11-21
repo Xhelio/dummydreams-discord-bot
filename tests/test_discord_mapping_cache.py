@@ -64,3 +64,29 @@ def test_missing_mapping_is_not_cached(monkeypatch):
 
     assert db.get_discord_id_from_tiktok("newuser") is None
     assert db.get_discord_id_from_tiktok("newuser") == "123456789"
+
+
+
+def test_binding_a_user_invalidates_cached_discord_mappings(monkeypatch):
+    reset_mapping_cache()
+    with db._DISCORD_MAPPING_CACHE_LOCK:
+        db._DISCORD_MAPPING_CACHE["exampleuser"] = (
+            "123456789",
+            db.time.monotonic(),
+        )
+
+    class BindingConnection:
+        def execute(self, sql, params):
+            return self
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(db, "get_db_connection", BindingConnection)
+
+    assert db.bind_user_mapping("987654321", "exampleuser") is True
+    with db._DISCORD_MAPPING_CACHE_LOCK:
+        assert db._DISCORD_MAPPING_CACHE == {}
