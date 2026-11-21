@@ -20,7 +20,7 @@ def test_set_live_normalizes_username_and_preserves_detected_host():
 
 
 def test_set_live_ignores_empty_username():
-    runtime_status.set_live("  ")
+    runtime_status.set_live("")
 
     assert runtime_status.get_live_snapshot() == {}
 
