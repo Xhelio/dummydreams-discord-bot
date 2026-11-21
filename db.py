@@ -3375,6 +3375,8 @@ def end_live_session(session_id: int, end_time: str = None):
             end_dt = now
     end_str = end_dt.strftime('%Y-%m-%d %H:%M:%S')
     def _end(conn):
+        effective_end_dt = end_dt
+        effective_end_str = end_str
         cur = conn.cursor()
         try:
             row = cur.execute(
@@ -3408,7 +3410,7 @@ def end_live_session(session_id: int, end_time: str = None):
             try:
                 start_dt_naive = datetime.strptime(str(row[0])[:19], '%Y-%m-%d %H:%M:%S')
                 start_dt = wib.localize(start_dt_naive)
-                duration_sec = max(0, int((end_dt - start_dt).total_seconds()) - paused_sec)
+                duration_sec = max(0, int((effective_end_dt - start_dt).total_seconds()) - paused_sec)
             except Exception:
                 duration_sec = 0
 
@@ -3416,7 +3418,7 @@ def end_live_session(session_id: int, end_time: str = None):
             UPDATE live_sessions 
             SET end_time = ?, duration_seconds = ?, last_seen_at = COALESCE(last_seen_at, ?)
             WHERE session_id = ?
-        """, (end_str, duration_sec, end_str, session_id))
+        """, (effective_end_str, duration_sec, effective_end_str, session_id))
     return write_transaction(_end)
 def _get_table_column_info(cur, table: str) -> list:
     """Ambil detail kolom tabel: nama, tipe, NOT NULL, default, primary key."""
