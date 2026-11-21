@@ -140,3 +140,28 @@ def test_analytics_date_bounds_respect_host_and_account_filters(tmp_path, monkey
     assert db.get_analytics_date_bounds(
         host="@HOST_A", account="@CREATOR_A"
     ) == ("2026-11-20", "2026-11-21")
+
+def test_analytics_date_indexes_match_range_filter_expressions(tmp_path):
+    database_path = tmp_path / "analytics-indexes.sqlite3"
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE gift_logs (log_date TEXT);
+            CREATE TABLE live_sessions (start_time TEXT);
+            """
+        )
+
+        db._ensure_analytics_indexes(connection)
+
+        gift_indexes = {
+            row[1] for row in connection.execute("PRAGMA index_list(gift_logs)")
+        }
+        session_indexes = {
+            row[1] for row in connection.execute("PRAGMA index_list(live_sessions)")
+        }
+
+        assert "idx_gift_logs_analytics_date" in gift_indexes
+        assert "idx_live_sessions_analytics_date" in session_indexes
+    finally:
+        connection.close()
