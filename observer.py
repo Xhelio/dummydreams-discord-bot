@@ -91,6 +91,33 @@ _RECONNECT_REQUESTED_LOCK = threading.Lock()
 _HOST_RECONFIRM_REQUESTED = set()
 _HOST_RECONFIRM_REQUESTED_LOCK = threading.Lock()
 
+# Slow GiftEvent stage diagnostics are throttled per host/stage to avoid log floods.
+_GIFT_TIMING_LOG = log_setup.get_logger("observer.timing")
+_GIFT_TIMING_LOCK = threading.Lock()
+_GIFT_TIMING_LAST_LOG = {}
+_GIFT_TIMING_THRESHOLD_SECONDS = 0.5
+_GIFT_TIMING_COOLDOWN_SECONDS = 30.0
+
+
+def _log_gift_timing(username: str, stage: str, elapsed: float) -> bool:
+    """Log a slow gift-processing stage at most once per host/stage per cooldown."""
+    if elapsed < _GIFT_TIMING_THRESHOLD_SECONDS:
+        return False
+    now = time.monotonic()
+    key = (username, stage)
+    with _GIFT_TIMING_LOCK:
+        if now - _GIFT_TIMING_LAST_LOG.get(key, 0.0) < _GIFT_TIMING_COOLDOWN_SECONDS:
+            return False
+        _GIFT_TIMING_LAST_LOG[key] = now
+    _GIFT_TIMING_LOG.info(
+        "[GiftEvent Timing] host=%s stage=%s elapsed=%.3fs",
+        username,
+        stage,
+        elapsed,
+    )
+    return True
+
+
 # Cached Live Intro text. This is only ever populated from LiveIntroEvent (or
 # intro-named fields in room info), so the fallback stays tied to the intro
 # source and never uses arbitrary chat / room titles.
@@ -1362,6 +1389,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
 
         @client.on(GiftEvent)
         async def on_gift(event: GiftEvent):
+            gift_started = time.perf_counter()
             try:
                 if not is_feature_enabled("live_tracking"):
                     return
@@ -1417,6 +1445,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
 
                 if coins > 0:
                     nonlocal current_session_id
+                    database_started = time.perf_counter()
                     if not current_session_id:
                         current_session_id = await asyncio.to_thread(
                             start_live_session, username_clean, initial_host=current_host
@@ -1428,6 +1457,9 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                         _record_gift_event_db,
                         current_session_id, username_clean, user, display_name,
                         gift_name, repeat, coins, msg_id, diamond, current_host,
+                    )
+                    _log_gift_timing(
+                        username_clean, "database", time.perf_counter() - database_started
                     )
                     if result["status"] == "duplicate":
                         print(
@@ -1452,12 +1484,20 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     print(f"[Activity] {result['message']}")
 
                     if role_callback:
+                        role_started = time.perf_counter()
                         if asyncio.iscoroutinefunction(role_callback):
                             await role_callback(user, total_coins)
                         else:
                             role_callback(user, total_coins)
+                        _log_gift_timing(
+                            username_clean, "role_callback", time.perf_counter() - role_started
+                        )
             except Exception as e:
                 print(f"[{username_clean}] Error handling GiftEvent: {e}")
+            finally:
+                _log_gift_timing(
+                    username_clean, "total", time.perf_counter() - gift_started
+                )
 
         cycle_error = None
         client_task = None
