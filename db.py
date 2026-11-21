@@ -177,38 +177,43 @@ def is_transient_db_error(exc) -> bool:
 
 
 def write_transaction(operation, attempts: int = 4, base_delay: float = 0.35):
-    """Run ``operation(conn)`` under the process-wide write lock, with retries.
+    """Run one complete write transaction under the process-wide lock.
 
-    The callback may issue several statements on ``conn``; the transaction is
-    committed when it returns. Transient Turso/SQLite failures are retried with
-    exponential backoff on a fresh connection.
-
-    Lock acquisition is bounded: a Turso socket can stall for minutes, and a
-    writer that never releases the lock used to block every other write (and
-    therefore verification clicks) indefinitely. Failing after 30s surfaces a
-    clear error instead of an endless loading spinner.
+    Connection creation, callback execution, commit, rollback, and close are
+    all covered by the retry boundary. Each retry receives a fresh connection.
+    The callback must contain database work only (no network calls or sleeps).
     """
+    try:
+        attempts = max(1, int(attempts))
+        base_delay = max(0.0, float(base_delay))
+    except (TypeError, ValueError):
+        raise ValueError("attempts and base_delay must be numeric")
+
     last_error = None
     for attempt in range(1, attempts + 1):
         if not _DB_WRITE_LOCK.acquire(timeout=30.0):
             raise TimeoutError(
                 "Database write lock busy for 30s; another write is stalled"
             )
+        conn = None
         try:
             conn = get_db_connection()
-            try:
-                result = operation(conn)
-                conn.commit()
-                return result
-            except Exception as e:
-                last_error = e
+            result = operation(conn)
+            conn.commit()
+            return result
+        except Exception as exc:
+            last_error = exc
+            if conn is not None:
                 try:
                     conn.rollback()
                 except Exception:
                     pass
-            finally:
-                conn.close()
         finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
             _DB_WRITE_LOCK.release()
 
         if attempt >= attempts or not is_transient_db_error(last_error):
@@ -216,13 +221,12 @@ def write_transaction(operation, attempts: int = 4, base_delay: float = 0.35):
 
         delay = base_delay * (2 ** (attempt - 1))
         print(
-            f"[DB] Transient write error (attempt {attempt}/{attempts}), retrying in "
-            f"{delay:.1f}s: {type(last_error).__name__}: {last_error}"
+            f"[DB] Transient write error (attempt {attempt}/{attempts}), "
+            f"retrying in {delay:.1f}s: {type(last_error).__name__}: {last_error}"
         )
         time.sleep(delay)
 
     raise last_error
-
 
 def get_database_backend() -> str:
     if HAS_LIBSQL and TURSO_URL:
@@ -3218,8 +3222,7 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
     explicit_host = initial_host is not None
     current_host = initial_host if explicit_host else get_current_host_for_account(user_clean, fresh_only=True)
 
-    conn = get_db_connection()
-    try:
+    def _start(conn):
         cur = conn.cursor()
 
         # 1) Coba lanjutkan sesi yang di-suspend saat bot restart/deploy.
@@ -3356,11 +3359,8 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
             INSERT INTO live_sessions (tiktok_username, start_time, scheduled_host, last_seen_at) 
             VALUES (?, ?, ?, ?)
         """, (user_clean, now_str, current_host, now_str))
-        conn.commit()
         return cur.lastrowid
-    finally:
-        conn.close()
-
+    return write_transaction(_start)
 def end_live_session(session_id: int, end_time: str = None):
     """Close a live session. ``end_time`` lets callers record the actual
     disconnect moment instead of the moment the grace timer fired."""
@@ -3374,8 +3374,7 @@ def end_live_session(session_id: int, end_time: str = None):
         except Exception:
             end_dt = now
     end_str = end_dt.strftime('%Y-%m-%d %H:%M:%S')
-    conn = get_db_connection()
-    try:
+    def _end(conn):
         cur = conn.cursor()
         try:
             row = cur.execute(
@@ -3418,10 +3417,7 @@ def end_live_session(session_id: int, end_time: str = None):
             SET end_time = ?, duration_seconds = ?, last_seen_at = COALESCE(last_seen_at, ?)
             WHERE session_id = ?
         """, (end_str, duration_sec, end_str, session_id))
-        conn.commit()
-    finally:
-        conn.close()
-
+    return write_transaction(_end)
 def _get_table_column_info(cur, table: str) -> list:
     """Ambil detail kolom tabel: nama, tipe, NOT NULL, default, primary key."""
     try:
