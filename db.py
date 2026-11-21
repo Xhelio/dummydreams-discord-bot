@@ -176,12 +176,17 @@ def is_transient_db_error(exc) -> bool:
     return any(token in text for token in _TRANSIENT_DB_TOKENS)
 
 
-def write_transaction(operation, attempts: int = 4, base_delay: float = 0.35):
+def write_transaction(
+    operation,
+    attempts: int = 4,
+    base_delay: float = 0.35,
+    timing_label: str = None,
+):
     """Run one complete write transaction under the process-wide lock.
 
     Connection creation, callback execution, commit, rollback, and close are
-    all covered by the retry boundary. Each retry receives a fresh connection.
-    The callback must contain database work only (no network calls or sleeps).
+    all covered by the retry boundary. The optional timing label records slow
+    lock/connection/operation/commit stages for selected hot paths.
     """
     try:
         attempts = max(1, int(attempts))
@@ -189,17 +194,37 @@ def write_transaction(operation, attempts: int = 4, base_delay: float = 0.35):
     except (TypeError, ValueError):
         raise ValueError("attempts and base_delay must be numeric")
 
+    def _log_stage(stage: str, elapsed: float, attempt: int) -> None:
+        if timing_label and elapsed >= 0.5:
+            print(
+                f"[DB Timing] operation={timing_label} stage={stage} "
+                f"elapsed={elapsed:.3f}s attempt={attempt}"
+            )
+
     last_error = None
     for attempt in range(1, attempts + 1):
-        if not _DB_WRITE_LOCK.acquire(timeout=30.0):
+        attempt_started = time.perf_counter()
+        lock_started = time.perf_counter()
+        acquired = _DB_WRITE_LOCK.acquire(timeout=30.0)
+        lock_wait = time.perf_counter() - lock_started
+        _log_stage("lock_wait", lock_wait, attempt)
+        if not acquired:
             raise TimeoutError(
                 "Database write lock busy for 30s; another write is stalled"
             )
         conn = None
         try:
+            connect_started = time.perf_counter()
             conn = get_db_connection()
+            _log_stage("connect", time.perf_counter() - connect_started, attempt)
+
+            operation_started = time.perf_counter()
             result = operation(conn)
+            _log_stage("operation", time.perf_counter() - operation_started, attempt)
+
+            commit_started = time.perf_counter()
             conn.commit()
+            _log_stage("commit", time.perf_counter() - commit_started, attempt)
             return result
         except Exception as exc:
             last_error = exc
@@ -209,12 +234,15 @@ def write_transaction(operation, attempts: int = 4, base_delay: float = 0.35):
                 except Exception:
                     pass
         finally:
+            close_started = time.perf_counter()
             if conn is not None:
                 try:
                     conn.close()
                 except Exception:
                     pass
+            _log_stage("close", time.perf_counter() - close_started, attempt)
             _DB_WRITE_LOCK.release()
+            _log_stage("transaction_total", time.perf_counter() - attempt_started, attempt)
 
         if attempt >= attempts or not is_transient_db_error(last_error):
             raise last_error
@@ -3566,7 +3594,7 @@ def log_gift_transaction(session_id: int, target_user: str, viewer_user: str, vi
         return True
 
     try:
-        stored = write_transaction(_store)
+        stored = write_transaction(_store, timing_label="gift_log")
     except Exception as e:
         error_text = f"{type(e).__name__}: {e}"
         print(f"[GiftLog] FAILED to store gift log for @{viewer_user} ({gift_name}, {coins}c): {error_text}")
@@ -3775,7 +3803,7 @@ def save_gift_data(username: str, display_name: str, coins: int) -> int:
         ).fetchone()
         return row[0] if row else 0
 
-    return write_transaction(_store)
+    return write_transaction(_store, timing_label="gift_total")
 
 def save_daily_gift_data(username: str, display_name: str, coins: int):
     wib = pytz.timezone('Asia/Jakarta')
@@ -3790,7 +3818,7 @@ def save_daily_gift_data(username: str, display_name: str, coins: int):
             display_name = excluded.display_name
         """, (username.lower(), display_name, coins, today_str))
 
-    write_transaction(_store)
+    write_transaction(_store, timing_label="gift_daily_total")
 
 def recalculate_coin_totals() -> dict:
     """Rebuild all coin totals from the authoritative gift_logs table.
