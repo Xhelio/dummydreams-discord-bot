@@ -4155,6 +4155,26 @@ async def main():
     log_setup.setup_logging()
     loop = asyncio.get_running_loop()
     log_setup.install_asyncio_exception_handler(loop)
+
+    # asyncio debug mode reports slow synchronous callbacks with their source
+    # location. This complements the lag monitor: it can identify the callback
+    # that consumed the event-loop thread instead of only listing active tasks.
+    debug_enabled = str(os.environ.get("ASYNCIO_DEBUG", "1")).strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+    try:
+        slow_callback_seconds = float(
+            os.environ.get("ASYNCIO_SLOW_CALLBACK_SECONDS", "0.5")
+        )
+    except (TypeError, ValueError):
+        slow_callback_seconds = 0.5
+    loop.slow_callback_duration = max(0.1, min(slow_callback_seconds, 5.0))
+    loop.set_debug(debug_enabled)
+    log.info(
+        "[EventLoop Diagnostics] asyncio_debug=%s slow_callback_threshold=%.2fs",
+        debug_enabled,
+        loop.slow_callback_duration,
+    )
     log.info(
         "[Startup] main() starting: env=%s version=%s python=%s pid=%s",
         get_bot_env(),
