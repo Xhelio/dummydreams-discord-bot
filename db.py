@@ -3160,6 +3160,9 @@ def get_scheduled_host_name(tiktok_username: str, dt_obj: datetime = None) -> st
 # kalau observer sudah reconnect dalam jendela ini. Ini mencegah history live
 # terpecah-pecah hanya karena redeploy, tanpa menghitung waktu bot mati.
 LIVE_RESUME_GRACE_SECONDS = 600
+# Open sessions whose heartbeat stopped longer than this are considered stale
+# and closed at their last heartbeat instead of being resumed.
+LIVE_SESSION_STALE_SECONDS = 1800
 
 
 def get_open_live_session_id(tiktok_username: str):
@@ -3256,6 +3259,39 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
 
         if active_rows:
             active_id = active_rows[0][0]
+            # A session left open by a missed disconnect (e.g. websocket error
+            # instead of DisconnectEvent) must not be resumed hours later: that
+            # inflates live duration. If heartbeats stopped long ago, close it at
+            # its last confirmation time and start a fresh session below.
+            stale_end = None
+            try:
+                last_row = cur.execute(
+                    "SELECT last_seen_at FROM live_sessions WHERE session_id = ?",
+                    (active_id,),
+                ).fetchone()
+                last_seen = str((last_row or [None])[0] or "")[:19]
+                if last_seen:
+                    last_seen_dt = wib.localize(datetime.strptime(last_seen, '%Y-%m-%d %H:%M:%S'))
+                    if (now_dt - last_seen_dt).total_seconds() > LIVE_SESSION_STALE_SECONDS:
+                        stale_end = last_seen
+            except Exception:
+                stale_end = None
+            if stale_end:
+                cur.execute("""
+                    UPDATE live_sessions
+                    SET end_time = ?, duration_seconds = CASE
+                        WHEN start_time IS NULL THEN 0
+                        ELSE MAX(0, CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0))
+                    END,
+                    last_seen_at = ?
+                    WHERE session_id = ? AND end_time IS NULL
+                """, (stale_end, stale_end, stale_end, active_id))
+                conn.commit()
+                print(
+                    f"[LiveSession] Closed stale open session {active_id} for @{user_clean} "
+                    f"at last heartbeat {stale_end} (no activity > {LIVE_SESSION_STALE_SECONDS // 60}m)."
+                )
+                active_rows = active_rows[1:]
             # Only one live session may be open per account. Close stale
             # duplicates left behind by crashes/older versions.
             for (stale_id,) in active_rows[1:]:
@@ -3271,14 +3307,16 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                     last_seen_at = COALESCE(last_seen_at, ?)
                     WHERE session_id = ?
                 """, (now_str, now_str, now_str, now_str, stale_id))
-            cur.execute(
-                "UPDATE live_sessions SET last_seen_at = ? WHERE session_id = ?",
-                (now_str, active_id),
-            )
-            if explicit_host:
-                cur.execute("UPDATE live_sessions SET scheduled_host = ? WHERE session_id = ?", (current_host, active_id))
-            conn.commit()
-            return active_id
+            if active_rows:
+                active_id = active_rows[0][0]
+                cur.execute(
+                    "UPDATE live_sessions SET last_seen_at = ? WHERE session_id = ?",
+                    (now_str, active_id),
+                )
+                if explicit_host:
+                    cur.execute("UPDATE live_sessions SET scheduled_host = ? WHERE session_id = ?", (current_host, active_id))
+                conn.commit()
+                return active_id
 
         # A live that has already ended must NOT be reopened: a new connect
         # after the disconnect/offline grace period always starts a new session
