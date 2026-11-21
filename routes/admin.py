@@ -62,6 +62,16 @@ _ANALYTICS_PROFILE_CACHE = {}
 _ANALYTICS_PROFILE_CACHE_LOCK = threading.Lock()
 _ANALYTICS_PROFILE_CACHE_TTL = 60.0
 
+def _run_analytics_stage(stage, func, *args, **kwargs):
+    started = time.monotonic()
+    try:
+        return func(*args, **kwargs)
+    finally:
+        elapsed = time.monotonic() - started
+        if elapsed >= 0.10:
+            print(f"[AnalyticsTiming] stage={stage} duration={elapsed:.3f}s")
+
+
 
 def _get_cached_analytics_profile(start_date, end_date, host=None, account=None, viewer=None):
     key = (str(start_date), str(end_date), host or "", account or "", viewer or "")
@@ -1801,18 +1811,20 @@ def view_analytics():
     account_arg = account_filter or None
     viewer_arg = viewer_filter or None
 
-    summary = get_analytics_summary(start_str, end_str, host_arg, account_arg, viewer_arg)
-    session_summary = get_analytics_sessions(start_str, end_str, host_arg, account_arg)
-    session_break = get_analytics_session_breakdown(start_str, end_str, host_arg, account_arg)
-    series = get_analytics_timeseries(start_str, end_str, chart_group, host_arg, account_arg, viewer_arg)
-    host_engagement_series = get_analytics_host_engagement_timeseries(start_str, end_str, chart_group, host_arg, account_arg, viewer_arg, limit=12)
-    gift_by_host = get_analytics_gift_by_host(start_str, end_str, account_arg, viewer_arg)
-    gift_by_account = get_analytics_gift_by_account(start_str, end_str, host_arg, viewer_arg)
-    viewer_rows_raw = get_analytics_viewer_ranking(start_str, end_str, host_arg, account_arg, 100)
-    spend_rows_raw = get_analytics_viewer_host_spend(start_str, end_str, viewer_arg, host_arg, account_arg, 200)
-    host_options = get_analytics_host_options()
-    account_options = get_analytics_account_options()
-    top_gift_items_raw = get_analytics_top_gift_items(start_str, end_str, host_arg, account_arg, viewer_arg, 12)
+    analytics_started = time.monotonic()
+    summary = _run_analytics_stage("summary", get_analytics_summary, start_str, end_str, host_arg, account_arg, viewer_arg)
+    session_summary = _run_analytics_stage("sessions", get_analytics_sessions, start_str, end_str, host_arg, account_arg)
+    session_break = _run_analytics_stage("session_breakdown", get_analytics_session_breakdown, start_str, end_str, host_arg, account_arg)
+    series = _run_analytics_stage("timeseries", get_analytics_timeseries, start_str, end_str, chart_group, host_arg, account_arg, viewer_arg)
+    host_engagement_series = _run_analytics_stage("host_engagement", get_analytics_host_engagement_timeseries, start_str, end_str, chart_group, host_arg, account_arg, viewer_arg, limit=12)
+    gift_by_host = _run_analytics_stage("gift_by_host", get_analytics_gift_by_host, start_str, end_str, account_arg, viewer_arg)
+    gift_by_account = _run_analytics_stage("gift_by_account", get_analytics_gift_by_account, start_str, end_str, host_arg, viewer_arg)
+    viewer_rows_raw = _run_analytics_stage("viewer_ranking", get_analytics_viewer_ranking, start_str, end_str, host_arg, account_arg, 100)
+    spend_rows_raw = _run_analytics_stage("viewer_host_spend", get_analytics_viewer_host_spend, start_str, end_str, viewer_arg, host_arg, account_arg, 200)
+    host_options = _run_analytics_stage("host_options", get_analytics_host_options)
+    account_options = _run_analytics_stage("account_options", get_analytics_account_options)
+    top_gift_items_raw = _run_analytics_stage("top_gift_items", get_analytics_top_gift_items, start_str, end_str, host_arg, account_arg, viewer_arg, 12)
+    print(f"[AnalyticsTiming] stage=query_bundle_total duration={time.monotonic() - analytics_started:.3f}s")
 
     if host_filter:
         analysis_subject = host_filter
