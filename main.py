@@ -684,8 +684,10 @@ def handle_api_announcement(username: str, is_live: bool, host_name: str = None)
     except Exception as e:
         print(f"[API Error] Failed to schedule announcement for @{username}: {e}")
 
-async def _announce_tier_up(member: discord.Member, role: discord.Role, tiktok_user: str, total_coins: int):
-    tier_cfg = get_tier_settings()
+async def _announce_tier_up(member: discord.Member, role: discord.Role, tiktok_user: str, total_coins: int, tier_cfg: dict = None):
+    # Never perform a synchronous Turso read from the Discord event loop.
+    if tier_cfg is None:
+        tier_cfg = await asyncio.to_thread(get_tier_settings)
     if not tier_cfg["announce"] or not is_feature_enabled("role_tiers"):
         return
     channel_id = str(tier_cfg.get("announce_channel_id") or "").strip()
@@ -718,6 +720,49 @@ def _log_role_stage_timing(tiktok_user: str, stage: str, started: float) -> None
     )
 
 
+_ROLE_TIER_CONFIG_CACHE = {"expires_at": 0.0, "tier_cfg": None, "tiers": {}}
+_ROLE_TIER_CONFIG_CACHE_TTL_SECONDS = 15.0
+_ROLE_TIER_CONFIG_CACHE_LOCK = None
+
+
+async def _get_cached_role_tier_config(tiktok_user: str):
+    """Load tier settings/lists off-loop and reuse them briefly across GiftEvents."""
+    global _ROLE_TIER_CONFIG_CACHE_LOCK
+    if _ROLE_TIER_CONFIG_CACHE_LOCK is None:
+        _ROLE_TIER_CONFIG_CACHE_LOCK = asyncio.Lock()
+
+    now = time.monotonic()
+    if _ROLE_TIER_CONFIG_CACHE["tier_cfg"] is not None and now < _ROLE_TIER_CONFIG_CACHE["expires_at"]:
+        return _ROLE_TIER_CONFIG_CACHE["tier_cfg"], _ROLE_TIER_CONFIG_CACHE["tiers"]
+
+    async with _ROLE_TIER_CONFIG_CACHE_LOCK:
+        now = time.monotonic()
+        if _ROLE_TIER_CONFIG_CACHE["tier_cfg"] is not None and now < _ROLE_TIER_CONFIG_CACHE["expires_at"]:
+            return _ROLE_TIER_CONFIG_CACHE["tier_cfg"], _ROLE_TIER_CONFIG_CACHE["tiers"]
+
+        started = time.perf_counter()
+        tier_cfg = await asyncio.to_thread(get_tier_settings)
+        _log_role_stage_timing(tiktok_user, "role.db_settings", started)
+        groups = []
+        if tier_cfg["enabled"]:
+            groups.append("reset")
+        if tier_cfg["permanent_enabled"]:
+            groups.append("permanent")
+
+        tiers = {}
+        for group_key in groups:
+            started = time.perf_counter()
+            tiers[group_key] = await asyncio.to_thread(get_role_tiers, group_key)
+            _log_role_stage_timing(tiktok_user, f"role.db_tiers_{group_key}", started)
+
+        _ROLE_TIER_CONFIG_CACHE.update(
+            expires_at=time.monotonic() + _ROLE_TIER_CONFIG_CACHE_TTL_SECONDS,
+            tier_cfg=tier_cfg,
+            tiers=tiers,
+        )
+        return tier_cfg, tiers
+
+
 async def auto_assign_role(tiktok_user: str, total_coins: int):
     """Assign reset and permanent tier roles based on the admin panel settings."""
     if not is_feature_enabled("role_tiers"):
@@ -729,31 +774,27 @@ async def auto_assign_role(tiktok_user: str, total_coins: int):
     if not discord_id:
         return
 
-    stage_started = time.perf_counter()
-    tier_cfg = await asyncio.to_thread(get_tier_settings)
-    _log_role_stage_timing(tiktok_user, "role.db_settings", stage_started)
-    groups = []
-    if tier_cfg["enabled"]:
-        groups.append("reset")
-    if tier_cfg["permanent_enabled"]:
-        groups.append("permanent")
+    tier_cfg, tiers_by_group = await _get_cached_role_tier_config(tiktok_user)
+    groups = [
+        group_key
+        for group_key, enabled in (
+            ("reset", tier_cfg["enabled"]),
+            ("permanent", tier_cfg["permanent_enabled"]),
+        )
+        if enabled
+    ]
     if not groups:
         return
 
     stacked = str(tier_cfg.get("mode", "replace")).lower() == "stacked"
 
-    # Fetch each tier list once instead of per guild (each read opens a new
-    # Turso connection; this runs after every gift event).
-    tiers_by_group = {}
-    for group_key in groups:
-        stage_started = time.perf_counter()
-        tiers_by_group[group_key] = await asyncio.to_thread(get_role_tiers, group_key)
-        _log_role_stage_timing(tiktok_user, f"role.db_tiers_{group_key}", stage_started)
-
     for guild in bot.guilds:
         stage_started = time.perf_counter()
         try:
-            member = await guild.fetch_member(int(discord_id))
+            # Prefer the gateway member cache; only make a REST request on a miss.
+            member = guild.get_member(int(discord_id))
+            if member is None:
+                member = await guild.fetch_member(int(discord_id))
         except (discord.NotFound, discord.HTTPException):
             continue
         finally:
@@ -821,7 +862,7 @@ async def auto_assign_role(tiktok_user: str, total_coins: int):
         if added_tiers:
             best_tier, best_role = max(added_tiers, key=lambda x: x[0]["min_coins"])
             stage_started = time.perf_counter()
-            await _announce_tier_up(member, best_role, tiktok_user, total_coins)
+            await _announce_tier_up(member, best_role, tiktok_user, total_coins, tier_cfg)
             _log_role_stage_timing(tiktok_user, "role.discord_announcement", stage_started)
 
 async def _resolve_announcement_channel(announcement_session: dict = None):
