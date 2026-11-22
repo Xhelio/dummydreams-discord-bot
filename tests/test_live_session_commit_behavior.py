@@ -1,18 +1,42 @@
 from datetime import datetime, timedelta
 
 import pytz
+import sqlite3
+
+import db
+
+
+def _connection_factory(path):
+    return lambda: sqlite3.connect(path, timeout=5)
+
+
+def _create_session_schema(path):
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE live_sessions (
+                session_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tiktok_username TEXT NOT NULL,
+                start_time TEXT,
+                scheduled_host TEXT,
+                last_seen_at TEXT,
+                end_time TEXT,
+                duration_seconds INTEGER DEFAULT 0,
+                paused_seconds INTEGER DEFAULT 0
+            );
+            CREATE TABLE bot_settings (key TEXT PRIMARY KEY, value TEXT);
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def test_start_live_session_resume_commits_session_and_clears_resume_keys(
     tmp_path, monkeypatch
 ):
-    import sqlite3
-
     path = tmp_path / "resume-live-session.sqlite3"
-    from tests.test_live_session_transactions import (
-        _connection_factory,
-        _create_session_schema,
-    )
 
     _create_session_schema(path)
     now = datetime.now(pytz.timezone("Asia/Jakarta"))
@@ -63,13 +87,7 @@ def test_start_live_session_resume_commits_session_and_clears_resume_keys(
 def test_start_live_session_closes_stale_session_and_creates_new_one(
     tmp_path, monkeypatch
 ):
-    import sqlite3
-
     path = tmp_path / "stale-live-session.sqlite3"
-    from tests.test_live_session_transactions import (
-        _connection_factory,
-        _create_session_schema,
-    )
 
     _create_session_schema(path)
     now = datetime.now(pytz.timezone("Asia/Jakarta"))
