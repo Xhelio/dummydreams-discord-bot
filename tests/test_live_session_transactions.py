@@ -84,3 +84,48 @@ def test_end_live_session_uses_retrying_transaction(tmp_path, monkeypatch):
         conn.close()
 
     assert row == ("2026-11-21 10:10:00", 600)
+
+
+def test_update_live_session_host_uses_retrying_transaction(tmp_path, monkeypatch):
+    path = tmp_path / "host-update.sqlite3"
+    _create_session_schema(path)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO live_sessions "
+        "(tiktok_username, start_time, scheduled_host, last_seen_at) "
+        "VALUES (?, ?, ?, ?)",
+        ("sample_user", "2026-11-21 10:00:00", "Old Host", "2026-11-21 10:00:00"),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(db, "get_db_connection", _connection_factory(path))
+
+    assert db.update_live_session_host(1, "New Host") is True
+    assert db.update_live_session_host(1, "Closed Host", allow_closed=True) is True
+
+    conn = sqlite3.connect(path)
+    try:
+        row = conn.execute(
+            "SELECT scheduled_host FROM live_sessions WHERE session_id = 1"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row == ("Closed Host",)
+
+
+def test_add_live_session_paused_seconds_uses_retrying_transaction(tmp_path, monkeypatch):
+    path = tmp_path / "pause-update.sqlite3"
+    _create_session_schema(path)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO live_sessions "
+        "(tiktok_username, start_time, last_seen_at, paused_seconds) "
+        "VALUES (?, ?, ?, ?)",
+        ("sample_user", "2026-11-21 10:00:00", "2026-11-21 10:00:00", 5),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(db, "get_db_connection", _connection_factory(path))
+
+    assert db.add_live_session_paused_seconds(1, 30) == 35
+    assert db.add_live_session_paused_seconds(1, -10) == 0
