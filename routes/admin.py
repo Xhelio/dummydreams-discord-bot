@@ -122,15 +122,21 @@ def _run_analytics_bundle(tasks):
     submitted_at = time.monotonic()
     futures = {
         stage: _ANALYTICS_QUERY_EXECUTOR.submit(
-            _run_analytics_stage, stage, submitted_at, func, *args, **kwargs
+            _run_analytics_stage, stage, func, *args,
+            _submitted_at=submitted_at, **kwargs
         )
         for stage, (func, args, kwargs) in tasks.items()
     }
     return {stage: future.result() for stage, future in futures.items()}
 
-def _run_analytics_stage(stage, submitted_at, func, *args, **kwargs):
+
+def _run_analytics_stage(stage, func, *args, _submitted_at=None, **kwargs):
+    """Run one analytics operation and optionally report executor queue delay."""
     started = time.monotonic()
-    queue_wait = max(0.0, started - submitted_at)
+    queue_wait = (
+        max(0.0, started - _submitted_at)
+        if _submitted_at is not None else 0.0
+    )
     try:
         return func(*args, **kwargs)
     finally:
