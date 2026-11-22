@@ -2617,15 +2617,26 @@ def init_db():
         stage_started = _log_db_init_stage("host_alias_repair", stage_started)
 
         # Seed role tiers from the legacy JSON config only once.
+        role_seed_check_started = time.perf_counter()
         seeded = conn.execute("SELECT value FROM bot_settings WHERE key = 'tiers_seeded'").fetchone()
+        _log_db_init_stage("role_tier_seed_marker_check", role_seed_check_started)
+        role_count_started = time.perf_counter()
         tier_count = conn.execute("SELECT COUNT(*) FROM role_tiers").fetchone()[0]
+        _log_db_init_stage("role_tier_seed_count_check", role_count_started)
+        print(
+            f"[DB Init Timing] stage=role_tier_seed_state "
+            f"marker_present={bool(seeded)} tier_count={tier_count}"
+        )
         if not seeded and not tier_count:
+            role_config_started = time.perf_counter()
             try:
                 if os.path.exists("config/roles.json"):
                     with open("config/roles.json", "r") as f:
                         cfg = json.load(f)
                     guild_tiers = cfg.get("role_tiers", {})
                     first = next(iter(guild_tiers.values()), [])
+                    _log_db_init_stage("role_tier_seed_config_load", role_config_started)
+                    role_insert_started = time.perf_counter()
                     for idx, item in enumerate(first, start=1):
                         min_coins = item.get("min_coins") if isinstance(item, dict) else item[0]
                         role_id = item.get("role_id") if isinstance(item, dict) else item[1]
@@ -2634,12 +2645,18 @@ def init_db():
                                 (group_key, tier_name, role_id, min_coins, sort_order)
                             VALUES ('reset', ?, ?, ?, ?)
                         """, (f"Tier {idx}", str(role_id), int(min_coins), idx))
+                    _log_db_init_stage("role_tier_seed_inserts", role_insert_started)
+                    print(f"[DB Init Timing] stage=role_tier_seed_rows count={len(first)}")
+                else:
+                    _log_db_init_stage("role_tier_seed_config_load", role_config_started)
             except Exception as e:
                 print(f"[DB Seed] Role tier seed skipped: {e}")
             conn.execute(
                 "INSERT OR IGNORE INTO bot_settings (key, value) VALUES ('tiers_seeded', '1')"
             )
+            role_commit_started = time.perf_counter()
             conn.commit()
+            _log_db_init_stage("role_tier_seed_commit", role_commit_started)
         stage_started = _log_db_init_stage("role_tier_seed", stage_started)
 
         # Sinkronisasi 6 akun target resmi dengan ID 1-6 (reusing this connection)
