@@ -377,7 +377,7 @@ def get_channel_display_name(tiktok_username: str) -> str:
     return u_clean
 
 def sync_valid_hosts(conn=None, reactivate: bool = False):
-    """Ensure the 6 official target accounts exist without deleting custom hosts.
+    """Ensure official target accounts exist without deleting custom hosts.
 
     Existing rows are left alone unless ``reactivate=True`` (the manual
     "Sync 6 Official Accounts" button). Startup must not re-enable hosts the
@@ -387,36 +387,72 @@ def sync_valid_hosts(conn=None, reactivate: bool = False):
     if own:
         conn = get_db_connection()
     try:
-        cur = conn.cursor()
-        for host_id, uname, dname in VALID_TARGET_ACCOUNTS:
-            row = cur.execute(
-                "SELECT host_id FROM hosts WHERE LOWER(tiktok_username) = ?",
-                (uname,),
-            ).fetchone()
+        accounts = list(VALID_TARGET_ACCOUNTS)
+        if not accounts:
+            conn.commit()
+            return
+
+        usernames = [uname for _, uname, _ in accounts]
+        placeholders = ", ".join("?" for _ in usernames)
+        rows = conn.execute(
+            "SELECT host_id, LOWER(tiktok_username), display_name FROM hosts "
+            f"WHERE LOWER(tiktok_username) IN ({placeholders})",
+            tuple(usernames),
+        ).fetchall()
+        existing = {str(row[1]).lower(): row for row in rows}
+
+        display_updates = []
+        missing = []
+        existing_ids = []
+        for host_id, uname, dname in accounts:
+            row = existing.get(uname)
             if row:
+                existing_ids.append(row[0])
                 # Only fill an empty channel name; never overwrite an edited one.
-                cur.execute(
-                    "UPDATE hosts SET display_name = ? "
-                    "WHERE host_id = ? AND (display_name IS NULL OR TRIM(display_name) = '')",
-                    (dname, row[0]),
-                )
-                if reactivate:
-                    cur.execute(
-                        "UPDATE hosts SET is_active = 1 WHERE host_id = ?",
-                        (row[0],),
-                    )
+                if not str(row[2] or "").strip():
+                    display_updates.extend((row[0], dname))
             else:
-                try:
-                    cur.execute("""
-                        INSERT INTO hosts (host_id, tiktok_username, display_name, is_active)
-                        VALUES (?, ?, ?, 1)
-                    """, (host_id, uname, dname))
-                except Exception:
-                    # The preferred ID is already used by a custom host.
-                    cur.execute("""
-                        INSERT INTO hosts (tiktok_username, display_name, is_active)
-                        VALUES (?, ?, 1)
-                    """, (uname, dname))
+                missing.append((host_id, uname, dname))
+
+        # Update all existing official rows in one statement.
+        if existing_ids and (display_updates or reactivate):
+            assignments = []
+            params = []
+            if display_updates:
+                cases = " ".join(
+                    "WHEN ? THEN ?" for _ in range(len(display_updates) // 2)
+                )
+                assignments.append(
+                    f"display_name = CASE host_id {cases} ELSE display_name END"
+                )
+                params.extend(display_updates)
+            if reactivate:
+                assignments.append("is_active = 1")
+            id_placeholders = ", ".join("?" for _ in existing_ids)
+            params.extend(existing_ids)
+            conn.execute(
+                f"UPDATE hosts SET {', '.join(assignments)} "
+                f"WHERE host_id IN ({id_placeholders})",
+                tuple(params),
+            )
+
+        # New official accounts retain their preferred IDs; if a custom host
+        # already occupies one, fall back to an automatically assigned ID.
+        cur = conn.cursor()
+        for host_id, uname, dname in missing:
+            try:
+                cur.execute(
+                    "INSERT INTO hosts "
+                    "(host_id, tiktok_username, display_name, is_active) "
+                    "VALUES (?, ?, ?, 1)",
+                    (host_id, uname, dname),
+                )
+            except Exception:
+                cur.execute(
+                    "INSERT INTO hosts (tiktok_username, display_name, is_active) "
+                    "VALUES (?, ?, 1)",
+                    (uname, dname),
+                )
         conn.commit()
     except Exception as e:
         print(f"[Hosts Sync Error] {e}")
