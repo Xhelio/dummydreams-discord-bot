@@ -1,7 +1,7 @@
-# Pinned: discord.py 2.6+ silently drops clicks on Views built outside the
-# running loop (see build_start_view in main.py).
+# Pin discord.py because Views created outside the running loop need stable behavior.
 discord.py==2.7.1
-TikTokLive
+# The nonblocking parser adapter follows TikTokLive 7.0.1's internal parser contract.
+TikTokLive==7.0.1
 libsql-experimental
 python-dotenv
 pytz
