@@ -53,3 +53,41 @@ def test_empty_activity_log_batch_does_not_execute():
     db._insert_activity_log_batch(connection, [])
 
     assert connection.calls == []
+
+
+
+def test_activity_log_collector_preserves_fifo_and_batch_limit():
+    import queue
+
+    events = queue.Queue()
+    events.put("second")
+    events.put("third")
+
+    batch, shutdown = db._collect_activity_log_batch(
+        "first", event_queue=events, max_size=2, max_wait=0.1
+    )
+
+    assert batch == ["first", "second"]
+    assert shutdown is False
+    assert events.get_nowait() == "third"
+
+
+def test_activity_log_collector_acknowledges_shutdown_sentinel():
+    import queue
+
+    events = queue.Queue()
+    events.put(None)
+
+    batch, shutdown = db._collect_activity_log_batch(
+        "first", event_queue=events, max_size=10, max_wait=0.1
+    )
+
+    assert batch == ["first"]
+    assert shutdown is True
+    # The sentinel is acknowledged by the collector.
+    events.join()
+
+
+def test_activity_log_batch_window_is_bounded():
+    assert db._ACTIVITY_LOG_BATCH_MAX_SIZE == 100
+    assert db._ACTIVITY_LOG_BATCH_WAIT_SECONDS == 1.25
