@@ -3,6 +3,15 @@ from types import SimpleNamespace
 import observer
 
 
+def test_offline_and_unavailable_checks_do_not_increase_failure_streak():
+    assert observer._next_consecutive_failures(61, is_offline_error=True) == 0
+    assert observer._next_consecutive_failures(12, is_unavailable=True) == 0
+
+
+def test_unexpected_observer_error_increases_failure_streak():
+    assert observer._next_consecutive_failures(4) == 5
+
+
 def test_text_from_value_normalizes_strings_bytes_and_nested_dicts():
     assert observer._text_from_value("  Hello live  ") == "Hello live"
     assert observer._text_from_value(b"  Halo  ") == "Halo"
