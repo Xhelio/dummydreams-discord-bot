@@ -3210,20 +3210,24 @@ def get_current_host_for_account(tiktok_username: str, fresh_only: bool = False)
     return "Host"
 
 def set_current_host_for_account(tiktok_username: str, host_name: str):
-    """Menyimpan nama host yang terdeteksi untuk akun TikTok ini (beserta waktunya)."""
+    """Menyimpan nama host terdeteksi tanpa menahan worker pada round-trip Turso."""
     u_clean = tiktok_username.lower().lstrip("@")
-    set_setting(f"current_host_{u_clean}", host_name)
+    _queue_setting_or_write(f"current_host_{u_clean}", host_name)
     wib = pytz.timezone('Asia/Jakarta')
-    set_setting(f"current_host_at_{u_clean}", datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S'))
+    _queue_setting_or_write(
+        f"current_host_at_{u_clean}",
+        datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S'),
+    )
 
 
 def touch_current_host_detection(tiktok_username: str):
     """Perbarui waktu deteksi host tanpa mengubah namanya (LiveIntro berulang)."""
-    if not str(get_setting(f"current_host_{tiktok_username.lower().lstrip('@')}") or ""):
+    u_clean = tiktok_username.lower().lstrip("@")
+    if not str(get_setting(f"current_host_{u_clean}") or ""):
         return
     wib = pytz.timezone('Asia/Jakarta')
-    set_setting(
-        f"current_host_at_{tiktok_username.lower().lstrip('@')}",
+    _queue_setting_or_write(
+        f"current_host_at_{u_clean}",
         datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S'),
     )
 
@@ -4517,6 +4521,12 @@ def queue_setting(key: str, value: str) -> bool:
     # Publish the optimistic value only after the queue accepts the write.
     _cache_setting_value(key, value)
     return True
+
+
+def _queue_setting_or_write(key: str, value: str) -> None:
+    """Queue hot-path setting writes; fall back to synchronous persistence on overflow."""
+    if not queue_setting(key, value):
+        set_setting(key, value)
 
 
 def get_bool_setting(key: str, default: bool = True) -> bool:
