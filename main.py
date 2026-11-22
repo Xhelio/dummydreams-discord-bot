@@ -4252,7 +4252,7 @@ async def main():
     # asyncio debug mode reports slow synchronous callbacks with their source
     # location. This complements the lag monitor: it can identify the callback
     # that consumed the event-loop thread instead of only listing active tasks.
-    debug_enabled = str(os.environ.get("ASYNCIO_DEBUG", "1")).strip().lower() in (
+    debug_enabled = str(os.environ.get("ASYNCIO_DEBUG", "0")).strip().lower() in (
         "1", "true", "yes", "on"
     )
     try:
