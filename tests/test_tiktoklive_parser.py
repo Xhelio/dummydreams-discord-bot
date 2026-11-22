@@ -37,6 +37,9 @@ def test_protobuf_decode_runs_outside_event_loop_thread(monkeypatch):
     decoded_threads = []
 
     class FakeProtoEvent:
+        def __init__(self):
+            decoded_threads.append(threading.get_ident())
+
         def parse(self, payload):
             decoded_threads.append(threading.get_ident())
             return {"payload": payload}
@@ -52,8 +55,8 @@ def test_protobuf_decode_runs_outside_event_loop_thread(monkeypatch):
         client._parse_webcast_response_message(response, message)
     )
 
-    assert decoded_threads
-    assert decoded_threads[0] != loop_thread
+    assert len(decoded_threads) == 2
+    assert all(thread_id != loop_thread for thread_id in decoded_threads)
     assert len(events) == 2
     assert events[1] == {"payload": b"protobuf"}
 
