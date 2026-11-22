@@ -54,6 +54,10 @@ def _setup_gift_database(path, daily_check=""):
 
 
 def _configure_database(monkeypatch, path):
+    # Each test uses an isolated schema/database; production keeps the cache
+    # process-local and refreshes it after its short TTL.
+    monkeypatch.setattr(db, "_GIFT_LOG_COLUMN_INFO_CACHE", None)
+    monkeypatch.setattr(db, "_GIFT_LOG_COLUMN_INFO_CACHE_AT", 0.0)
     monkeypatch.setattr(
         db, "get_db_connection", lambda: sqlite3.connect(path)
     )
@@ -156,4 +160,27 @@ def test_atomic_gift_event_reads_gift_log_schema_once(tmp_path, monkeypatch):
     result = _record(msg_id="gift-schema-once")
 
     assert result == {"status": "ok", "total_coins": 25}
+    assert calls == ["gift_logs"]
+
+def test_atomic_gift_event_reuses_schema_metadata_across_events(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "gift-schema-cache.sqlite3"
+    _setup_gift_database(path)
+    _configure_database(monkeypatch, path)
+
+    original = db._get_table_column_info
+    calls = []
+
+    def counted_column_info(cursor, table):
+        calls.append(table)
+        return original(cursor, table)
+
+    monkeypatch.setattr(db, "_get_table_column_info", counted_column_info)
+
+    first = _record(msg_id="gift-schema-cache-1", coins=25)
+    second = _record(msg_id="gift-schema-cache-2", coins=10)
+
+    assert first == {"status": "ok", "total_coins": 25}
+    assert second == {"status": "ok", "total_coins": 35}
     assert calls == ["gift_logs"]
