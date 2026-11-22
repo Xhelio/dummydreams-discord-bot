@@ -1966,6 +1966,7 @@ def _add_missing_columns(conn, table, columns):
     never user input. One PRAGMA per table replaces one failing ALTER round-trip
     per already-present column on remote Turso databases.
     """
+    stage_started = time.perf_counter()
     try:
         existing = {
             str(row[1])
@@ -1992,6 +1993,7 @@ def _add_missing_columns(conn, table, columns):
                 conn.rollback()
             except Exception:
                 pass
+    _log_db_init_stage(f"column_compatibility_{table}", stage_started)
     return tuple(added)
 
 
@@ -2509,6 +2511,7 @@ def init_db():
         _add_missing_columns(conn, "hosts", [
             ("is_priority", "INTEGER DEFAULT 1"),
         ])
+        priority_started = time.perf_counter()
         try:
             conn.execute("UPDATE hosts SET is_priority = 1 WHERE is_priority IS NULL")
             conn.commit()
@@ -2517,6 +2520,7 @@ def init_db():
                 conn.rollback()
             except Exception:
                 pass
+        _log_db_init_stage("host_priority_normalization", priority_started)
         stage_started = _log_db_init_stage("host_schema_compatibility", stage_started)
 
         # Default settings (never overwrite values saved by the admin)
