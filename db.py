@@ -1923,6 +1923,42 @@ def _ensure_analytics_indexes(conn):
             print(f"[DB Migration] analytics date index skipped: {exc}")
 
 
+def _add_missing_columns(conn, table, columns):
+    """Add legacy columns only when absent, avoiding repeated failed ALTERs on startup.
+
+    The table/column identifiers passed here are static migration definitions,
+    never user input. One PRAGMA per table replaces one failing ALTER round-trip
+    per already-present column on remote Turso databases.
+    """
+    try:
+        existing = {
+            str(row[1])
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        existing = set()
+
+    added = []
+    for column, dtype in columns:
+        if column in existing:
+            continue
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {dtype}")
+            conn.commit()
+            existing.add(column)
+            added.append(column)
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+    return tuple(added)
+
+
 def init_db():
     """Initialize schema and seed defaults.
 
@@ -2147,8 +2183,8 @@ def init_db():
                 pass
             print(f"[DB Migration] Announcement table migration skipped: {e}")
 
-        # Migrasi kolom jika tabel lama sudah ada
-        for col, dtype in [
+        # Migrate legacy gift-log columns with one schema read per table.
+        _add_missing_columns(conn, "gift_logs", [
             ("log_date", "TEXT"),
             ("log_time", "TEXT"),
             ("log_datetime", "TEXT"),
@@ -2156,62 +2192,30 @@ def init_db():
             ("scheduled_host", "TEXT"),
             ("msg_id", "TEXT"),
             ("host_name", "TEXT"),
-        ]:
-            try:
-                conn.execute(f"ALTER TABLE gift_logs ADD COLUMN {col} {dtype}")
-                conn.commit()
-            except Exception:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
+        ])
 
         # Migrasi live_sessions: akumulasi detik jeda grace period supaya
         # durasi live tidak menghitung waktu kosong/pending. last_seen_at
         # dipakai untuk resume sesi setelah restart/deploy.
-        for col, dtype in [
+        _add_missing_columns(conn, "live_sessions", [
             ("paused_seconds", "INTEGER DEFAULT 0"),
             ("last_seen_at", "TEXT"),
-        ]:
-            try:
-                conn.execute(f"ALTER TABLE live_sessions ADD COLUMN {col} {dtype}")
-                conn.commit()
-            except Exception:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
+        ])
 
         # Migrasi discord_verification_status: metode grant, detail (koin/kode/
         # pesan yang terdeteksi), dan waktu role verified diberikan.
-        for col, dtype in [
+        _add_missing_columns(conn, "discord_verification_status", [
             ("method", "TEXT"),
             ("detail", "TEXT"),
             ("verified_at", "TEXT"),
-        ]:
-            try:
-                conn.execute(f"ALTER TABLE discord_verification_status ADD COLUMN {col} {dtype}")
-                conn.commit()
-            except Exception:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
+        ])
 
         # Migrasi activity_logs: pisahkan log operasional vs teknikal.
-        for col, dtype, default in [
-            ("category", "TEXT", "'operational'"),
-            ("level", "TEXT", "'info'"),
-            ("source", "TEXT", "''"),
-        ]:
-            try:
-                conn.execute(f"ALTER TABLE activity_logs ADD COLUMN {col} {dtype} DEFAULT {default}")
-                conn.commit()
-            except Exception:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
+        _add_missing_columns(conn, "activity_logs", [
+            ("category", "TEXT DEFAULT 'operational'"),
+            ("level", "TEXT DEFAULT 'info'"),
+            ("source", "TEXT DEFAULT ''"),
+        ])
         try:
             conn.execute("UPDATE activity_logs SET category = 'operational' WHERE category IS NULL OR TRIM(category) = ''")
             conn.execute("UPDATE activity_logs SET level = 'info' WHERE level IS NULL OR TRIM(level) = ''")
@@ -2373,20 +2377,16 @@ def init_db():
                 pass
             print(f"[DB Migration] daily_tiktok_gifts case normalization skipped: {e}")
 
-        # Migrasi kolom host_name pada sesi pengumuman live (database lama)
-        try:
-            conn.execute("ALTER TABLE active_live_announcements ADD COLUMN host_name TEXT")
-            conn.commit()
-        except Exception:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
+        # Legacy announcement schema compatibility.
+        _add_missing_columns(conn, "active_live_announcements", [
+            ("host_name", "TEXT"),
+        ])
 
-        # Host priority (1 = normal/prioritized connect, 0 = non-prioritized)
+        # Host priority (1 = normal/prioritized connect, 0 = non-prioritized).
+        _add_missing_columns(conn, "hosts", [
+            ("is_priority", "INTEGER DEFAULT 1"),
+        ])
         try:
-            conn.execute("ALTER TABLE hosts ADD COLUMN is_priority INTEGER DEFAULT 1")
-            conn.commit()
             conn.execute("UPDATE hosts SET is_priority = 1 WHERE is_priority IS NULL")
             conn.commit()
         except Exception:
