@@ -1959,6 +1959,13 @@ def _add_missing_columns(conn, table, columns):
     return tuple(added)
 
 
+def _log_db_init_stage(stage, started):
+    """Emit a monotonic duration for one init_db phase and return its end time."""
+    ended = time.perf_counter()
+    print(f"[DB Init Timing] stage={stage} elapsed={ended - started:.3f}s")
+    return ended
+
+
 def init_db():
     """Initialize schema and seed defaults.
 
@@ -1966,6 +1973,8 @@ def init_db():
     roll back an interactive transaction if the stream is idle for too long.
     """
     conn = get_db_connection()
+    init_started = time.perf_counter()
+    stage_started = init_started
     try:
         for statement in [
             """
@@ -2106,6 +2115,7 @@ def init_db():
         ]:
             conn.execute(statement)
         conn.commit()
+        stage_started = _log_db_init_stage("base_schema", stage_started)
 
         # Migrate Discord snowflake IDs from INTEGER to TEXT to avoid
         # precision loss (IDs > 2^53) in float/JSON/driver conversions.
@@ -2148,6 +2158,8 @@ def init_db():
                     pass
                 print(f"[DB Migration] {table} discord_id migration skipped: {e}")
 
+        stage_started = _log_db_init_stage("snowflake_ids", stage_started)
+
         # Migrate the old one-message-per-account announcement table to
         # one-message-per-account-per-channel.
         try:
@@ -2183,6 +2195,8 @@ def init_db():
                 pass
             print(f"[DB Migration] Announcement table migration skipped: {e}")
 
+        stage_started = _log_db_init_stage("announcement_schema", stage_started)
+
         # Migrate legacy gift-log columns with one schema read per table.
         _add_missing_columns(conn, "gift_logs", [
             ("log_date", "TEXT"),
@@ -2216,6 +2230,7 @@ def init_db():
             ("level", "TEXT DEFAULT 'info'"),
             ("source", "TEXT DEFAULT ''"),
         ])
+        stage_started = _log_db_init_stage("legacy_columns", stage_started)
         try:
             conn.execute("UPDATE activity_logs SET category = 'operational' WHERE category IS NULL OR TRIM(category) = ''")
             conn.execute("UPDATE activity_logs SET level = 'info' WHERE level IS NULL OR TRIM(level) = ''")
@@ -2232,6 +2247,8 @@ def init_db():
                 conn.rollback()
             except Exception:
                 pass
+
+        stage_started = _log_db_init_stage("activity_log_migration", stage_started)
 
         # Dedupe index: TikTok can replay/duplicate gift messages (especially
         # across reconnects), so a gift log row is unique per message id.
@@ -2292,6 +2309,8 @@ def init_db():
                 pass
             print(f"[DB Migration] gift_logs date backfill skipped: {e}")
 
+        stage_started = _log_db_init_stage("gift_log_backfills", stage_started)
+
         # Date-range analytics filters wrap these columns in substr(), so
         # matching expression indexes avoid full-table scans on narrower ranges.
         _ensure_analytics_indexes(conn)
@@ -2334,6 +2353,7 @@ def init_db():
                 pass
             print(f"[DB Migration] tiktok_gifts case normalization skipped: {e}")
 
+        stage_started = _log_db_init_stage("viewer_name_normalization", stage_started)
         try:
             mixed_daily = conn.execute(
                 "SELECT tiktok_user, date FROM daily_tiktok_gifts "
@@ -2376,6 +2396,8 @@ def init_db():
             except Exception:
                 pass
             print(f"[DB Migration] daily_tiktok_gifts case normalization skipped: {e}")
+
+        stage_started = _log_db_init_stage("daily_gift_normalization", stage_started)
 
         # Legacy announcement schema compatibility.
         _add_missing_columns(conn, "active_live_announcements", [
@@ -2485,6 +2507,7 @@ def init_db():
         conn.commit()
     finally:
         conn.close()
+        _log_db_init_stage("total", init_started)
 
 def _classify_activity(event_type: str, message: str, category: str = None, level: str = None):
     """Infer (category, level) for an activity log entry.
