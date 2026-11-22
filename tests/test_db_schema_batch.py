@@ -59,3 +59,63 @@ def test_schema_batch_errors_propagate_without_replaying_statements():
         db._execute_schema_statements(connection, ["CREATE TABLE a (id INTEGER)"])
 
     assert connection.executed == []
+
+
+def test_atomic_batch_uses_one_immediate_driver_batch():
+    class BatchConnection:
+        def __init__(self):
+            self.calls = []
+            self.executed = []
+
+        def batch(self, statements, mode=None):
+            self.calls.append((list(statements), mode))
+
+        def execute(self, sql, params=()):
+            self.executed.append((sql, params))
+
+    connection = BatchConnection()
+    statements = ["UPDATE a SET value = 1", ("UPDATE b SET value = ?", (2,))]
+
+    db._execute_atomic_batch(connection, statements)
+
+    assert connection.calls == [
+        (
+            [
+                (statements[0], ()),
+                ("UPDATE b SET value = ?", (2,)),
+            ],
+            "immediate",
+        )
+    ]
+    assert connection.executed == []
+
+
+def test_atomic_batch_falls_back_to_sequential_execute():
+    class ExecuteConnection:
+        def __init__(self):
+            self.executed = []
+
+        def execute(self, sql, params=()):
+            self.executed.append((sql, params))
+
+    connection = ExecuteConnection()
+    statements = ["UPDATE a SET value = 1", ("UPDATE b SET value = ?", (2,))]
+
+    db._execute_atomic_batch(connection, statements)
+
+    assert connection.executed == [
+        (statements[0], ()),
+        ("UPDATE b SET value = ?", (2,)),
+    ]
+
+
+def test_atomic_batch_propagates_driver_failures():
+    class FailingBatchConnection:
+        def batch(self, _statements, mode=None):
+            raise RuntimeError("batch rejected")
+
+        def execute(self, *_args):
+            raise AssertionError("must not replay a failed batch")
+
+    with pytest.raises(RuntimeError, match="batch rejected"):
+        db._execute_atomic_batch(FailingBatchConnection(), ["UPDATE a SET value = 1"])
