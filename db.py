@@ -8,7 +8,9 @@ import threading
 import sys
 from functools import lru_cache
 try:
-    import libsql_experimental as libsql
+    # Pure-Python HTTP driver: unlike libsql-experimental's native block_on
+    # calls, urllib socket I/O releases the GIL while worker threads wait.
+    import turso_serverless as libsql
     HAS_LIBSQL = True
 except ImportError:
     import sqlite3 as libsql
@@ -19,7 +21,7 @@ TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
 
 def get_db_connection():
     if HAS_LIBSQL and TURSO_URL:
-        return libsql.connect(database=TURSO_URL, auth_token=TURSO_TOKEN)
+        return libsql.connect(TURSO_URL, auth_token=TURSO_TOKEN)
     import sqlite3
     db_file = os.environ.get("LOCAL_DB_PATH", "database.db")
     return sqlite3.connect(db_file)
