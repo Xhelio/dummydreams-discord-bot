@@ -4,7 +4,7 @@ import time
 from datetime import datetime, timedelta
 import pytz
 import log_setup
-from TikTokLive import TikTokLiveClient
+from tiktoklive_parser import NonBlockingTikTokLiveClient as TikTokLiveClient
 from proto_performance import install_proto_type_hint_caches
 
 # betterproto2 resolves typing annotations during nested protobuf parsing.
