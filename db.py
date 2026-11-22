@@ -3418,17 +3418,21 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
         # 1) Coba lanjutkan sesi yang di-suspend saat bot restart/deploy.
         resume_key = f"resume_session_{user_clean}"
         resume_last_key = f"resume_last_seen_{user_clean}"
-        resume_row = cur.execute(
-            "SELECT value FROM bot_settings WHERE key = ?", (resume_key,)
-        ).fetchone()
-        if resume_row and str(resume_row[0] or "").strip():
+        resume_settings = {
+            str(key): value
+            for key, value in cur.execute(
+                "SELECT key, value FROM bot_settings WHERE key IN (?, ?)",
+                (resume_key, resume_last_key),
+            ).fetchall()
+        }
+        resume_value = resume_settings.get(resume_key)
+        resume_last_value = resume_settings.get(resume_last_key)
+        if resume_value and str(resume_value).strip():
             try:
-                resume_id = int(str(resume_row[0]).strip())
+                resume_id = int(str(resume_value).strip())
             except (TypeError, ValueError):
                 resume_id = 0
-            last_row = cur.execute(
-                "SELECT value FROM bot_settings WHERE key = ?", (resume_last_key,)
-            ).fetchone()
+            last_row = (resume_last_value,)
             resume_last_dt = None
             if last_row and last_row[0]:
                 try:
@@ -3474,24 +3478,20 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
             )
 
         active_rows = cur.execute("""
-            SELECT session_id FROM live_sessions 
+            SELECT session_id, last_seen_at FROM live_sessions 
             WHERE tiktok_username = ? AND end_time IS NULL
             ORDER BY session_id DESC
         """, (user_clean,)).fetchall()
 
         if active_rows:
-            active_id = active_rows[0][0]
+            active_id, last_seen_value = active_rows[0]
             # A session left open by a missed disconnect (e.g. websocket error
             # instead of DisconnectEvent) must not be resumed hours later: that
             # inflates live duration. If heartbeats stopped long ago, close it at
             # its last confirmation time and start a fresh session below.
             stale_end = None
             try:
-                last_row = cur.execute(
-                    "SELECT last_seen_at FROM live_sessions WHERE session_id = ?",
-                    (active_id,),
-                ).fetchone()
-                last_seen = str((last_row or [None])[0] or "")[:19]
+                last_seen = str(last_seen_value or "")[:19]
                 if last_seen:
                     last_seen_dt = wib.localize(datetime.strptime(last_seen, '%Y-%m-%d %H:%M:%S'))
                     if (now_dt - last_seen_dt).total_seconds() > LIVE_SESSION_STALE_SECONDS:
@@ -3515,7 +3515,7 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                 active_rows = active_rows[1:]
             # Only one live session may be open per account. Close stale
             # duplicates left behind by crashes/older versions.
-            for (stale_id,) in active_rows[1:]:
+            for stale_id, _last_seen in active_rows[1:]:
                 cur.execute("""
                     UPDATE live_sessions
                     SET end_time = ?, duration_seconds = CASE
