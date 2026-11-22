@@ -41,7 +41,7 @@ def _install_probe(monkeypatch, payload=None, *, error=None, web=True):
         ({}, None),
         ({"data": None}, None),
         ({"data": []}, None),
-        ({"unexpected": "shape"}, False),
+        ({"unexpected": "shape"}, None),
     ],
 )
 def test_probe_room_live_classifies_tiktok_payloads(monkeypatch, payload, expected):
