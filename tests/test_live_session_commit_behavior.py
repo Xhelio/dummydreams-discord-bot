@@ -74,8 +74,9 @@ def test_start_live_session_resume_commits_session_and_clears_resume_keys(
             "SELECT end_time, paused_seconds FROM live_sessions WHERE session_id = 1"
         ).fetchone()
         remaining_settings = conn.execute(
-            "SELECT COUNT(*) FROM bot_settings WHERE key IN (?, ?)"
-        , ("resume_session_sample_user", "resume_last_seen_sample_user")).fetchone()[0]
+            "SELECT COUNT(*) FROM bot_settings WHERE key IN (?, ?)",
+            ("resume_session_sample_user", "resume_last_seen_sample_user"),
+        ).fetchone()[0]
     finally:
         conn.close()
 
