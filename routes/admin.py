@@ -78,22 +78,27 @@ def _run_analytics_bundle(tasks):
     tasks maps a stage name to (callable, positional_args, keyword_args).
     Each stage retains its own timing record and database connection.
     """
+    submitted_at = time.monotonic()
     futures = {
         stage: _ANALYTICS_QUERY_EXECUTOR.submit(
-            _run_analytics_stage, stage, func, *args, **kwargs
+            _run_analytics_stage, stage, submitted_at, func, *args, **kwargs
         )
         for stage, (func, args, kwargs) in tasks.items()
     }
     return {stage: future.result() for stage, future in futures.items()}
 
-def _run_analytics_stage(stage, func, *args, **kwargs):
+def _run_analytics_stage(stage, submitted_at, func, *args, **kwargs):
     started = time.monotonic()
+    queue_wait = max(0.0, started - submitted_at)
     try:
         return func(*args, **kwargs)
     finally:
         elapsed = time.monotonic() - started
-        if elapsed >= 0.10:
-            print(f"[AnalyticsTiming] stage={stage} duration={elapsed:.3f}s")
+        if elapsed >= 0.10 or queue_wait >= 0.10:
+            print(
+                f"[AnalyticsTiming] stage={stage} "
+                f"queue_wait={queue_wait:.3f}s duration={elapsed:.3f}s"
+            )
 
 
 
