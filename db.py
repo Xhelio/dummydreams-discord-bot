@@ -3818,6 +3818,14 @@ def record_gift_event_transaction(
                     ),
                     (
                         """
+                        INSERT INTO bot_settings (key, value)
+                        SELECT 'gift_log_last_ok', ? WHERE changes() > 0
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                        """,
+                        (log_datetime,),
+                    ),
+                    (
+                        """
                         UPDATE live_sessions
                         SET total_coins = total_coins + ?
                         WHERE session_id = ? AND changes() > 0
@@ -3871,6 +3879,13 @@ def record_gift_event_transaction(
             """,
             (viewer_clean, viewer_display, coins, log_date),
         )
+        cur.execute(
+            """
+            INSERT INTO bot_settings (key, value) VALUES ('gift_log_last_ok', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (log_datetime,),
+        )
         return {
             "status": "ok",
             "total_coins": int(total_row[0]) if total_row else 0,
@@ -3899,10 +3914,9 @@ def record_gift_event_transaction(
             pass
         return {"status": "failed", "error": error_text}
     if result["status"] == "ok":
-        try:
-            set_setting("gift_log_last_ok", log_datetime)
-        except Exception:
-            pass
+        # The success marker is committed atomically with the gift aggregates.
+        # Refresh the process cache without opening another write transaction.
+        _cache_setting_value("gift_log_last_ok", log_datetime)
     return result
 
 
