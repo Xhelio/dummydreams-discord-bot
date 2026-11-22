@@ -4386,6 +4386,31 @@ def _write_setting_row(key: str, value: str) -> None:
     write_transaction(_op, timing_label="setting_write")
 
 
+def _write_setting_rows(rows) -> int:
+    """Upsert a batch of settings with one remote SQL statement."""
+    latest_values = {}
+    for key, value in rows:
+        latest_values[str(key)] = str(value)
+
+    if not latest_values:
+        return 0
+
+    items = tuple(latest_values.items())
+    values_sql = ", ".join("(?, ?)" for _ in items)
+    params = tuple(value for item in items for value in item)
+
+    def _op(conn):
+        conn.execute(
+            "INSERT INTO bot_settings (key, value) "
+            f"VALUES {values_sql} "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params,
+        )
+
+    write_transaction(_op, timing_label="setting_write_batch")
+    return len(items)
+
+
 def _cache_setting_value(key: str, value: str) -> None:
     with _SETTINGS_CACHE_LOCK:
         _SETTINGS_CACHE[key] = (str(value), time.time() + _SETTINGS_CACHE_TTL)
@@ -4430,20 +4455,48 @@ def _ensure_setting_writer() -> None:
     def _run():
         while True:
             item = _SETTING_WRITE_QUEUE.get()
+            if item is None:
+                _SETTING_WRITE_QUEUE.task_done()
+                return
+
+            batch = [item]
+            shutdown = False
+            deadline = time.monotonic() + 0.2
+            while len(batch) < 50:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    nxt = _SETTING_WRITE_QUEUE.get(timeout=remaining)
+                except queue.Empty:
+                    break
+                if nxt is None:
+                    _SETTING_WRITE_QUEUE.task_done()
+                    shutdown = True
+                    break
+                batch.append(nxt)
+
+            # Keep FIFO semantics for each key while collapsing redundant
+            # intermediate writes queued before this batch is persisted.
+            latest_values = {}
+            for key, value in batch:
+                latest_values[key] = value
+
             try:
-                if item is None:
-                    return
-                key, value = item
-                _write_setting_row(key, value)
+                _write_setting_rows(latest_values.items())
             except Exception as e:
-                if item is not None:
+                for key, value in latest_values.items():
                     _invalidate_setting_cache_if_value(key, value)
                 print(
-                    f"[DB] Deferred setting write failed: "
-                    f"{type(e).__name__}: {e}"
+                    f"[DB] Deferred setting batch failed "
+                    f"({len(latest_values)} key(s)): {type(e).__name__}: {e}"
                 )
             finally:
-                _SETTING_WRITE_QUEUE.task_done()
+                for _ in batch:
+                    _SETTING_WRITE_QUEUE.task_done()
+
+            if shutdown:
+                return
 
     threading.Thread(target=_run, name="settings-writer", daemon=True).start()
 

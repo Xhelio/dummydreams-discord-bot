@@ -49,13 +49,14 @@ def test_setting_writer_continues_after_one_write_fails(monkeypatch):
     attempts = []
     first_failed = threading.Event()
 
-    def fake_write_setting(key, value):
-        attempts.append((key, value))
-        if len(attempts) == 1:
-            first_failed.set()
-            raise RuntimeError("temporary database outage")
+    def fake_write_settings(rows):
+        for key, value in rows:
+            attempts.append((key, value))
+            if len(attempts) == 1:
+                first_failed.set()
+                raise RuntimeError("temporary database outage")
 
-    monkeypatch.setattr(db, "_write_setting_row", fake_write_setting)
+    monkeypatch.setattr(db, "_write_setting_rows", fake_write_settings)
     real_thread = threading.Thread
     created = []
 
