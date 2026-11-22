@@ -481,7 +481,13 @@ async def probe_room_live(username: str):
             if room.get("status") in (2, "2"):
                 return True
             # Conservative default when structure is recognized but no live signal found.
-            if user or room or root:
+            has_known_shape = (
+                isinstance(root.get("user"), dict)
+                or isinstance(root.get("liveRoom"), dict)
+                or isinstance(root.get("live_room"), dict)
+                or "status" in root
+            )
+            if has_known_shape:
                 return False
         except Exception as e:
             error_text = f"{type(e).__name__}: {e}".lower()
