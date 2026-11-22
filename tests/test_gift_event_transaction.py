@@ -184,3 +184,100 @@ def test_atomic_gift_event_reuses_schema_metadata_across_events(
     assert first == {"status": "ok", "total_coins": 25}
     assert second == {"status": "ok", "total_coins": 35}
     assert calls == ["gift_logs"]
+
+
+class _BatchConnection:
+    """SQLite-backed stand-in for turso_serverless.Connection.batch()."""
+
+    def __init__(self, path):
+        self.connection = sqlite3.connect(path)
+        self.calls = []
+
+    def cursor(self):
+        return self.connection.cursor()
+
+    def batch(self, statements, mode=None):
+        self.calls.append((statements, mode))
+        if mode == "immediate":
+            self.connection.execute("BEGIN IMMEDIATE")
+        results = []
+        try:
+            for sql, params in statements:
+                cursor = self.connection.execute(sql, params)
+                rows = cursor.fetchall() if cursor.description else []
+                results.append(type("BatchResult", (), {
+                    "rows": rows, "rowcount": cursor.rowcount
+                })())
+            if mode == "immediate":
+                self.connection.commit()
+            return results
+        except Exception:
+            if mode == "immediate":
+                self.connection.rollback()
+            raise
+
+    def commit(self):
+        self.connection.commit()
+
+    def rollback(self):
+        self.connection.rollback()
+
+    def close(self):
+        self.connection.close()
+
+
+def test_turso_batch_gift_event_is_atomic_and_deduplicated(tmp_path, monkeypatch):
+    path = tmp_path / "gift-batch.sqlite3"
+    _setup_gift_database(path)
+    _configure_database(monkeypatch, path)
+    batch_connections = []
+
+    def connect():
+        connection = _BatchConnection(path)
+        batch_connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(db, "get_db_connection", connect)
+
+    first = _record(msg_id="gift-batch-1", coins=25)
+    duplicate = _record(msg_id="gift-batch-1", coins=25)
+
+    connection = sqlite3.connect(path)
+    try:
+        totals = (
+            connection.execute("SELECT COUNT(*) FROM gift_logs").fetchone()[0],
+            connection.execute("SELECT total_coins FROM live_sessions WHERE session_id=7").fetchone()[0],
+            connection.execute("SELECT total_coins FROM tiktok_gifts WHERE tiktok_user='viewer'").fetchone()[0],
+            connection.execute("SELECT coins FROM daily_tiktok_gifts WHERE tiktok_user='viewer'").fetchone()[0],
+        )
+    finally:
+        connection.close()
+
+    assert first == {"status": "ok", "total_coins": 25}
+    assert duplicate == {"status": "duplicate"}
+    assert totals == (1, 25, 25, 25)
+    assert len(batch_connections) == 2
+    assert all(len(call[0]) == 4 and call[1] == "immediate" for conn in batch_connections for call in conn.calls)
+
+
+def test_turso_batch_gift_event_rolls_back_all_steps_on_failure(tmp_path, monkeypatch):
+    path = tmp_path / "gift-batch-rollback.sqlite3"
+    _setup_gift_database(path, daily_check="CHECK(coins < 0)")
+    _configure_database(monkeypatch, path)
+
+    monkeypatch.setattr(db, "get_db_connection", lambda: _BatchConnection(path))
+    result = _record(msg_id="gift-batch-failing", coins=25)
+
+    connection = sqlite3.connect(path)
+    try:
+        totals = (
+            connection.execute("SELECT COUNT(*) FROM gift_logs").fetchone()[0],
+            connection.execute("SELECT COUNT(*) FROM tiktok_gifts").fetchone()[0],
+            connection.execute("SELECT total_coins FROM live_sessions WHERE session_id=7").fetchone()[0],
+        )
+    finally:
+        connection.close()
+
+    assert result["status"] == "failed"
+    assert "IntegrityError" in result["error"]
+    assert totals == (0, 0, 0)
