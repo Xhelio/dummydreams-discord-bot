@@ -4,7 +4,7 @@ import asyncio
 import os
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 try:
     import libsql_experimental as libsql
 except ImportError:
@@ -60,6 +60,7 @@ admin_bp = Blueprint('admin', __name__, url_prefix='/admin')
 # Historical hourly profile changes slowly; cache it briefly to avoid scanning
 # the full gift/session history on every analytics page refresh.
 _ANALYTICS_PROFILE_CACHE = {}
+_ANALYTICS_PROFILE_CACHE_INFLIGHT = {}
 _ANALYTICS_PROFILE_CACHE_LOCK = threading.Lock()
 _ANALYTICS_PROFILE_CACHE_TTL = 60.0
 
@@ -99,15 +100,37 @@ def _run_analytics_stage(stage, func, *args, **kwargs):
 def _get_cached_analytics_profile(start_date, end_date, host=None, account=None, viewer=None):
     key = (str(start_date), str(end_date), host or "", account or "", viewer or "")
     now = time.monotonic()
+
+    # Keep the shared lock limited to cache/in-flight bookkeeping. A remote
+    # Turso read must never hold this lock or block unrelated filter keys.
     with _ANALYTICS_PROFILE_CACHE_LOCK:
         cached = _ANALYTICS_PROFILE_CACHE.get(key)
         if cached and now - cached[0] < _ANALYTICS_PROFILE_CACHE_TTL:
             return cached[1]
 
+        future = _ANALYTICS_PROFILE_CACHE_INFLIGHT.get(key)
+        is_owner = future is None
+        if is_owner:
+            future = Future()
+            _ANALYTICS_PROFILE_CACHE_INFLIGHT[key] = future
+
+    if not is_owner:
+        return future.result()
+
+    try:
         result = get_analytics_timeseries(
             start_date, end_date, "hour_of_day", host, account, viewer
         ) or []
+    except BaseException as exc:
+        with _ANALYTICS_PROFILE_CACHE_LOCK:
+            if _ANALYTICS_PROFILE_CACHE_INFLIGHT.get(key) is future:
+                _ANALYTICS_PROFILE_CACHE_INFLIGHT.pop(key, None)
+        future.set_exception(exc)
+        raise
+
+    with _ANALYTICS_PROFILE_CACHE_LOCK:
         # Bound memory if admins explore many different filter combinations.
+        now = time.monotonic()
         if len(_ANALYTICS_PROFILE_CACHE) >= 64:
             expired = [
                 cache_key for cache_key, value in _ANALYTICS_PROFILE_CACHE.items()
@@ -118,7 +141,11 @@ def _get_cached_analytics_profile(start_date, end_date, host=None, account=None,
             if len(_ANALYTICS_PROFILE_CACHE) >= 64:
                 _ANALYTICS_PROFILE_CACHE.pop(next(iter(_ANALYTICS_PROFILE_CACHE)))
         _ANALYTICS_PROFILE_CACHE[key] = (now, result)
-        return result
+        if _ANALYTICS_PROFILE_CACHE_INFLIGHT.get(key) is future:
+            _ANALYTICS_PROFILE_CACHE_INFLIGHT.pop(key, None)
+
+    future.set_result(result)
+    return result
 
 
 TURSO_URL = os.environ.get("TURSO_DATABASE_URL")
