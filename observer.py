@@ -2074,6 +2074,31 @@ def request_tiktok_reconnect(username: str = None, reconfirm_host: bool = True):
         pass
     return targets
 
+def _report_observer_task_exit(username: str, task: asyncio.Task) -> None:
+    """Retrieve and report unexpected observer task failures.
+
+    The supervisor restarts completed tasks on its next refresh; consume the
+    exception here so the reason is visible instead of silently disappearing.
+    Normal cancellation and clean exits are intentionally quiet.
+    """
+    if task.cancelled():
+        return
+    try:
+        error = task.exception()
+    except asyncio.CancelledError:
+        return
+    if error is None:
+        return
+
+    detail = f"{type(error).__name__}: {error}"[:300]
+    message = f"[Observer System] Observer task for @{username} exited unexpectedly: {detail}"
+    print(message)
+    try:
+        log_activity_event("error", message, username)
+    except Exception:
+        pass
+
+
 async def run_all_observers(announcement_callback, role_callback, comment_callback=None):
     """Supervise one observer task per active host, refreshing from the DB.
 
@@ -2150,6 +2175,9 @@ async def run_all_observers(announcement_callback, role_callback, comment_callba
                     start_single_observer(
                         username, announcement_callback, role_callback, comment_callback
                     )
+                )
+                tasks[username].add_done_callback(
+                    lambda completed, user=username: _report_observer_task_exit(user, completed)
                 )
                 print(f"[Observer System] Started observer for @{username} (mode={mode}).")
                 try:
