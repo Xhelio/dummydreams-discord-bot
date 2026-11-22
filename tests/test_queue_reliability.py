@@ -86,9 +86,12 @@ def test_activity_writer_drains_all_queued_events_before_shutdown(monkeypatch):
     class FakeConnection:
         def execute(self, _sql, params):
             with persisted_lock:
-                persisted.append(params)
+                persisted.extend(
+                    tuple(params[index:index + 7])
+                    for index in range(0, len(params), 7)
+                )
 
-    def fake_write_transaction(operation):
+    def fake_write_transaction(operation, **kwargs):
         operation(FakeConnection())
 
     monkeypatch.setattr(db, "_ACTIVITY_LOG_QUEUE", work_queue)

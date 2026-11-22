@@ -20,7 +20,7 @@ def test_activity_log_writer_recovers_after_batch_failure(monkeypatch):
     first_attempt = threading.Event()
     successful_batches = []
 
-    def fake_write_transaction(operation):
+    def fake_write_transaction(operation, **kwargs):
         # The first batch fails; the worker must remain alive for the next batch.
         if not first_attempt.is_set():
             first_attempt.set()
