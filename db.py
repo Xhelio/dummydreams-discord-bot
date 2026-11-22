@@ -2031,6 +2031,24 @@ def _get_role_tier_seed_state(conn):
     return bool(row[0]), int(row[1])
 
 
+def _normalize_host_priorities(conn):
+    """Repair legacy NULL priorities only when a row actually needs it."""
+    try:
+        needs_normalization = conn.execute(
+            "SELECT 1 FROM hosts WHERE is_priority IS NULL LIMIT 1"
+        ).fetchone()
+    except Exception:
+        # Preserve the old best-effort repair if the preflight read itself fails.
+        needs_normalization = True
+    if not needs_normalization:
+        return False
+    _execute_atomic_batch(conn, [
+        ("UPDATE hosts SET is_priority = 1 WHERE is_priority IS NULL", ())
+    ])
+    conn.commit()
+    return True
+
+
 def _execute_atomic_batch(conn, statements):
     """Run an ordered group of SQL statements atomically when batch is available."""
     normalized = [
@@ -2552,10 +2570,7 @@ def init_db():
         ])
         priority_started = time.perf_counter()
         try:
-            _execute_atomic_batch(conn, [
-                ("UPDATE hosts SET is_priority = 1 WHERE is_priority IS NULL", ())
-            ])
-            conn.commit()
+            _normalize_host_priorities(conn)
         except Exception:
             try:
                 conn.rollback()
