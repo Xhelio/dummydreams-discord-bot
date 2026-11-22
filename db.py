@@ -2012,6 +2012,19 @@ def _seed_default_settings(conn, defaults):
     )
 
 
+def _execute_schema_statements(conn, statements):
+    """Execute startup DDL in one atomic remote batch when the driver supports it."""
+    statements = list(statements)
+    if not statements:
+        return
+    batch = getattr(conn, "batch", None)
+    if callable(batch):
+        batch([(statement, ()) for statement in statements], mode="immediate")
+        return
+    for statement in statements:
+        conn.execute(statement)
+
+
 def _log_db_init_stage(stage, started):
     """Emit a monotonic duration for one init_db phase and return its end time."""
     ended = time.perf_counter()
@@ -2029,7 +2042,7 @@ def init_db():
     init_started = time.perf_counter()
     stage_started = init_started
     try:
-        for statement in [
+        schema_statements = [
             """
             CREATE TABLE IF NOT EXISTS tiktok_gifts (
                 tiktok_user TEXT PRIMARY KEY,
@@ -2165,8 +2178,8 @@ def init_db():
                 sort_order INTEGER DEFAULT 0
             )
             """,
-        ]:
-            conn.execute(statement)
+        ]
+        _execute_schema_statements(conn, schema_statements)
         conn.commit()
         stage_started = _log_db_init_stage("base_schema", stage_started)
 
