@@ -4202,11 +4202,15 @@ def _normalize_discord_id(value) -> str:
 # changes made through bind_user_mapping invalidate this cache immediately.
 _DISCORD_MAPPING_CACHE = {}
 _DISCORD_MAPPING_CACHE_TTL = 60.0
+# Most live viewers are not linked to Discord. Cache misses briefly so repeated
+# gifts from the same unlinked viewer do not open a new Turso connection each time.
+# bind_user_mapping() invalidates both positive and negative entries immediately.
+_DISCORD_MAPPING_MISS_CACHE_TTL = 15.0
 _DISCORD_MAPPING_CACHE_LOCK = threading.Lock()
 
 
 def invalidate_discord_mapping_cache() -> None:
-    """Clear positive TikTok-to-Discord lookups after a mapping is changed."""
+    """Clear positive and negative TikTok-to-Discord lookups after a mapping changes."""
     with _DISCORD_MAPPING_CACHE_LOCK:
         _DISCORD_MAPPING_CACHE.clear()
 
@@ -4219,8 +4223,15 @@ def get_discord_id_from_tiktok(tiktok_user: str):
     now = time.monotonic()
     with _DISCORD_MAPPING_CACHE_LOCK:
         cached = _DISCORD_MAPPING_CACHE.get(username)
-        if cached and now - cached[1] < _DISCORD_MAPPING_CACHE_TTL:
-            return cached[0]
+        if cached:
+            cached_id, cached_at = cached
+            ttl = (
+                _DISCORD_MAPPING_CACHE_TTL
+                if cached_id
+                else _DISCORD_MAPPING_MISS_CACHE_TTL
+            )
+            if now - cached_at < ttl:
+                return cached_id
 
     conn = get_db_connection()
     try:
@@ -4237,14 +4248,14 @@ def get_discord_id_from_tiktok(tiktok_user: str):
     finally:
         conn.close()
 
-    # Cache only positive mappings. Unmapped users can be linked immediately
-    # without waiting for a negative-cache expiry.
-    if discord_id:
-        with _DISCORD_MAPPING_CACHE_LOCK:
+    # Cache both hits and misses. The short miss TTL limits staleness, while
+    # bind_user_mapping() clears the cache immediately when verification links
+    # a previously unlinked viewer.
+    with _DISCORD_MAPPING_CACHE_LOCK:
+        _DISCORD_MAPPING_CACHE[username] = (discord_id, time.monotonic())
+        if len(_DISCORD_MAPPING_CACHE) > 2000:
+            _DISCORD_MAPPING_CACHE.clear()
             _DISCORD_MAPPING_CACHE[username] = (discord_id, time.monotonic())
-            if len(_DISCORD_MAPPING_CACHE) > 2000:
-                _DISCORD_MAPPING_CACHE.clear()
-                _DISCORD_MAPPING_CACHE[username] = (discord_id, time.monotonic())
     return discord_id
 
 import random

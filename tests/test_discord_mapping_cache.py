@@ -57,13 +57,23 @@ def test_discord_mapping_cache_expires(monkeypatch):
     assert db.get_discord_id_from_tiktok("exampleuser") == "987654321"
 
 
-def test_missing_mapping_is_not_cached(monkeypatch):
+def test_missing_mapping_is_cached_briefly(monkeypatch):
     reset_mapping_cache()
     connections = [FakeConnection(None), FakeConnection(("123456789",))]
-    monkeypatch.setattr(db, "get_db_connection", lambda: connections.pop(0))
+    calls = []
+    monkeypatch.setattr(
+        db, "get_db_connection", lambda: calls.append(1) or connections.pop(0)
+    )
+    now = [100.0]
+    monkeypatch.setattr(db.time, "monotonic", lambda: now[0])
 
     assert db.get_discord_id_from_tiktok("newuser") is None
+    assert db.get_discord_id_from_tiktok("newuser") is None
+    assert len(calls) == 1
+
+    now[0] += db._DISCORD_MAPPING_MISS_CACHE_TTL + 0.01
     assert db.get_discord_id_from_tiktok("newuser") == "123456789"
+    assert len(calls) == 2
 
 
 
@@ -72,6 +82,10 @@ def test_binding_a_user_invalidates_cached_discord_mappings(monkeypatch):
     with db._DISCORD_MAPPING_CACHE_LOCK:
         db._DISCORD_MAPPING_CACHE["exampleuser"] = (
             "123456789",
+            db.time.monotonic(),
+        )
+        db._DISCORD_MAPPING_CACHE["newuser"] = (
+            None,
             db.time.monotonic(),
         )
 
