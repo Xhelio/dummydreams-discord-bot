@@ -115,3 +115,14 @@ def test_extract_comment_username_supports_dict_payloads():
 def test_extract_comment_username_returns_empty_for_missing_user_id():
     assert observer._extract_comment_username(SimpleNamespace(user=SimpleNamespace())) == ""
     assert observer._extract_comment_username(SimpleNamespace(user=None)) == ""
+
+
+def test_exception_chain_types_reports_causes_without_messages():
+    try:
+        try:
+            raise ValueError("sensitive response body")
+        except ValueError as cause:
+            raise RuntimeError("outer failure") from cause
+    except RuntimeError as error:
+        assert observer._exception_chain_types(error) == "RuntimeError -> ValueError"
+        assert "sensitive response body" not in observer._exception_chain_types(error)

@@ -141,6 +141,18 @@ def _extract_comment_username(event) -> str:
     return ""
 
 
+def _exception_chain_types(exc: BaseException, limit: int = 5) -> str:
+    """Describe exception types across chained causes without exposing payloads."""
+    types = []
+    seen = set()
+    current = exc
+    while current is not None and id(current) not in seen and len(types) < limit:
+        seen.add(id(current))
+        types.append(type(current).__name__)
+        current = current.__cause__ or current.__context__
+    return " -> ".join(types)
+
+
 def _safe_preview(value, limit: int = 180) -> str:
     try:
         text = str(value).replace("\n", " ").strip()
@@ -1589,7 +1601,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         except Exception as e:
             cycle_error = e
             err = str(e)
-            err_detail = f"{type(e).__name__}: {err}"
+            err_detail = f"{type(e).__name__}: {err} [exception_chain={_exception_chain_types(e)}]"
             err_lower = err_detail.lower()
             is_rate_limited = ("rate_limit" in err_lower) or ("too many connections" in err_lower) or ("eulerstream" in err_lower)
             is_json_empty_error = ("jsondecodeerror" in err_lower) or ("expecting value" in err_lower)
