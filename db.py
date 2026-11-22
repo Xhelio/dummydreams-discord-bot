@@ -2613,6 +2613,42 @@ def _ensure_activity_log_writer():
         ).start()
 
 
+def _insert_activity_log_batch(conn, rows):
+    """Insert an activity-log batch with one remote SQL statement."""
+    normalized_rows = []
+    for row in rows:
+        # Backward compatibility with old 4-tuple shape
+        if len(row) == 4:
+            event_type, message, user_clean, now_str = row
+            cat_n, lvl_n, src_n = "operational", "info", ""
+        else:
+            event_type, message, user_clean, now_str, cat_n, lvl_n, src_n = row
+        normalized_rows.append((
+            event_type,
+            user_clean,
+            message,
+            now_str,
+            cat_n or "operational",
+            lvl_n or "info",
+            src_n or "",
+        ))
+
+    if not normalized_rows:
+        return
+
+    # One multi-row statement avoids up to 100 sequential remote
+    # Turso round-trips while holding the interactive transaction.
+    row_placeholders = "(?, ?, ?, ?, ?, ?, ?)"
+    values_sql = ", ".join(row_placeholders for _ in normalized_rows)
+    params = tuple(value for row in normalized_rows for value in row)
+    conn.execute(
+        "INSERT INTO activity_logs "
+        "(event_type, tiktok_username, message, created_at, category, level, source) "
+        f"VALUES {values_sql}",
+        params,
+    )
+
+
 def _activity_log_writer_loop():
     """Persist activity log rows in small batches."""
     global _ACTIVITY_LOG_PRUNE_COUNTER
@@ -2639,38 +2675,7 @@ def _activity_log_writer_loop():
             batch.append(nxt)
 
         def _write_batch(conn, rows=batch):
-            normalized_rows = []
-            for row in rows:
-                # Backward compatibility with old 4-tuple shape
-                if len(row) == 4:
-                    event_type, message, user_clean, now_str = row
-                    cat_n, lvl_n, src_n = "operational", "info", ""
-                else:
-                    event_type, message, user_clean, now_str, cat_n, lvl_n, src_n = row
-                normalized_rows.append((
-                    event_type,
-                    user_clean,
-                    message,
-                    now_str,
-                    cat_n or "operational",
-                    lvl_n or "info",
-                    src_n or "",
-                ))
-
-            if not normalized_rows:
-                return
-
-            # One multi-row statement avoids up to 100 sequential remote
-            # Turso round-trips while holding the interactive transaction.
-            row_placeholders = "(?, ?, ?, ?, ?, ?, ?)"
-            values_sql = ", ".join(row_placeholders for _ in normalized_rows)
-            params = tuple(value for row in normalized_rows for value in row)
-            conn.execute(
-                "INSERT INTO activity_logs "
-                "(event_type, tiktok_username, message, created_at, category, level, source) "
-                f"VALUES {values_sql}",
-                params,
-            )
+            _insert_activity_log_batch(conn, rows)
 
         try:
             write_transaction(_write_batch, timing_label="activity_log_batch")
