@@ -3765,19 +3765,18 @@ def record_gift_event_transaction(
                 (coins, session_id),
             )
 
-        cur.execute(
+        # RETURNING retrieves the updated aggregate in the same SQL round-trip
+        # as the UPSERT; a follow-up SELECT would add another Turso request.
+        total_row = cur.execute(
             """
             INSERT INTO tiktok_gifts (tiktok_user, display_name, total_coins)
             VALUES (?, ?, ?)
             ON CONFLICT(tiktok_user) DO UPDATE SET
                 total_coins = total_coins + excluded.total_coins,
                 display_name = excluded.display_name
+            RETURNING total_coins
             """,
             (viewer_clean, viewer_display, coins),
-        )
-        total_row = cur.execute(
-            "SELECT total_coins FROM tiktok_gifts WHERE tiktok_user = ?",
-            (viewer_clean,),
         ).fetchone()
 
         cur.execute(
