@@ -2309,15 +2309,32 @@ def init_db():
         ])
         stage_started = _log_db_init_stage("legacy_columns", stage_started)
         try:
-            conn.execute("UPDATE activity_logs SET category = 'operational' WHERE category IS NULL OR TRIM(category) = ''")
-            conn.execute("UPDATE activity_logs SET level = 'info' WHERE level IS NULL OR TRIM(level) = ''")
-            conn.execute("UPDATE activity_logs SET source = '' WHERE source IS NULL")
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_activity_logs_cat_id ON activity_logs(category, log_id DESC)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_activity_logs_cat_created ON activity_logs(category, created_at DESC)"
-            )
+            _execute_atomic_batch(conn, [
+                (
+                    "UPDATE activity_logs SET category = 'operational' "
+                    "WHERE category IS NULL OR TRIM(category) = ''",
+                    (),
+                ),
+                (
+                    "UPDATE activity_logs SET level = 'info' "
+                    "WHERE level IS NULL OR TRIM(level) = ''",
+                    (),
+                ),
+                (
+                    "UPDATE activity_logs SET source = '' WHERE source IS NULL",
+                    (),
+                ),
+                (
+                    "CREATE INDEX IF NOT EXISTS idx_activity_logs_cat_id "
+                    "ON activity_logs(category, log_id DESC)",
+                    (),
+                ),
+                (
+                    "CREATE INDEX IF NOT EXISTS idx_activity_logs_cat_created "
+                    "ON activity_logs(category, created_at DESC)",
+                    (),
+                ),
+            ])
             conn.commit()
         except Exception:
             try:
