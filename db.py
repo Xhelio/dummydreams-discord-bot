@@ -1692,8 +1692,8 @@ def get_all_active_live_announcements() -> list:
 def save_active_live_announcement(tiktok_username: str, channel_id, message_id, host_name: str = None):
     """Store one announcement message per TikTok account per Discord channel."""
     u_clean = tiktok_username.lower().lstrip("@")
-    conn = get_db_connection()
-    try:
+
+    def _op(conn):
         try:
             conn.execute(
                 """
@@ -1705,54 +1705,50 @@ def save_active_live_announcement(tiktok_username: str, channel_id, message_id, 
                 """,
                 (u_clean, str(channel_id), str(message_id), host_name),
             )
-            conn.commit()
-            return True
         except Exception as e:
             # Compatibility fallback if a legacy single-channel PK schema remains.
             err = str(e).lower()
-            if "conflict" in err or "constraint" in err or "on conflict" in err:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                conn.execute(
-                    """
-                    INSERT INTO active_live_announcements (tiktok_username, channel_id, message_id, host_name)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(tiktok_username) DO UPDATE SET
-                        channel_id = excluded.channel_id,
-                        message_id = excluded.message_id,
-                        host_name = COALESCE(excluded.host_name, active_live_announcements.host_name)
-                    """,
-                    (u_clean, str(channel_id), str(message_id), host_name),
-                )
-                conn.commit()
-                print(f"[DB] Announcement save used legacy schema fallback for @{u_clean}: {e}")
-                return True
-            raise
-    finally:
-        conn.close()
+            if "conflict" not in err and "constraint" not in err and "on conflict" not in err:
+                raise
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            conn.execute(
+                """
+                INSERT INTO active_live_announcements (tiktok_username, channel_id, message_id, host_name)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(tiktok_username) DO UPDATE SET
+                    channel_id = excluded.channel_id,
+                    message_id = excluded.message_id,
+                    host_name = COALESCE(excluded.host_name, active_live_announcements.host_name)
+                """,
+                (u_clean, str(channel_id), str(message_id), host_name),
+            )
+            print(f"[DB] Announcement save used legacy schema fallback for @{u_clean}: {e}")
+
+    write_transaction(_op, timing_label="live_announcement_save")
+    return True
 
 
 def update_active_live_announcement_host(tiktok_username: str, host_name: str):
     """Update the host name on every announcement session for an account."""
     u_clean = tiktok_username.lower().lstrip("@")
-    conn = get_db_connection()
-    try:
+
+    def _op(conn):
         conn.execute(
             "UPDATE active_live_announcements SET host_name = ? WHERE tiktok_username = ?",
             (host_name, u_clean),
         )
-        conn.commit()
-    finally:
-        conn.close()
+
+    write_transaction(_op, timing_label="live_announcement_update")
 
 
 def delete_active_live_announcement(tiktok_username: str, channel_id=None):
     """Delete announcement session(s) for an account, optionally one channel only."""
     u_clean = tiktok_username.lower().lstrip("@")
-    conn = get_db_connection()
-    try:
+
+    def _op(conn):
         if channel_id is None:
             conn.execute(
                 "DELETE FROM active_live_announcements WHERE tiktok_username = ?",
@@ -1763,9 +1759,8 @@ def delete_active_live_announcement(tiktok_username: str, channel_id=None):
                 "DELETE FROM active_live_announcements WHERE tiktok_username = ? AND channel_id = ?",
                 (u_clean, str(channel_id)),
             )
-        conn.commit()
-    finally:
-        conn.close()
+
+    write_transaction(_op, timing_label="live_announcement_delete")
 
 
 def suspend_open_live_sessions() -> int:
