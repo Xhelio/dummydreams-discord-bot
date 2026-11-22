@@ -6,6 +6,7 @@ import re
 import time
 import threading
 import sys
+from functools import lru_cache
 try:
     import libsql_experimental as libsql
     HAS_LIBSQL = True
@@ -3086,6 +3087,13 @@ def delete_host_alias(alias: str):
         conn.close()
 
 
+@lru_cache(maxsize=512)
+def _compile_host_alias_pattern(alias: str):
+    """Compile each stable host alias once instead of on every LiveIntro event."""
+    pattern = rf"(?<![A-Za-z0-9]){re.escape(alias)}(?:['\u2019`s]+s|s)?(?![A-Za-z0-9])"
+    return re.compile(pattern, re.IGNORECASE)
+
+
 def detect_host_match_from_welcome_message(text: str, *, block: bool = True):
     """
     Deteksi host dari teks Live Intro/welcome.
@@ -3097,10 +3105,8 @@ def detect_host_match_from_welcome_message(text: str, *, block: bool = True):
     if not text:
         return None, None
     for kw, host_name in get_host_aliases(block=block):
-        # Match alias as a token, allowing common possessive suffixes ('s, ’s, `s, s)
-        # so "luna's" / "angel's" is detected as "luna" / "angel".
-        pattern = rf"(?<![A-Za-z0-9]){re.escape(kw)}(?:['\u2019`s]+s|s)?(?![A-Za-z0-9])"
-        if re.search(pattern, text, re.IGNORECASE):
+        # Reuse the compiled token pattern across repeated LiveIntro events.
+        if _compile_host_alias_pattern(kw).search(text):
             return host_name, kw
     return None, None
 
