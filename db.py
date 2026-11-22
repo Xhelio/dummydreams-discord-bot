@@ -2216,6 +2216,7 @@ def init_db():
              "SELECT CAST(discord_id AS TEXT), tiktok_user, code, method, created_at, expires_at "
              "FROM pending_verifications_old_did"),
         ]:
+            table_stage_started = time.perf_counter()
             try:
                 info = conn.execute(f"PRAGMA table_info({table})").fetchall()
                 id_type = ""
@@ -2236,6 +2237,7 @@ def init_db():
                 except Exception:
                     pass
                 print(f"[DB Migration] {table} discord_id migration skipped: {e}")
+            _log_db_init_stage(f"snowflake_id_{table}", table_stage_started)
 
         stage_started = _log_db_init_stage("snowflake_ids", stage_started)
 
