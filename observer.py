@@ -586,6 +586,20 @@ def _next_consecutive_failures(
     return current + 1
 
 
+def _is_json_response_error(error) -> bool:
+    """Recognize TikTok empty/non-JSON response signatures consistently."""
+    error_text = str(error or "").lower()
+    return any(
+        marker in error_text
+        for marker in (
+            "jsondecodeerror",
+            "expecting value",
+            "failedparseroomiderror",
+            "non-json response",
+        )
+    )
+
+
 def _is_reconnect_requested(username: str) -> bool:
     with _RECONNECT_REQUESTED_LOCK:
         return username in _RECONNECT_REQUESTED
@@ -1640,7 +1654,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             err_detail = f"{type(e).__name__}: {err} [exception_chain={_exception_chain_types(e)}]"
             err_lower = err_detail.lower()
             is_rate_limited = ("rate_limit" in err_lower) or ("too many connections" in err_lower) or ("eulerstream" in err_lower)
-            is_json_empty_error = ("jsondecodeerror" in err_lower) or ("expecting value" in err_lower)
+            is_json_empty_error = _is_json_response_error(err_detail)
             is_unavailable = (
                 "usernotfounderror" in err_lower
                 or "not capable of going live" in err_lower
@@ -1790,13 +1804,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         # unknown probe result and let the existing backoff handle the next retry.
         grace_pending = bool(disconnect_timer_task and not disconnect_timer_task.done())
         probe_result = None
-        cycle_error_text = str(cycle_error or "").lower()
-        json_empty_cycle = (
-            "jsondecodeerror" in cycle_error_text
-            or "expecting value" in cycle_error_text
-            or "failedparseroomiderror" in cycle_error_text
-            or "non-json response" in cycle_error_text
-        )
+        json_empty_cycle = _is_json_response_error(cycle_error)
         if not connected_this_cycle and not json_empty_cycle:
             probe_result = await probe_room_live(username_clean)
             runtime_status.update_observer_diag(
@@ -1901,7 +1909,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         # Adaptive retry: back off slightly on repeated failures, but keep checking.
         err_lower_cycle = str(cycle_error or "").lower()
         rate_limited_cycle = ("rate_limit" in err_lower_cycle) or ("too many connections" in err_lower_cycle) or ("eulerstream" in err_lower_cycle)
-        json_empty_cycle = ("jsondecodeerror" in err_lower_cycle) or ("expecting value" in err_lower_cycle)
+        json_empty_cycle = _is_json_response_error(cycle_error)
         unavailable_cycle = (
             "usernotfounderror" in err_lower_cycle
             or "not capable of going live" in err_lower_cycle
