@@ -7,6 +7,7 @@ import observer
 
 
 def _install_probe(monkeypatch, payload=None, *, error=None, web=True):
+    monkeypatch.setattr(observer, "_ROOM_ID_PROBE_COOLDOWN_UNTIL", 0.0)
     constructed = []
 
     def make_client(*, unique_id):
@@ -117,3 +118,17 @@ def test_probe_room_live_returns_unknown_when_route_is_unavailable(monkeypatch):
 
     assert result is None
     assert constructed == []
+
+
+
+def test_non_json_response_pauses_followup_priority_probes(monkeypatch):
+    error = RuntimeError("FailedParseRoomIdError: TikTok returned a non-JSON response")
+    constructed = _install_probe(monkeypatch, error=error)
+
+    first = asyncio.run(observer.probe_room_live("Creator"))
+    second = asyncio.run(observer.probe_room_live("AnotherCreator"))
+
+    assert first is None
+    assert second is None
+    assert constructed == ["creator"]
+    assert observer._ROOM_ID_PROBE_COOLDOWN_UNTIL > observer.time.time()
