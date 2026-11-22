@@ -2673,6 +2673,38 @@ def _insert_activity_log_batch(conn, rows):
     )
 
 
+_ACTIVITY_LOG_BATCH_MAX_SIZE = 100
+# A slightly wider collection window reduces small remote Turso transactions
+# when events arrive in bursts, while keeping dashboard log freshness bounded.
+_ACTIVITY_LOG_BATCH_WAIT_SECONDS = 1.25
+
+
+def _collect_activity_log_batch(first_item, event_queue=None, max_size=None, max_wait=None):
+    """Collect queued events without changing FIFO order or losing shutdown signals."""
+    event_queue = event_queue or _ACTIVITY_LOG_QUEUE
+    max_size = _ACTIVITY_LOG_BATCH_MAX_SIZE if max_size is None else max(1, int(max_size))
+    max_wait = _ACTIVITY_LOG_BATCH_WAIT_SECONDS if max_wait is None else max(0.0, float(max_wait))
+    batch = [first_item]
+    shutdown = False
+    deadline = time.monotonic() + max_wait
+
+    while len(batch) < max_size:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            nxt = event_queue.get(timeout=remaining)
+        except queue.Empty:
+            break
+        if nxt is None:
+            event_queue.task_done()
+            shutdown = True
+            break
+        batch.append(nxt)
+
+    return batch, shutdown
+
+
 def _activity_log_writer_loop():
     """Persist activity log rows in small batches."""
     global _ACTIVITY_LOG_PRUNE_COUNTER
@@ -2681,22 +2713,7 @@ def _activity_log_writer_loop():
         if item is None:
             _ACTIVITY_LOG_QUEUE.task_done()
             return
-        batch = [item]
-        shutdown = False
-        deadline = time.monotonic() + 0.75
-        while len(batch) < 100:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            try:
-                nxt = _ACTIVITY_LOG_QUEUE.get(timeout=remaining)
-            except queue.Empty:
-                break
-            if nxt is None:
-                _ACTIVITY_LOG_QUEUE.task_done()
-                shutdown = True
-                break
-            batch.append(nxt)
+        batch, shutdown = _collect_activity_log_batch(item)
 
         def _write_batch(conn, rows=batch):
             _insert_activity_log_batch(conn, rows)
