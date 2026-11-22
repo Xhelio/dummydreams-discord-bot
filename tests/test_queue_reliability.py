@@ -56,7 +56,7 @@ def test_failed_setting_write_invalidates_optimistic_cache(monkeypatch):
         writer_threads.append(thread)
         return thread
 
-    def fail_write(_key, _value):
+    def fail_write(_rows):
         raise RuntimeError("database unavailable")
 
     monkeypatch.setattr(db, "_SETTING_WRITE_QUEUE", work_queue)
@@ -64,7 +64,7 @@ def test_failed_setting_write_invalidates_optimistic_cache(monkeypatch):
     monkeypatch.setattr(db, "_SETTINGS_CACHE_LOCK", cache_lock)
     monkeypatch.setattr(db, "_SETTING_WRITER_STARTED", False)
     monkeypatch.setattr(db, "_SETTING_WRITER_LOCK", threading.Lock())
-    monkeypatch.setattr(db, "_write_setting_row", fail_write)
+    monkeypatch.setattr(db, "_write_setting_rows", fail_write)
     monkeypatch.setattr(db.threading, "Thread", tracking_thread)
 
     assert db.queue_setting("feature_enabled", "true") is True
@@ -143,11 +143,11 @@ def test_settings_writer_drains_all_queued_updates_before_shutdown(monkeypatch):
     monkeypatch.setattr(db, "_SETTING_WRITER_STARTED", False)
     monkeypatch.setattr(db, "_SETTING_WRITER_LOCK", threading.Lock())
 
-    def fake_write_setting(key, value):
+    def fake_write_settings(rows):
         with persisted_lock:
-            persisted.append((key, value))
+            persisted.extend(rows)
 
-    monkeypatch.setattr(db, "_write_setting_row", fake_write_setting)
+    monkeypatch.setattr(db, "_write_setting_rows", fake_write_settings)
 
     producer_count = 12
     updates_per_producer = 20
