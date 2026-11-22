@@ -104,3 +104,21 @@ def test_host_priority_normalization_repairs_only_null_values():
         "SELECT is_priority FROM hosts ORDER BY host_id"
     ).fetchall() == [(1,), (0,), (1,)]
     connection.close()
+
+
+def test_host_alias_seed_state_reads_count_and_marker_together():
+    connection = sqlite3.connect(":memory:")
+    connection.execute("CREATE TABLE host_aliases (alias TEXT PRIMARY KEY, host_name TEXT)")
+    connection.execute("CREATE TABLE bot_settings (key TEXT PRIMARY KEY, value TEXT)")
+    assert db._get_host_alias_seed_state(connection) == (0, False)
+
+    connection.executemany(
+        "INSERT INTO host_aliases (alias, host_name) VALUES (?, ?)",
+        [("angel", "Sinta"), ("mommy", "Sinta")],
+    )
+    connection.execute(
+        "INSERT INTO bot_settings (key, value) VALUES (?, ?)",
+        ("host_aliases_repair_v1", "1"),
+    )
+    assert db._get_host_alias_seed_state(connection) == (2, True)
+    connection.close()

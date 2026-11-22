@@ -2622,8 +2622,9 @@ def init_db():
         _log_db_init_stage("settings_seed_commit", settings_commit_started)
         stage_started = _log_db_init_stage("settings_seed", stage_started)
 
-        # Seed aliases once so existing welcome-message detection keeps working.
-        alias_count = conn.execute("SELECT COUNT(*) FROM host_aliases").fetchone()[0]
+        # Read the seed and repair state together to avoid a second remote
+        # round trip when the one-time repair has already completed.
+        alias_count, aliases_repaired = _get_host_alias_seed_state(conn)
         if not alias_count:
             for alias, host_name in HOST_ALIASES.items():
                 conn.execute(
@@ -2637,7 +2638,7 @@ def init_db():
         # to another host). This is safe: it only fills missing canonical
         # aliases and corrects aliases whose name is itself a real host name.
         try:
-            repair_host_aliases(conn)
+            repair_host_aliases(conn, marker_present=aliases_repaired)
         except Exception as e:
             print(f"[DB Migration] Host alias repair failed: {e}")
         stage_started = _log_db_init_stage("host_alias_repair", stage_started)
@@ -3180,7 +3181,19 @@ HOST_ALIASES = {
 }
 
 
-def repair_host_aliases(conn=None):
+def _get_host_alias_seed_state(conn):
+    """Read alias count and one-time repair marker in a single DB round trip."""
+    row = conn.execute(
+        "SELECT "
+        "(SELECT COUNT(*) FROM host_aliases), "
+        "EXISTS(SELECT 1 FROM bot_settings "
+        "WHERE key = ? AND value = ?)",
+        ("host_aliases_repair_v1", "1"),
+    ).fetchone()
+    return int(row[0]), bool(row[1])
+
+
+def repair_host_aliases(conn=None, *, marker_present=None):
     """One-time repair of stale/corrupt host alias mappings.
 
     - Adds missing canonical aliases from HOST_ALIASES.
@@ -3193,10 +3206,12 @@ def repair_host_aliases(conn=None):
         conn = get_db_connection()
     try:
         cur = conn.cursor()
-        marker = cur.execute(
-            "SELECT value FROM bot_settings WHERE key = 'host_aliases_repair_v1'"
-        ).fetchone()
-        if marker and str(marker[0]) == "1":
+        if marker_present is None:
+            marker = cur.execute(
+                "SELECT value FROM bot_settings WHERE key = 'host_aliases_repair_v1'"
+            ).fetchone()
+            marker_present = bool(marker and str(marker[0]) == "1")
+        if marker_present:
             return
 
         canonical = {str(k).lower(): str(v) for k, v in HOST_ALIASES.items()}
