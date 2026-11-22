@@ -284,3 +284,108 @@ def test_write_transaction_keeps_lock_until_close_if_rollback_fails(monkeypatch)
 
     assert connection.lock_state_during_close is True
     assert lock.held is False
+
+
+
+def test_sync_valid_hosts_batches_existing_host_updates(tmp_path, monkeypatch):
+    database_path = tmp_path / "hosts-batched.sqlite3"
+    connection = sqlite3.connect(database_path)
+    connection.execute("""
+        CREATE TABLE hosts (
+            host_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tiktok_username TEXT UNIQUE,
+            display_name TEXT,
+            is_active INTEGER
+        )
+    """)
+    connection.executemany(
+        "INSERT INTO hosts (host_id, tiktok_username, display_name, is_active) "
+        "VALUES (?, ?, ?, ?)",
+        [
+            (10, "official_a", "", 0),
+            (11, "official_b", "Admin Display", 0),
+        ],
+    )
+    connection.commit()
+    connection.close()
+
+    monkeypatch.setattr(db, "get_db_connection", _sqlite_connection_factory(database_path))
+    monkeypatch.setattr(db, "VALID_TARGET_ACCOUNTS", [
+        (1, "official_a", "Official A"),
+        (2, "official_b", "Official B"),
+    ])
+
+    statements = []
+    connection = sqlite3.connect(database_path)
+    connection.set_trace_callback(statements.append)
+    connection.close()
+
+    db.sync_valid_hosts()
+
+    connection = sqlite3.connect(database_path)
+    try:
+        rows = connection.execute(
+            "SELECT tiktok_username, display_name, is_active "
+            "FROM hosts ORDER BY tiktok_username"
+        ).fetchall()
+    finally:
+        connection.close()
+
+    selects = [
+        sql for sql in statements
+        if sql.lstrip().upper().startswith("SELECT HOST_ID")
+    ]
+    updates = [
+        sql for sql in statements
+        if sql.lstrip().upper().startswith("UPDATE HOSTS")
+    ]
+
+    assert rows == [
+        ("official_a", "Official A", 0),
+        ("official_b", "Admin Display", 0),
+    ]
+    assert len(selects) == 1
+    assert len(updates) == 1
+
+
+def test_sync_valid_hosts_reactivates_all_existing_hosts_in_one_update(
+    tmp_path, monkeypatch
+):
+    database_path = tmp_path / "hosts-reactivated.sqlite3"
+    connection = sqlite3.connect(database_path)
+    connection.execute("""
+        CREATE TABLE hosts (
+            host_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tiktok_username TEXT UNIQUE,
+            display_name TEXT,
+            is_active INTEGER
+        )
+    """)
+    connection.executemany(
+        "INSERT INTO hosts (host_id, tiktok_username, display_name, is_active) "
+        "VALUES (?, ?, ?, ?)",
+        [
+            (10, "official_a", "Official A", 0),
+            (11, "official_b", "Official B", 0),
+        ],
+    )
+    connection.commit()
+    connection.close()
+
+    monkeypatch.setattr(db, "get_db_connection", _sqlite_connection_factory(database_path))
+    monkeypatch.setattr(db, "VALID_TARGET_ACCOUNTS", [
+        (1, "official_a", "Official A"),
+        (2, "official_b", "Official B"),
+    ])
+
+    db.sync_valid_hosts(reactivate=True)
+
+    connection = sqlite3.connect(database_path)
+    try:
+        rows = connection.execute(
+            "SELECT is_active FROM hosts ORDER BY tiktok_username"
+        ).fetchall()
+    finally:
+        connection.close()
+
+    assert rows == [(1,), (1,)]
