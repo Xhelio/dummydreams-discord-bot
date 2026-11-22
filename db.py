@@ -3237,17 +3237,16 @@ def update_live_session_host(session_id: int, host_name: str, allow_closed: bool
         return False
     wib = pytz.timezone('Asia/Jakarta')
     now_str = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
-    conn = get_db_connection()
-    try:
-        where = "WHERE session_id = ?" + ("" if allow_closed else " AND end_time IS NULL")
+    where = "WHERE session_id = ?" + ("" if allow_closed else " AND end_time IS NULL")
+
+    def _update(conn):
         cur = conn.execute(
             "UPDATE live_sessions SET scheduled_host = ?, last_seen_at = ? " + where,
             (host_name, now_str, session_id),
         )
-        conn.commit()
         return (cur.rowcount or 0) > 0
-    finally:
-        conn.close()
+
+    return write_transaction(_update, timing_label="live_session_host_update")
 
 
 _TOUCH_LIVE_CACHE = {}
@@ -3299,25 +3298,24 @@ def add_live_session_paused_seconds(session_id: int, seconds: int) -> int:
         seconds = 0
     if not session_id or seconds <= 0:
         return 0
-    conn = get_db_connection()
-    try:
+    wib = pytz.timezone('Asia/Jakarta')
+    now_str = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
+
+    def _update(conn):
         cur = conn.cursor()
-        wib = pytz.timezone('Asia/Jakarta')
-        now_str = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
         cur.execute(
             "UPDATE live_sessions "
             "SET paused_seconds = COALESCE(paused_seconds, 0) + ?, last_seen_at = ? "
             "WHERE session_id = ? AND end_time IS NULL",
             (seconds, now_str, session_id),
         )
-        conn.commit()
         row = cur.execute(
             "SELECT COALESCE(paused_seconds, 0) FROM live_sessions WHERE session_id = ?",
             (session_id,),
         ).fetchone()
         return int(row[0] or 0) if row else 0
-    finally:
-        conn.close()
+
+    return write_transaction(_update, timing_label="live_session_pause_update")
 
 def get_scheduled_host_name(tiktok_username: str, dt_obj: datetime = None, session_id: int = None) -> str:
     """Host for a gift: fresh detection first, then this live session's host.
