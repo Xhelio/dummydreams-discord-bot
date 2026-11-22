@@ -83,6 +83,24 @@ def test_json_empty_websocket_cycle_preserves_failure_backoff():
     assert observer._should_reset_observer_cycle_state(True, True) is False
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        "JSONDecodeError: Expecting value",
+        "Expecting value: line 1 column 1",
+        "FailedParseRoomIdError: invalid room response",
+        "TikTok returned a non-JSON response",
+    ],
+)
+def test_json_response_error_signatures_share_backoff_classification(error):
+    assert observer._is_json_response_error(error) is True
+
+
+@pytest.mark.parametrize("error", [None, "", "UserOfflineError: account is offline", "TimeoutError"])
+def test_unrelated_errors_do_not_use_json_response_backoff(error):
+    assert observer._is_json_response_error(error) is False
+
+
 def test_probe_room_live_returns_unknown_when_client_has_no_web(monkeypatch):
     constructed = _install_probe(monkeypatch, {"data": {"user": {"status": 2}}}, web=False)
 
