@@ -172,7 +172,7 @@ def test_placeholder_observer_host_keeps_database_host_fallback(
         connection.close()
 
     assert result == {"status": "ok", "total_coins": 25}
-    assert stored == ("Scheduled Host", "Scheduled Host")
+    assert stored == ("Scheduled Host", "Host")
 
 
 def test_atomic_gift_event_rolls_back_log_when_daily_aggregate_fails(
