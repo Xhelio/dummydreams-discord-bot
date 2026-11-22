@@ -326,6 +326,9 @@ def is_any_host_live() -> bool:
 _PRIORITY_PROBE_TTL_SECONDS = 45
 _priority_probe_cache = {"at": 0.0, "targets": (), "results": []}
 _priority_probe_lock = None
+_ROOM_ID_PROBE_SEMAPHORE = asyncio.Semaphore(1)
+_ROOM_ID_PROBE_COOLDOWN_SECONDS = 300
+_ROOM_ID_PROBE_COOLDOWN_UNTIL = 0.0
 
 
 async def probe_priority_targets_once(force: bool = False):
@@ -357,10 +360,14 @@ async def probe_priority_targets_once(force: bool = False):
 
     async with _priority_probe_lock:
         now = time.time()
+        cache_ttl = max(
+            _PRIORITY_PROBE_TTL_SECONDS,
+            _ROOM_ID_PROBE_COOLDOWN_UNTIL - now,
+        )
         if (
             not force
             and target_tuple == _priority_probe_cache.get("targets")
-            and (now - float(_priority_probe_cache.get("at") or 0.0)) < _PRIORITY_PROBE_TTL_SECONDS
+            and (now - float(_priority_probe_cache.get("at") or 0.0)) < cache_ttl
         ):
             cached = _priority_probe_cache.get("results") or []
             return [dict(item) for item in cached]
@@ -420,67 +427,90 @@ async def _trigger_announcement(announcement_callback, username: str, is_live: b
 
 
 async def probe_room_live(username: str):
-    """Best-effort probe for TikTok live status. Returns True/False/None."""
+    """Best-effort TikTok live probe. Returns True/False/None.
+
+    TikTok's room-ID API may temporarily return HTML/captcha instead of JSON.
+    Serialize these low-priority probes and pause them after that response so
+    a batch of priority targets cannot amplify a platform-side block.
+    """
+    global _ROOM_ID_PROBE_COOLDOWN_UNTIL
     username = (username or "").lower().lstrip("@")
     if not username or FetchRoomIdAPIRoute is None:
         return None
 
     client = None
-    try:
-        # Construct off the loop: httpx loads the certifi CA bundle synchronously
-        # (ssl.create_default_context), which blocked the loop for seconds.
-        client = await asyncio.to_thread(TikTokLiveClient, unique_id=username)
-        web = getattr(client, "web", None)
-        if web is None:
+    async with _ROOM_ID_PROBE_SEMAPHORE:
+        # Check inside the semaphore: concurrent callers queued behind the
+        # first failed request must observe the cooldown before making a call.
+        if time.time() < _ROOM_ID_PROBE_COOLDOWN_UNTIL:
             return None
-        fetch = getattr(FetchRoomIdAPIRoute, "fetch_user_room_data", None)
-        if fetch is None:
-            return None
-        data = await fetch(web, username)
-        payload = data or {}
-        if isinstance(payload, dict) and "data" in payload:
-            root = payload.get("data")
-            # An explicitly present but malformed data envelope is not proof
-            # that the account is offline; keep the probe result unknown.
-            if not isinstance(root, dict):
+        try:
+            # Construct off the loop: httpx loads the certifi CA bundle synchronously.
+            client = await asyncio.to_thread(TikTokLiveClient, unique_id=username)
+            web = getattr(client, "web", None)
+            if web is None:
                 return None
-        else:
-            root = payload if isinstance(payload, dict) else {}
+            fetch = getattr(FetchRoomIdAPIRoute, "fetch_user_room_data", None)
+            if fetch is None:
+                return None
+            data = await fetch(web, username)
+            payload = data or {}
+            if isinstance(payload, dict) and "data" in payload:
+                root = payload.get("data")
+                # An explicitly present but malformed data envelope is not proof
+                # that the account is offline; keep the probe result unknown.
+                if not isinstance(root, dict):
+                    return None
+            else:
+                root = payload if isinstance(payload, dict) else {}
 
-        user = root.get("user") if isinstance(root.get("user"), dict) else {}
-        room = root.get("liveRoom") or root.get("live_room") or user.get("liveRoom") or user.get("live_room") or {}
-        if not isinstance(room, dict):
-            room = {}
+            user = root.get("user") if isinstance(root.get("user"), dict) else {}
+            room = root.get("liveRoom") or root.get("live_room") or user.get("liveRoom") or user.get("live_room") or {}
+            if not isinstance(room, dict):
+                room = {}
 
-        status = user.get("status")
-        if status in (2, "2"):
-            return True
-        for key in ("roomId", "room_id", "roomIdStr", "id_str", "id"):
-            value = room.get(key) or root.get(key)
-            if value and str(value) not in ("0", "", "None"):
-                # A room ID alone is not always proof of live; combine with status hints when present.
-                if room.get("status") in (2, "2") or root.get("status") in (2, "2"):
-                    return True
-        if room.get("status") in (2, "2"):
-            return True
-        # Conservative default when structure is recognized but no live signal found.
-        if user or room or root:
-            return False
-    except Exception as e:
-        print(f"[{username}] Live probe error: {e}")
-        return None
-    finally:
-        # Probe clients are short-lived and do not enter the observer's normal
-        # lifecycle cleanup. Close their HTTP session on every return path.
-        web = getattr(client, "web", None) if client is not None else None
-        closer = getattr(web, "close", None)
-        if closer:
-            try:
-                result = closer()
-                if asyncio.iscoroutine(result):
-                    await result
-            except Exception as close_error:
-                print(f"[{username}] Live probe HTTP cleanup error: {close_error}")
+            status = user.get("status")
+            if status in (2, "2"):
+                return True
+            for key in ("roomId", "room_id", "roomIdStr", "id_str", "id"):
+                value = room.get(key) or root.get(key)
+                if value and str(value) not in ("0", "", "None"):
+                    # A room ID alone is not always proof of live; combine with status hints when present.
+                    if room.get("status") in (2, "2") or root.get("status") in (2, "2"):
+                        return True
+            if room.get("status") in (2, "2"):
+                return True
+            # Conservative default when structure is recognized but no live signal found.
+            if user or room or root:
+                return False
+        except Exception as e:
+            error_text = f"{type(e).__name__}: {e}".lower()
+            if (
+                "jsondecodeerror" in error_text
+                or "expecting value" in error_text
+                or "non-json response" in error_text
+                or "failedparseroomiderror" in error_text
+            ):
+                _ROOM_ID_PROBE_COOLDOWN_UNTIL = time.time() + _ROOM_ID_PROBE_COOLDOWN_SECONDS
+                print(
+                    f"[{username}] TikTok room probe received a non-JSON/blocked response; "
+                    f"pausing low-priority room probes for {_ROOM_ID_PROBE_COOLDOWN_SECONDS}s."
+                )
+            else:
+                print(f"[{username}] Live probe error: {e}")
+            return None
+        finally:
+            # Probe clients are short-lived and do not enter the observer's normal
+            # lifecycle cleanup. Close their HTTP session on every return path.
+            web = getattr(client, "web", None) if client is not None else None
+            closer = getattr(web, "close", None)
+            if closer:
+                try:
+                    result = closer()
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception as close_error:
+                    print(f"[{username}] Live probe HTTP cleanup error: {close_error}")
     return None
 
 def clear_active_live_status(username: str):
