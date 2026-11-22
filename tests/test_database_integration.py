@@ -224,3 +224,63 @@ def test_sync_valid_hosts_preserves_admin_disabled_hosts_unless_reactivated(
 
     assert official == ("Custom Display", 1)
     assert custom == (1,)
+
+
+class _TrackingLock:
+    def __init__(self):
+        self.held = False
+
+    def acquire(self, timeout=None):
+        assert not self.held
+        self.held = True
+        return True
+
+    def release(self):
+        assert self.held
+        self.held = False
+
+
+class _CloseObservingConnection:
+    def __init__(self, lock, rollback_error=False):
+        self.lock = lock
+        self.rollback_error = rollback_error
+        self.lock_state_during_close = None
+
+    def commit(self):
+        return None
+
+    def rollback(self):
+        if self.rollback_error:
+            raise RuntimeError("rollback failed")
+
+    def close(self):
+        self.lock_state_during_close = self.lock.held
+
+
+def test_write_transaction_releases_lock_before_successful_close(monkeypatch):
+    lock = _TrackingLock()
+    connection = _CloseObservingConnection(lock)
+    monkeypatch.setattr(db, "_DB_WRITE_LOCK", lock)
+    monkeypatch.setattr(db, "get_db_connection", lambda: connection)
+
+    assert db.write_transaction(lambda _conn: "saved") == "saved"
+
+    assert connection.lock_state_during_close is False
+    assert lock.held is False
+
+
+def test_write_transaction_keeps_lock_until_close_if_rollback_fails(monkeypatch):
+    lock = _TrackingLock()
+    connection = _CloseObservingConnection(lock, rollback_error=True)
+    monkeypatch.setattr(db, "_DB_WRITE_LOCK", lock)
+    monkeypatch.setattr(db, "get_db_connection", lambda: connection)
+
+    import pytest
+
+    with pytest.raises(ValueError, match="operation failed"):
+        db.write_transaction(
+            lambda _conn: (_ for _ in ()).throw(ValueError("operation failed"))
+        )
+
+    assert connection.lock_state_during_close is True
+    assert lock.held is False

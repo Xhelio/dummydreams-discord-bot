@@ -242,6 +242,14 @@ def write_transaction(
                 "Database write lock busy for 30s; another write is stalled"
             )
         conn = None
+        lock_released = False
+
+        def _release_write_lock():
+            nonlocal lock_released
+            if not lock_released:
+                _DB_WRITE_LOCK.release()
+                lock_released = True
+
         try:
             connect_started = time.perf_counter()
             conn = get_db_connection()
@@ -254,14 +262,23 @@ def write_transaction(
             commit_started = time.perf_counter()
             conn.commit()
             _log_stage("commit", time.perf_counter() - commit_started, attempt)
+            # The transaction is durable now. Do not make other writers wait
+            # for the driver's HTTP stream-close cleanup request.
+            _release_write_lock()
             return result
         except Exception as exc:
             last_error = exc
+            rollback_succeeded = False
             if conn is not None:
                 try:
                     conn.rollback()
+                    rollback_succeeded = True
                 except Exception:
                     pass
+            # A confirmed rollback also ends the critical section. If rollback
+            # failed, keep the lock until close() can tear down the stream.
+            if rollback_succeeded:
+                _release_write_lock()
         finally:
             close_started = time.perf_counter()
             if conn is not None:
@@ -270,7 +287,7 @@ def write_transaction(
                 except Exception:
                     pass
             _log_stage("close", time.perf_counter() - close_started, attempt)
-            _DB_WRITE_LOCK.release()
+            _release_write_lock()
             _log_stage("transaction_total", time.perf_counter() - attempt_started, attempt)
 
         if attempt >= attempts or not is_transient_db_error(last_error):
