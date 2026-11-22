@@ -3546,6 +3546,34 @@ def _get_table_columns(cur, table: str) -> set:
     """Ambil nama kolom tabel (aman untuk SQLite maupun Turso/libsql)."""
     return {col["name"] for col in _get_table_column_info(cur, table)}
 
+# gift_logs schema is stable between application startups. Cache its metadata
+# briefly so every GiftEvent does not pay an extra remote Turso PRAGMA round-trip.
+_GIFT_LOG_COLUMN_INFO_CACHE = None
+_GIFT_LOG_COLUMN_INFO_CACHE_AT = 0.0
+_GIFT_LOG_COLUMN_INFO_CACHE_TTL = 300.0
+_GIFT_LOG_COLUMN_INFO_CACHE_LOCK = threading.Lock()
+
+
+def _get_cached_gift_log_column_info(cur) -> list:
+    """Return cached gift_logs schema metadata, refreshing it at most every 5 minutes."""
+    global _GIFT_LOG_COLUMN_INFO_CACHE, _GIFT_LOG_COLUMN_INFO_CACHE_AT
+    now = time.monotonic()
+    with _GIFT_LOG_COLUMN_INFO_CACHE_LOCK:
+        if (
+            _GIFT_LOG_COLUMN_INFO_CACHE is not None
+            and now - _GIFT_LOG_COLUMN_INFO_CACHE_AT < _GIFT_LOG_COLUMN_INFO_CACHE_TTL
+        ):
+            return [dict(column) for column in _GIFT_LOG_COLUMN_INFO_CACHE]
+
+    info = _get_table_column_info(cur, "gift_logs")
+    if info:
+        cached = tuple(dict(column) for column in info)
+        with _GIFT_LOG_COLUMN_INFO_CACHE_LOCK:
+            _GIFT_LOG_COLUMN_INFO_CACHE = cached
+            _GIFT_LOG_COLUMN_INFO_CACHE_AT = time.monotonic()
+        return [dict(column) for column in cached]
+    return info
+
 
 def _fallback_gift_log_value(name: str, col_type: str, data: dict):
     """Nilai aman untuk kolom NOT NULL lama yang tidak ada di data kita."""
@@ -3661,9 +3689,9 @@ def record_gift_event_transaction(
 
     def _store(conn):
         cur = conn.cursor()
-        # Read schema metadata once; the insert helper reuses it instead
-        # of issuing a second PRAGMA table_info round-trip on every gift.
-        column_info = _get_table_column_info(cur, "gift_logs")
+        # Reuse schema metadata across gifts; a remote PRAGMA on every event
+        # adds an avoidable Turso round-trip to the critical write path.
+        column_info = _get_cached_gift_log_column_info(cur)
         columns = {col["name"] for col in column_info}
         # The unique msg_id constraint and INSERT OR IGNORE already provide
         # atomic deduplication. Avoid a separate SELECT round-trip to Turso
