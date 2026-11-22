@@ -2020,6 +2020,17 @@ def _seed_default_settings(conn, defaults):
     )
 
 
+def _get_role_tier_seed_state(conn):
+    """Read the one-time seed marker and tier count in one database round trip."""
+    row = conn.execute(
+        "SELECT "
+        "EXISTS(SELECT 1 FROM bot_settings WHERE key = ?), "
+        "(SELECT COUNT(*) FROM role_tiers)",
+        ("tiers_seeded",),
+    ).fetchone()
+    return bool(row[0]), int(row[1])
+
+
 def _execute_atomic_batch(conn, statements):
     """Run an ordered group of SQL statements atomically when batch is available."""
     normalized = [
@@ -2618,14 +2629,11 @@ def init_db():
 
         # Seed role tiers from the legacy JSON config only once.
         role_seed_check_started = time.perf_counter()
-        seeded = conn.execute("SELECT value FROM bot_settings WHERE key = 'tiers_seeded'").fetchone()
-        _log_db_init_stage("role_tier_seed_marker_check", role_seed_check_started)
-        role_count_started = time.perf_counter()
-        tier_count = conn.execute("SELECT COUNT(*) FROM role_tiers").fetchone()[0]
-        _log_db_init_stage("role_tier_seed_count_check", role_count_started)
+        seeded, tier_count = _get_role_tier_seed_state(conn)
+        _log_db_init_stage("role_tier_seed_state_check", role_seed_check_started)
         print(
             f"[DB Init Timing] stage=role_tier_seed_state "
-            f"marker_present={bool(seeded)} tier_count={tier_count}"
+            f"marker_present={seeded} tier_count={tier_count}"
         )
         if not seeded and not tier_count:
             role_config_started = time.perf_counter()
