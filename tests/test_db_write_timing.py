@@ -43,3 +43,13 @@ def test_write_transaction_without_timing_label_remains_quiet(monkeypatch, capsy
 
     assert db.write_transaction(lambda _conn: 42) == 42
     assert capsys.readouterr().out == ""
+
+
+def test_db_init_stage_timing_reports_elapsed(monkeypatch, capsys):
+    ticks = iter((2.75,))
+    monkeypatch.setattr(db.time, "perf_counter", lambda: next(ticks))
+
+    ended = db._log_db_init_stage("schema", 2.0)
+
+    assert ended == 2.75
+    assert "[DB Init Timing] stage=schema elapsed=0.750s" in capsys.readouterr().out
