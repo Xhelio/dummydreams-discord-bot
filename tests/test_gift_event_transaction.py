@@ -7,6 +7,10 @@ def _setup_gift_database(path, daily_check=""):
     connection = sqlite3.connect(path)
     connection.executescript(
         """
+        CREATE TABLE bot_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
         CREATE TABLE gift_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             tiktok_username TEXT,
@@ -249,15 +253,17 @@ def test_turso_batch_gift_event_is_atomic_and_deduplicated(tmp_path, monkeypatch
             connection.execute("SELECT total_coins FROM live_sessions WHERE session_id=7").fetchone()[0],
             connection.execute("SELECT total_coins FROM tiktok_gifts WHERE tiktok_user='viewer'").fetchone()[0],
             connection.execute("SELECT coins FROM daily_tiktok_gifts WHERE tiktok_user='viewer'").fetchone()[0],
+            connection.execute("SELECT value FROM bot_settings WHERE key='gift_log_last_ok'").fetchone()[0],
         )
     finally:
         connection.close()
 
     assert first == {"status": "ok", "total_coins": 25}
     assert duplicate == {"status": "duplicate"}
-    assert totals == (1, 25, 25, 25)
+    assert totals[:4] == (1, 25, 25, 25)
+    assert totals[4]
     assert len(batch_connections) == 2
-    assert all(len(call[0]) == 4 and call[1] == "immediate" for conn in batch_connections for call in conn.calls)
+    assert all(len(call[0]) == 5 and call[1] == "immediate" for conn in batch_connections for call in conn.calls)
 
 
 def test_turso_batch_gift_event_rolls_back_all_steps_on_failure(tmp_path, monkeypatch):
