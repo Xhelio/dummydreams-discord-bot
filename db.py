@@ -2033,9 +2033,13 @@ def _get_role_tier_seed_state(conn):
 
 def _normalize_host_priorities(conn):
     """Repair legacy NULL priorities only when a row actually needs it."""
-    needs_normalization = conn.execute(
-        "SELECT 1 FROM hosts WHERE is_priority IS NULL LIMIT 1"
-    ).fetchone()
+    try:
+        needs_normalization = conn.execute(
+            "SELECT 1 FROM hosts WHERE is_priority IS NULL LIMIT 1"
+        ).fetchone()
+    except Exception:
+        # Preserve the old best-effort repair if the preflight read itself fails.
+        needs_normalization = True
     if not needs_normalization:
         return False
     _execute_atomic_batch(conn, [
