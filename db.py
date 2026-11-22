@@ -3651,15 +3651,10 @@ def _fallback_gift_log_value(name: str, col_type: str, data: dict):
     return ""
 
 
-def _insert_gift_log_row(
-    cur, data: dict, or_ignore: bool = True, column_info: list = None
-) -> list:
-    """Insert gift log hanya memakai kolom yang benar-benar ada di DB.
-
-    Ini membuat penulisan gift log tetap berhasil walau schema produksi
-    tertinggal/korup. Kolom NOT NULL lama (mis. ``tiktok_username``) otomatis
-    diisi supaya constraint tidak menggagalkan insert.
-    """
+def _build_gift_log_insert_statement(
+    data: dict, or_ignore: bool = True, column_info: list = None, cur=None
+) -> tuple:
+    """Build a schema-compatible gift-log INSERT and its bound parameters."""
     info = (
         column_info
         if column_info is not None
@@ -3696,7 +3691,17 @@ def _insert_gift_log_row(
         f"{verb} INTO gift_logs ({', '.join(insert_cols)}) "
         f"VALUES ({placeholders})"
     )
-    cur.execute(sql, tuple(data[col] for col in insert_cols))
+    return sql, tuple(data[col] for col in insert_cols), insert_cols
+
+
+def _insert_gift_log_row(
+    cur, data: dict, or_ignore: bool = True, column_info: list = None
+) -> list:
+    """Insert a gift log using only columns present in the active schema."""
+    sql, params, insert_cols = _build_gift_log_insert_statement(
+        data, or_ignore=or_ignore, column_info=column_info, cur=cur
+    )
+    cur.execute(sql, params)
     return insert_cols
 
 
@@ -3753,10 +3758,61 @@ def record_gift_event_transaction(
         # Reuse schema metadata across gifts; a remote PRAGMA on every event
         # adds an avoidable Turso round-trip to the critical write path.
         column_info = _get_cached_gift_log_column_info(cur)
-        columns = {col["name"] for col in column_info}
-        # The unique msg_id constraint and INSERT OR IGNORE already provide
-        # atomic deduplication. Avoid a separate SELECT round-trip to Turso
-        # before every insert; rowcount below still detects replayed events.
+        insert_sql, insert_params, _ = _build_gift_log_insert_statement(
+            data, or_ignore=True, column_info=column_info
+        )
+
+        batch = getattr(conn, "batch", None)
+        if callable(batch):
+            # One SQL-over-HTTP batch replaces several sequential requests.
+            # changes() carries the insert's affected-row count forward:
+            # duplicate msg_ids make every aggregate step a no-op.
+            results = batch(
+                [
+                    (insert_sql, insert_params),
+                    (
+                        """
+                        INSERT INTO tiktok_gifts
+                            (tiktok_user, display_name, total_coins)
+                        SELECT ?, ?, ? WHERE changes() > 0
+                        ON CONFLICT(tiktok_user) DO UPDATE SET
+                            total_coins = total_coins + excluded.total_coins,
+                            display_name = excluded.display_name
+                        RETURNING total_coins
+                        """,
+                        (viewer_clean, viewer_display, coins),
+                    ),
+                    (
+                        """
+                        INSERT INTO daily_tiktok_gifts
+                            (tiktok_user, display_name, coins, date)
+                        SELECT ?, ?, ?, ? WHERE changes() > 0
+                        ON CONFLICT(tiktok_user, date) DO UPDATE SET
+                            coins = coins + excluded.coins,
+                            display_name = excluded.display_name
+                        """,
+                        (viewer_clean, viewer_display, coins, log_date),
+                    ),
+                    (
+                        """
+                        UPDATE live_sessions
+                        SET total_coins = total_coins + ?
+                        WHERE session_id = ? AND changes() > 0
+                        """,
+                        (coins, session_id),
+                    ),
+                ],
+                mode="immediate",
+            )
+            if results[0].rowcount == 0:
+                return {"status": "duplicate"}
+            total_rows = results[1].rows
+            return {
+                "status": "ok",
+                "total_coins": int(total_rows[0][0]) if total_rows else 0,
+            }
+
+        # SQLite fallback: preserve the existing DB-API transaction path.
         _insert_gift_log_row(
             cur, data, or_ignore=True, column_info=column_info
         )
@@ -3770,8 +3826,6 @@ def record_gift_event_transaction(
                 (coins, session_id),
             )
 
-        # RETURNING retrieves the updated aggregate in the same SQL round-trip
-        # as the UPSERT; a follow-up SELECT would add another Turso request.
         total_row = cur.execute(
             """
             INSERT INTO tiktok_gifts (tiktok_user, display_name, total_coins)
