@@ -13,6 +13,11 @@ from TikTokLive.events.custom_events import UnknownEvent, WebsocketResponseEvent
 from TikTokLive.events.proto_events import EVENT_MAPPINGS
 
 
+def _parse_proto_event(event_type, payload):
+    """Construct and decode an event away from the asyncio event-loop thread."""
+    return event_type().parse(payload)
+
+
 class NonBlockingTikTokLiveClient(_TikTokLiveClient):
     """TikTokLive client that decodes protobuf payloads in a worker thread."""
 
@@ -35,7 +40,7 @@ class NonBlockingTikTokLiveClient(_TikTokLiveClient):
         try:
             # The protobuf parser is CPU-heavy Python code. Moving it off the
             # loop keeps Discord interactions and other observers schedulable.
-            proto_event = await asyncio.to_thread(event_type().parse, payload)
+            proto_event = await asyncio.to_thread(_parse_proto_event, event_type, payload)
         except Exception as exc:
             error_text = str(exc)
             is_known_schema_bug = any(
