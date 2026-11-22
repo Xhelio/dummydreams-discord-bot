@@ -570,6 +570,12 @@ class _NotifyFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         text = str(record.getMessage()).lower()
+        # Asyncio's temporary slow-callback tracer can emit one warning per
+        # delayed task step. Keep those diagnostics in console/file logs, but
+        # do not turn each one into another DB write and Discord alert: that
+        # feedback adds load while the event loop is already under pressure.
+        if record.name == "asyncio" and text.startswith("executing <task"):
+            return False
         return not any(token.lower() in text for token in self._SKIP)
 
 
