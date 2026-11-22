@@ -3462,7 +3462,6 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                         "DELETE FROM bot_settings WHERE key IN (?, ?)",
                         (resume_key, resume_last_key),
                     )
-                    conn.commit()
                     print(
                         f"[LiveSession] Resumed session {resume_id} for @{user_clean} "
                         f"after {gap}s restart gap (paused time excluded)."
@@ -3473,7 +3472,6 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                 "DELETE FROM bot_settings WHERE key IN (?, ?)",
                 (resume_key, resume_last_key),
             )
-            conn.commit()
 
         active_rows = cur.execute("""
             SELECT session_id FROM live_sessions 
@@ -3510,7 +3508,6 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                     last_seen_at = ?
                     WHERE session_id = ? AND end_time IS NULL
                 """, (stale_end, stale_end, stale_end, active_id))
-                conn.commit()
                 print(
                     f"[LiveSession] Closed stale open session {active_id} for @{user_clean} "
                     f"at last heartbeat {stale_end} (no activity > {LIVE_SESSION_STALE_SECONDS // 60}m)."
@@ -3539,7 +3536,6 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                 )
                 if explicit_host:
                     cur.execute("UPDATE live_sessions SET scheduled_host = ? WHERE session_id = ?", (current_host, active_id))
-                conn.commit()
                 return active_id
 
         # A live that has already ended must NOT be reopened: a new connect
