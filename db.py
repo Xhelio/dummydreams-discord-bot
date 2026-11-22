@@ -2012,17 +2012,25 @@ def _seed_default_settings(conn, defaults):
     )
 
 
-def _execute_schema_statements(conn, statements):
-    """Execute startup DDL in one atomic remote batch when the driver supports it."""
-    statements = list(statements)
-    if not statements:
+def _execute_atomic_batch(conn, statements):
+    """Run an ordered group of SQL statements atomically when batch is available."""
+    normalized = [
+        statement if isinstance(statement, tuple) else (statement, ())
+        for statement in statements
+    ]
+    if not normalized:
         return
     batch = getattr(conn, "batch", None)
     if callable(batch):
-        batch([(statement, ()) for statement in statements], mode="immediate")
+        batch(normalized, mode="immediate")
         return
-    for statement in statements:
-        conn.execute(statement)
+    for sql, params in normalized:
+        conn.execute(sql, params)
+
+
+def _execute_schema_statements(conn, statements):
+    """Execute startup DDL in one atomic remote batch when the driver supports it."""
+    _execute_atomic_batch(conn, list(statements))
 
 
 def _log_db_init_stage(stage, started):
@@ -2319,10 +2327,13 @@ def init_db():
         # Dedupe index: TikTok can replay/duplicate gift messages (especially
         # across reconnects), so a gift log row is unique per message id.
         try:
-            conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_gift_logs_msg_id "
-                "ON gift_logs(msg_id) WHERE msg_id IS NOT NULL"
-            )
+            _execute_atomic_batch(conn, [
+                (
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_gift_logs_msg_id "
+                    "ON gift_logs(msg_id) WHERE msg_id IS NOT NULL",
+                    (),
+                )
+            ])
             conn.commit()
         except Exception as e:
             try:
@@ -2333,12 +2344,14 @@ def init_db():
 
         # Backfill host at gift time for old rows (host_name was added later).
         try:
-            conn.execute("""
-                UPDATE gift_logs
-                SET host_name = scheduled_host
-                WHERE (host_name IS NULL OR host_name = '')
-                  AND scheduled_host IS NOT NULL AND scheduled_host != ''
-            """)
+            _execute_atomic_batch(conn, [
+                ("""
+                    UPDATE gift_logs
+                    SET host_name = scheduled_host
+                    WHERE (host_name IS NULL OR host_name = '')
+                      AND scheduled_host IS NOT NULL AND scheduled_host != ''
+                """, ())
+            ])
             conn.commit()
         except Exception as e:
             try:
@@ -2350,23 +2363,25 @@ def init_db():
         # Backfill log_date/log_time for legacy rows so analytics and range
         # filters can see every gift that is already in the log.
         try:
-            conn.execute("""
-                UPDATE gift_logs
-                SET log_datetime = COALESCE(NULLIF(log_datetime, ''), created_at)
-                WHERE log_datetime IS NULL OR log_datetime = ''
-            """)
-            conn.execute("""
-                UPDATE gift_logs
-                SET log_date = substr(COALESCE(NULLIF(log_datetime, ''), created_at), 1, 10)
-                WHERE (log_date IS NULL OR log_date = '')
-                  AND COALESCE(NULLIF(log_datetime, ''), created_at) IS NOT NULL
-            """)
-            conn.execute("""
-                UPDATE gift_logs
-                SET log_time = substr(COALESCE(NULLIF(log_datetime, ''), created_at), 12, 8)
-                WHERE (log_time IS NULL OR log_time = '')
-                  AND COALESCE(NULLIF(log_datetime, ''), created_at) IS NOT NULL
-            """)
+            _execute_atomic_batch(conn, [
+                ("""
+                    UPDATE gift_logs
+                    SET log_datetime = COALESCE(NULLIF(log_datetime, ''), created_at)
+                    WHERE log_datetime IS NULL OR log_datetime = ''
+                """, ()),
+                ("""
+                    UPDATE gift_logs
+                    SET log_date = substr(COALESCE(NULLIF(log_datetime, ''), created_at), 1, 10)
+                    WHERE (log_date IS NULL OR log_date = '')
+                      AND COALESCE(NULLIF(log_datetime, ''), created_at) IS NOT NULL
+                """, ()),
+                ("""
+                    UPDATE gift_logs
+                    SET log_time = substr(COALESCE(NULLIF(log_datetime, ''), created_at), 12, 8)
+                    WHERE (log_time IS NULL OR log_time = '')
+                      AND COALESCE(NULLIF(log_datetime, ''), created_at) IS NOT NULL
+                """, ()),
+            ])
             conn.commit()
         except Exception as e:
             try:
