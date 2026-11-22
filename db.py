@@ -3987,11 +3987,20 @@ def record_gift_event_transaction(
     log_datetime = now_dt.strftime("%Y-%m-%d %H:%M:%S")
     target_clean = (target_user or "").lower()
     viewer_clean = (viewer_user or "").lower()
-    scheduled_host = get_scheduled_host_name(
-        target_clean, now_dt, session_id=session_id
-    )
+    # The observer passes its in-memory host only after validating it against
+    # the current live session and refreshing it from LiveIntro detections.
+    # Reuse that confirmed value instead of opening another DB connection on
+    # every gift. Keep the DB lookup for placeholder/unknown host states so a
+    # resumed session can still supply its scheduled host.
+    supplied_host = str(host_name or "").strip()
+    if supplied_host and supplied_host not in ("Host", "-"):
+        scheduled_host = supplied_host
+    else:
+        scheduled_host = get_scheduled_host_name(
+            target_clean, now_dt, session_id=session_id
+        )
     host_clean = (
-        (host_name or "").strip()
+        supplied_host
         or (scheduled_host or "").strip()
         or "Host"
     )
