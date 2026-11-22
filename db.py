@@ -2416,6 +2416,7 @@ def init_db():
                 conn.rollback()
             except Exception:
                 pass
+        stage_started = _log_db_init_stage("host_schema_compatibility", stage_started)
 
         # Default settings (never overwrite values saved by the admin)
         wib = pytz.timezone('Asia/Jakarta')
@@ -2458,6 +2459,7 @@ def init_db():
                 (key, str(value)),
             )
         conn.commit()
+        stage_started = _log_db_init_stage("settings_seed", stage_started)
 
         # Seed aliases once so existing welcome-message detection keeps working.
         alias_count = conn.execute("SELECT COUNT(*) FROM host_aliases").fetchone()[0]
@@ -2468,6 +2470,7 @@ def init_db():
                     (alias, host_name),
                 )
             conn.commit()
+        stage_started = _log_db_init_stage("host_alias_seed", stage_started)
 
         # Repair stale/incorrect aliases once (e.g. an "angel" alias pointing
         # to another host). This is safe: it only fills missing canonical
@@ -2476,6 +2479,7 @@ def init_db():
             repair_host_aliases(conn)
         except Exception as e:
             print(f"[DB Migration] Host alias repair failed: {e}")
+        stage_started = _log_db_init_stage("host_alias_repair", stage_started)
 
         # Seed role tiers from the legacy JSON config only once.
         seeded = conn.execute("SELECT value FROM bot_settings WHERE key = 'tiers_seeded'").fetchone()
@@ -2501,10 +2505,12 @@ def init_db():
                 "INSERT OR IGNORE INTO bot_settings (key, value) VALUES ('tiers_seeded', '1')"
             )
             conn.commit()
+        stage_started = _log_db_init_stage("role_tier_seed", stage_started)
 
         # Sinkronisasi 6 akun target resmi dengan ID 1-6 (reusing this connection)
         sync_valid_hosts(conn)
         conn.commit()
+        stage_started = _log_db_init_stage("host_sync", stage_started)
     finally:
         conn.close()
         _log_db_init_stage("total", init_started)
