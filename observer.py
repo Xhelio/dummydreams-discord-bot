@@ -529,6 +529,15 @@ def _should_reset_observer_cycle_state(connected_this_cycle: bool, json_empty_cy
     return bool(connected_this_cycle and not json_empty_cycle)
 
 
+def _next_consecutive_failures(
+    current: int, *, is_unavailable: bool = False, is_offline_error: bool = False
+) -> int:
+    """Only unexpected observer errors should increase the failure streak."""
+    if is_unavailable or is_offline_error:
+        return 0
+    return current + 1
+
+
 def _is_reconnect_requested(username: str) -> bool:
     with _RECONNECT_REQUESTED_LOCK:
         return username in _RECONNECT_REQUESTED
@@ -1581,7 +1590,6 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             cycle_error = e
             err = str(e)
             err_detail = f"{type(e).__name__}: {err}"
-            consecutive_failures += 1
             err_lower = err_detail.lower()
             is_rate_limited = ("rate_limit" in err_lower) or ("too many connections" in err_lower) or ("eulerstream" in err_lower)
             is_json_empty_error = ("jsondecodeerror" in err_lower) or ("expecting value" in err_lower)
@@ -1594,6 +1602,11 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             is_offline_error = (not is_rate_limited) and (
                 not is_unavailable
                 and ("offline" in err_lower or "useroffline" in err_lower or "not found" in err_lower)
+            )
+            consecutive_failures = _next_consecutive_failures(
+                consecutive_failures,
+                is_unavailable=is_unavailable,
+                is_offline_error=is_offline_error,
             )
             runtime_status.update_observer_diag(
                 username_clean,
