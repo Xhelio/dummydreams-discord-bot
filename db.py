@@ -2513,7 +2513,9 @@ def init_db():
         ])
         priority_started = time.perf_counter()
         try:
-            conn.execute("UPDATE hosts SET is_priority = 1 WHERE is_priority IS NULL")
+            _execute_atomic_batch(conn, [
+                ("UPDATE hosts SET is_priority = 1 WHERE is_priority IS NULL", ())
+            ])
             conn.commit()
         except Exception:
             try:
