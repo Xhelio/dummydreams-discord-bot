@@ -10,6 +10,8 @@ import sys
 import time
 from datetime import datetime
 
+from executor_warmup import create_warmed_executor
+
 import pytz
 import discord
 from discord import app_commands
@@ -4276,16 +4278,15 @@ async def main():
         os.getpid(),
     )
 
-    # Turso/libSQL calls run in worker threads via asyncio.to_thread. The default
-    # executor only has ~5 workers on small instances, so a burst of gift events
-    # could starve interaction handlers. These tasks are network-bound, so extra
-    # threads are cheap and keep slash commands responsive during busy lives.
+    # Install the executor that was pre-warmed before asyncio.run(). Creating
+    # its first worker lazily on this loop can block the loop during startup.
     try:
-        loop.set_default_executor(
-            concurrent.futures.ThreadPoolExecutor(max_workers=16, thread_name_prefix="db")
+        executor = _DEFAULT_EXECUTOR or concurrent.futures.ThreadPoolExecutor(
+            max_workers=16, thread_name_prefix="db"
         )
+        loop.set_default_executor(executor)
     except Exception as e:
-        log.exception("[Startup] Could not enlarge default executor: %s", e)
+        log.exception("[Startup] Could not configure default executor: %s", e)
 
     init_db()
     log.info("[Startup] Database initialised.")
@@ -4359,10 +4360,25 @@ async def main():
     finally:
         runtime_status.set_bot_offline()
 
+_DEFAULT_EXECUTOR = None
+
+
 if __name__ == "__main__":
     log_setup.set_build_info(env=get_bot_env(), version=get_push_code())
     log_setup.setup_logging()
     try:
+        # Warm every worker before the event loop starts. ThreadPoolExecutor
+        # normally starts workers on demand; Thread.start() can take seconds
+        # on a constrained host and would otherwise run inside the event loop.
+        log_setup.get_logger("bot.startup").info(
+            "[Startup] Pre-warming default executor (16 workers)."
+        )
+        _DEFAULT_EXECUTOR = create_warmed_executor(
+            max_workers=16, thread_name_prefix="db"
+        )
+        log_setup.get_logger("bot.startup").info(
+            "[Startup] Default executor ready."
+        )
         asyncio.run(main())
     except KeyboardInterrupt:
         log.info("\n[Bot] Stopped successfully.")
