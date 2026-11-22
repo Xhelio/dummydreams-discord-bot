@@ -46,7 +46,7 @@ def test_write_transaction_without_timing_label_remains_quiet(monkeypatch, capsy
 
 
 def test_db_init_stage_timing_reports_elapsed(monkeypatch, capsys):
-    ticks = iter((2.0, 2.75))
+    ticks = iter((2.75,))
     monkeypatch.setattr(db.time, "perf_counter", lambda: next(ticks))
 
     ended = db._log_db_init_stage("schema", 2.0)
