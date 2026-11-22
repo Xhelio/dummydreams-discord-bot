@@ -4336,6 +4336,10 @@ async def main():
 
     # Deliver queued warnings/errors to the Discord error channel.
     asyncio.create_task(log_setup.notify_loop(bot))
+    # The module-level heartbeat may be old by the time startup finishes.
+    # Reset it before starting the watchdog so it does not report a false
+    # startup stall before the lag-monitor task has had its first tick.
+    _LOOP_BEAT["at"] = time.monotonic()
     asyncio.create_task(_loop_lag_monitor())
     _start_loop_stack_watchdog()
     asyncio.create_task(_keep_awake_loop())
