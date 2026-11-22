@@ -1051,7 +1051,17 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
                     except Exception:
                         pass
 
-            await asyncio.to_thread(update_active_live_announcement_host, user_key, final_host_name)
+            # Only persist the account-wide host when an existing announcement
+            # actually has stale metadata. Most live/probe callbacks repeat the
+            # same host; avoiding this no-op write reduces contention on the
+            # process-wide database write lock.
+            if any(
+                str(session.get("host_name") or "") != str(final_host_name)
+                for session in sessions
+            ):
+                await asyncio.to_thread(
+                    update_active_live_announcement_host, user_key, final_host_name
+                )
     except Exception as e:
         print(f"[Discord] process_live_announcement error for @{user_key} (is_live={is_live}): {e}")
 
