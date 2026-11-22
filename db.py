@@ -204,6 +204,14 @@ def is_transient_db_error(exc) -> bool:
     return any(token in text for token in _TRANSIENT_DB_TOKENS)
 
 
+def _execute_atomic_statement(conn, sql: str, params=()):
+    """Execute one write as a single remote batch when the driver supports it."""
+    batch = getattr(conn, "batch", None)
+    if callable(batch):
+        return batch([(sql, params)], mode="immediate")
+    return conn.execute(sql, params)
+
+
 def write_transaction(
     operation,
     attempts: int = 4,
@@ -2656,7 +2664,8 @@ def _insert_activity_log_batch(conn, rows):
     row_placeholders = "(?, ?, ?, ?, ?, ?, ?)"
     values_sql = ", ".join(row_placeholders for _ in normalized_rows)
     params = tuple(value for row in normalized_rows for value in row)
-    conn.execute(
+    _execute_atomic_statement(
+        conn,
         "INSERT INTO activity_logs "
         "(event_type, tiktok_username, message, created_at, category, level, source) "
         f"VALUES {values_sql}",
@@ -3299,7 +3308,8 @@ def touch_live_session(session_id: int, when: str = None):
         when = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
 
     def _store(conn):
-        conn.execute(
+        _execute_atomic_statement(
+            conn,
             "UPDATE live_sessions SET last_seen_at = ? "
             "WHERE session_id = ? AND end_time IS NULL",
             (str(when)[:19], session_id),
@@ -4476,7 +4486,8 @@ def _write_setting_rows(rows) -> int:
     params = tuple(value for item in items for value in item)
 
     def _op(conn):
-        conn.execute(
+        _execute_atomic_statement(
+            conn,
             "INSERT INTO bot_settings (key, value) "
             f"VALUES {values_sql} "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
