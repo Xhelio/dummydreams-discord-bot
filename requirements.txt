@@ -2,7 +2,7 @@
 discord.py==2.7.1
 # The nonblocking parser adapter follows TikTokLive 7.0.1's internal parser contract.
 TikTokLive==7.0.1
-libsql-experimental
+turso-serverless==0.1.0
 python-dotenv
 pytz
 flask
