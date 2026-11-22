@@ -1959,6 +1959,23 @@ def _add_missing_columns(conn, table, columns):
     return tuple(added)
 
 
+def _seed_default_settings(conn, defaults):
+    """Insert missing default settings in one statement without overwriting admins."""
+    if not defaults:
+        return
+    rows = list(defaults.items())
+    placeholders = ", ".join("(?, ?)" for _ in rows)
+    params = tuple(
+        value
+        for key, value in rows
+        for value in (key, str(value))
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO bot_settings (key, value) VALUES " + placeholders,
+        params,
+    )
+
+
 def _log_db_init_stage(stage, started):
     """Emit a monotonic duration for one init_db phase and return its end time."""
     ended = time.perf_counter()
@@ -2453,11 +2470,7 @@ def init_db():
             # TikTok or DB work before the bot answers with a timeout message.
             "verification_click_timeout_seconds": "45",
         }
-        for key, value in defaults.items():
-            conn.execute(
-                "INSERT OR IGNORE INTO bot_settings (key, value) VALUES (?, ?)",
-                (key, str(value)),
-            )
+        _seed_default_settings(conn, defaults)
         conn.commit()
         stage_started = _log_db_init_stage("settings_seed", stage_started)
 
