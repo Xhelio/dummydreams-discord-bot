@@ -2429,9 +2429,13 @@ def init_db():
         # Normalize viewer names to lowercase so the same viewer never gets two
         # separate coin rows ("Alice" vs "alice"). Idempotent & safe.
         try:
+            viewer_scan_started = time.perf_counter()
             mixed = conn.execute(
                 "SELECT tiktok_user FROM tiktok_gifts WHERE tiktok_user != LOWER(tiktok_user)"
             ).fetchall()
+            _log_db_init_stage("viewer_name_scan", viewer_scan_started)
+            print(f"[DB Init Timing] stage=viewer_name_scan_rows count={len(mixed)}")
+            viewer_updates_started = time.perf_counter()
             for (key_value,) in mixed:
                 lower_key = (key_value or "").strip().lower()
                 if not lower_key:
@@ -2456,7 +2460,10 @@ def init_db():
                         "UPDATE tiktok_gifts SET tiktok_user = ? WHERE tiktok_user = ?",
                         (lower_key, key_value),
                     )
+            _log_db_init_stage("viewer_name_updates", viewer_updates_started)
+            viewer_commit_started = time.perf_counter()
             conn.commit()
+            _log_db_init_stage("viewer_name_commit", viewer_commit_started)
         except Exception as e:
             try:
                 conn.rollback()
@@ -2466,10 +2473,14 @@ def init_db():
 
         stage_started = _log_db_init_stage("viewer_name_normalization", stage_started)
         try:
+            daily_scan_started = time.perf_counter()
             mixed_daily = conn.execute(
                 "SELECT tiktok_user, date FROM daily_tiktok_gifts "
                 "WHERE tiktok_user != LOWER(tiktok_user)"
             ).fetchall()
+            _log_db_init_stage("daily_gift_name_scan", daily_scan_started)
+            print(f"[DB Init Timing] stage=daily_gift_name_scan_rows count={len(mixed_daily)}")
+            daily_updates_started = time.perf_counter()
             for key_value, date_value in mixed_daily:
                 lower_key = (key_value or "").strip().lower()
                 if not lower_key:
@@ -2500,7 +2511,10 @@ def init_db():
                         "WHERE tiktok_user = ? AND date = ?",
                         (lower_key, key_value, date_value),
                     )
+            _log_db_init_stage("daily_gift_name_updates", daily_updates_started)
+            daily_commit_started = time.perf_counter()
             conn.commit()
+            _log_db_init_stage("daily_gift_name_commit", daily_commit_started)
         except Exception as e:
             try:
                 conn.rollback()
