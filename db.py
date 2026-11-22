@@ -389,6 +389,7 @@ def sync_valid_hosts(conn=None, reactivate: bool = False):
     try:
         accounts = list(VALID_TARGET_ACCOUNTS)
         if not accounts:
+            conn.commit()
             return
 
         usernames = [uname for _, uname, _ in accounts]
