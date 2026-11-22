@@ -1941,22 +1941,28 @@ def reset_live_state(clear_logs: bool = True):
 
 def _ensure_analytics_indexes(conn):
     """Create indexes matching the date expressions used by analytics filters."""
+    stage_started = time.perf_counter()
     statements = (
-        "CREATE INDEX IF NOT EXISTS idx_gift_logs_analytics_date "
-        "ON gift_logs(substr(log_date, 1, 10))",
-        "CREATE INDEX IF NOT EXISTS idx_live_sessions_analytics_date "
-        "ON live_sessions(substr(start_time, 1, 10))",
+        ("gift_logs", "CREATE INDEX IF NOT EXISTS idx_gift_logs_analytics_date "
+         "ON gift_logs(substr(log_date, 1, 10))"),
+        ("live_sessions", "CREATE INDEX IF NOT EXISTS idx_live_sessions_analytics_date "
+         "ON live_sessions(substr(start_time, 1, 10))"),
     )
-    for statement in statements:
+    for label, statement in statements:
+        index_started = time.perf_counter()
         try:
             conn.execute(statement)
+            commit_started = time.perf_counter()
             conn.commit()
+            _log_db_init_stage(f"analytics_index_{label}_commit", commit_started)
         except Exception as exc:
             try:
                 conn.rollback()
             except Exception:
                 pass
             print(f"[DB Migration] analytics date index skipped: {exc}")
+        _log_db_init_stage(f"analytics_index_{label}", index_started)
+    _log_db_init_stage("analytics_indexes", stage_started)
 
 
 def _add_missing_columns(conn, table, columns):
