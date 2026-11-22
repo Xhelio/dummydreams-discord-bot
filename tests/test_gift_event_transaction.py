@@ -118,6 +118,63 @@ def test_atomic_gift_event_updates_log_session_and_coin_totals_once(
     assert (log_count, session_total, all_time, daily) == (1, 25, 25, 25)
 
 
+def test_confirmed_observer_host_skips_redundant_database_lookup(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "gift-confirmed-host.sqlite3"
+    _setup_gift_database(path)
+    _configure_database(monkeypatch, path)
+
+    def unexpected_host_lookup(*args, **kwargs):
+        raise AssertionError("confirmed observer host should avoid another DB lookup")
+
+    monkeypatch.setattr(db, "get_scheduled_host_name", unexpected_host_lookup)
+
+    result = _record(msg_id="gift-confirmed-host")
+
+    connection = sqlite3.connect(path)
+    try:
+        stored = connection.execute(
+            "SELECT scheduled_host, host_name FROM gift_logs"
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert result == {"status": "ok", "total_coins": 25}
+    assert stored == ("Current Host", "Current Host")
+
+
+def test_placeholder_observer_host_keeps_database_host_fallback(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "gift-placeholder-host.sqlite3"
+    _setup_gift_database(path)
+    _configure_database(monkeypatch, path)
+
+    result = db.record_gift_event_transaction(
+        session_id=7,
+        target_user="creator",
+        viewer_user="viewer",
+        viewer_display="Viewer",
+        gift_name="Rose",
+        gift_count=1,
+        coins=25,
+        msg_id="gift-placeholder-host",
+        host_name="Host",
+    )
+
+    connection = sqlite3.connect(path)
+    try:
+        stored = connection.execute(
+            "SELECT scheduled_host, host_name FROM gift_logs"
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert result == {"status": "ok", "total_coins": 25}
+    assert stored == ("Scheduled Host", "Host")
+
+
 def test_atomic_gift_event_rolls_back_log_when_daily_aggregate_fails(
     tmp_path, monkeypatch
 ):
