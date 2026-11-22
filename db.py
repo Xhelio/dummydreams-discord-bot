@@ -2025,7 +2025,10 @@ def _execute_atomic_batch(conn, statements):
         batch(normalized, mode="immediate")
         return
     for sql, params in normalized:
-        conn.execute(sql, params)
+        if params:
+            conn.execute(sql, params)
+        else:
+            conn.execute(sql)
 
 
 def _execute_schema_statements(conn, statements):
