@@ -4197,15 +4197,15 @@ def _normalize_discord_id(value) -> str:
     return s
 
 
-# Role assignment runs after every gift. A positive-only cache avoids
-# opening a Turso connection for repeated TikTok -> Discord lookups. Mapping
-# changes made through bind_user_mapping invalidate this cache immediately.
+# Role assignment runs after every gift. Cache mappings for several minutes
+# to avoid repeated remote Turso lookups during an active live. Mapping changes
+# made through bind_user_mapping invalidate both hit and miss entries immediately.
 _DISCORD_MAPPING_CACHE = {}
-_DISCORD_MAPPING_CACHE_TTL = 60.0
-# Most live viewers are not linked to Discord. Cache misses briefly so repeated
-# gifts from the same unlinked viewer do not open a new Turso connection each time.
+_DISCORD_MAPPING_CACHE_TTL = 300.0
+# Most live viewers are not linked to Discord. A short miss TTL avoids repeating
+# remote lookups for viewers who send gifts more than once during a live.
 # bind_user_mapping() invalidates both positive and negative entries immediately.
-_DISCORD_MAPPING_MISS_CACHE_TTL = 15.0
+_DISCORD_MAPPING_MISS_CACHE_TTL = 90.0
 _DISCORD_MAPPING_CACHE_LOCK = threading.Lock()
 
 
