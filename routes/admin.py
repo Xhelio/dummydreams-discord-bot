@@ -64,6 +64,47 @@ _ANALYTICS_PROFILE_CACHE_INFLIGHT = {}
 _ANALYTICS_PROFILE_CACHE_LOCK = threading.Lock()
 _ANALYTICS_PROFILE_CACHE_TTL = 60.0
 
+# Filter option lists change infrequently; cache them briefly to avoid two
+# additional remote database round-trips on every dashboard refresh.
+_ANALYTICS_OPTIONS_CACHE = {}
+_ANALYTICS_OPTIONS_CACHE_INFLIGHT = {}
+_ANALYTICS_OPTIONS_CACHE_LOCK = threading.Lock()
+_ANALYTICS_OPTIONS_CACHE_TTL = 60.0
+
+
+def _get_cached_analytics_options(name, loader):
+    now = time.monotonic()
+    with _ANALYTICS_OPTIONS_CACHE_LOCK:
+        cached = _ANALYTICS_OPTIONS_CACHE.get(name)
+        if cached and now - cached[0] < _ANALYTICS_OPTIONS_CACHE_TTL:
+            return list(cached[1])
+
+        future = _ANALYTICS_OPTIONS_CACHE_INFLIGHT.get(name)
+        is_owner = future is None
+        if is_owner:
+            future = Future()
+            _ANALYTICS_OPTIONS_CACHE_INFLIGHT[name] = future
+
+    if not is_owner:
+        return list(future.result())
+
+    try:
+        result = tuple(loader() or ())
+    except BaseException as exc:
+        with _ANALYTICS_OPTIONS_CACHE_LOCK:
+            if _ANALYTICS_OPTIONS_CACHE_INFLIGHT.get(name) is future:
+                _ANALYTICS_OPTIONS_CACHE_INFLIGHT.pop(name, None)
+        future.set_exception(exc)
+        raise
+
+    with _ANALYTICS_OPTIONS_CACHE_LOCK:
+        _ANALYTICS_OPTIONS_CACHE[name] = (time.monotonic(), result)
+        if _ANALYTICS_OPTIONS_CACHE_INFLIGHT.get(name) is future:
+            _ANALYTICS_OPTIONS_CACHE_INFLIGHT.pop(name, None)
+
+    future.set_result(result)
+    return list(result)
+
 # Analytics reads are independent and spend most of their time waiting on the
 # remote database. Bound concurrency to avoid overwhelming the small Turso
 # instance while overlapping network round-trips.
@@ -1877,8 +1918,8 @@ def view_analytics():
         "gift_by_account": (get_analytics_gift_by_account, (start_str, end_str, host_arg, viewer_arg), {}),
         "viewer_ranking": (get_analytics_viewer_ranking, (start_str, end_str, host_arg, account_arg, 100), {}),
         "viewer_host_spend": (get_analytics_viewer_host_spend, (start_str, end_str, viewer_arg, host_arg, account_arg, 200), {}),
-        "host_options": (get_analytics_host_options, (), {}),
-        "account_options": (get_analytics_account_options, (), {}),
+        "host_options": (_get_cached_analytics_options, ("hosts", get_analytics_host_options), {}),
+        "account_options": (_get_cached_analytics_options, ("accounts", get_analytics_account_options), {}),
         "top_gift_items": (get_analytics_top_gift_items, (start_str, end_str, host_arg, account_arg, viewer_arg, 12), {}),
     })
     summary = analytics_results["summary"]
