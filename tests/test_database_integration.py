@@ -309,16 +309,18 @@ def test_sync_valid_hosts_batches_existing_host_updates(tmp_path, monkeypatch):
     connection.commit()
     connection.close()
 
-    monkeypatch.setattr(db, "get_db_connection", _sqlite_connection_factory(database_path))
+    statements = []
+
+    def tracked_connection():
+        connection = sqlite3.connect(database_path)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(db, "get_db_connection", tracked_connection)
     monkeypatch.setattr(db, "VALID_TARGET_ACCOUNTS", [
         (1, "official_a", "Official A"),
         (2, "official_b", "Official B"),
     ])
-
-    statements = []
-    connection = sqlite3.connect(database_path)
-    connection.set_trace_callback(statements.append)
-    connection.close()
 
     db.sync_valid_hosts()
 
