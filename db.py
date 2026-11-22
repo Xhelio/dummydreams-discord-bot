@@ -5,6 +5,7 @@ import queue
 import re
 import time
 import threading
+import sys
 try:
     import libsql_experimental as libsql
     HAS_LIBSQL = True
@@ -152,6 +153,30 @@ def _schedule_setting_refresh(key: str):
 # SQLITE_BUSY ("stream was idle for too long"). Serialise writes in this process
 # and retry the transient failures with a fresh connection.
 _DB_WRITE_LOCK = threading.Lock()
+_DB_MODULE_DIAGNOSTIC_LOCK = threading.Lock()
+_DB_MODULE_DIAGNOSTICS_EMITTED = False
+
+
+def _log_duplicate_db_module_instances() -> None:
+    """Detect multiple imports of db.py that would each own a different write lock."""
+    global _DB_MODULE_DIAGNOSTICS_EMITTED
+    if _DB_MODULE_DIAGNOSTICS_EMITTED:
+        return
+    with _DB_MODULE_DIAGNOSTIC_LOCK:
+        if _DB_MODULE_DIAGNOSTICS_EMITTED:
+            return
+        module_path = os.path.realpath(__file__)
+        aliases = []
+        for name, module in tuple(sys.modules.items()):
+            module_file = getattr(module, "__file__", None)
+            if module_file and os.path.realpath(module_file) == module_path:
+                aliases.append(
+                    (name, id(module), id(getattr(module, "_DB_WRITE_LOCK", None)))
+                )
+        lock_ids = {entry[2] for entry in aliases}
+        if len(lock_ids) > 1:
+            print(f"[DB] Duplicate db.py imports detected; write locks differ: {aliases}")
+        _DB_MODULE_DIAGNOSTICS_EMITTED = True
 _TRANSIENT_DB_TOKENS = (
     "sqlite_busy",
     "database is locked",
@@ -201,6 +226,7 @@ def write_transaction(
                 f"elapsed={elapsed:.3f}s attempt={attempt}"
             )
 
+    _log_duplicate_db_module_instances()
     last_error = None
     for attempt in range(1, attempts + 1):
         attempt_started = time.perf_counter()
@@ -248,9 +274,13 @@ def write_transaction(
             raise last_error
 
         delay = base_delay * (2 ** (attempt - 1))
+        operation_name = f" operation={timing_label}" if timing_label else ""
         print(
-            f"[DB] Transient write error (attempt {attempt}/{attempts}), "
-            f"retrying in {delay:.1f}s: {type(last_error).__name__}: {last_error}"
+            f"[DB] Transient write error{operation_name} "
+            f"thread={threading.current_thread().name} "
+            f"lock_id={id(_DB_WRITE_LOCK)} "
+            f"(attempt {attempt}/{attempts}), retrying in {delay:.1f}s: "
+            f"{type(last_error).__name__}: {last_error}"
         )
         time.sleep(delay)
 
@@ -2609,6 +2639,7 @@ def _activity_log_writer_loop():
             batch.append(nxt)
 
         def _write_batch(conn, rows=batch):
+            normalized_rows = []
             for row in rows:
                 # Backward compatibility with old 4-tuple shape
                 if len(row) == 4:
@@ -2616,13 +2647,33 @@ def _activity_log_writer_loop():
                     cat_n, lvl_n, src_n = "operational", "info", ""
                 else:
                     event_type, message, user_clean, now_str, cat_n, lvl_n, src_n = row
-                conn.execute("""
-                    INSERT INTO activity_logs (event_type, tiktok_username, message, created_at, category, level, source)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (event_type, user_clean, message, now_str, cat_n or "operational", lvl_n or "info", src_n or ""))
+                normalized_rows.append((
+                    event_type,
+                    user_clean,
+                    message,
+                    now_str,
+                    cat_n or "operational",
+                    lvl_n or "info",
+                    src_n or "",
+                ))
+
+            if not normalized_rows:
+                return
+
+            # One multi-row statement avoids up to 100 sequential remote
+            # Turso round-trips while holding the interactive transaction.
+            row_placeholders = "(?, ?, ?, ?, ?, ?, ?)"
+            values_sql = ", ".join(row_placeholders for _ in normalized_rows)
+            params = tuple(value for row in normalized_rows for value in row)
+            conn.execute(
+                "INSERT INTO activity_logs "
+                "(event_type, tiktok_username, message, created_at, category, level, source) "
+                f"VALUES {values_sql}",
+                params,
+            )
 
         try:
-            write_transaction(_write_batch)
+            write_transaction(_write_batch, timing_label="activity_log_batch")
             with _ACTIVITY_LOG_PRUNE_LOCK:
                 _ACTIVITY_LOG_PRUNE_COUNTER += len(batch)
                 should_prune = _ACTIVITY_LOG_PRUNE_COUNTER >= 250
@@ -4328,7 +4379,7 @@ def _write_setting_row(key: str, value: str) -> None:
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
         """, (key, str(value)))
 
-    write_transaction(_op)
+    write_transaction(_op, timing_label="setting_write")
 
 
 def _cache_setting_value(key: str, value: str) -> None:
