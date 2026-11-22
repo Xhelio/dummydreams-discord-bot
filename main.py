@@ -11,6 +11,7 @@ import time
 from datetime import datetime
 
 from executor_warmup import create_warmed_executor
+from event_loop_diagnostics import SlowCallbackDiagnostics
 
 import pytz
 import discord
@@ -3000,6 +3001,12 @@ async def on_resumed():
     print("[Gateway] Resumed Discord session.")
 
 
+_SLOW_CALLBACK_DIAGNOSTICS = SlowCallbackDiagnostics(
+    duration_seconds=180.0,
+    threshold_seconds=0.25,
+)
+
+
 _LOOP_BEAT = {
     "at": time.monotonic(),
     "reported": 0.0,
@@ -3089,6 +3096,13 @@ async def _loop_lag_monitor() -> None:
         if lag >= 1.0:
             _LOOP_BEAT["last_confirmed_lag_at"] = now
             _LOOP_BEAT["last_confirmed_lag_seconds"] = lag
+            if _SLOW_CALLBACK_DIAGNOSTICS.activate(asyncio.get_running_loop()):
+                log.warning(
+                    "[EventLoop Diagnostics] enabled asyncio slow-callback tracing "
+                    "for %.0fs (threshold=%.2fs).",
+                    _SLOW_CALLBACK_DIAGNOSTICS.duration_seconds,
+                    _SLOW_CALLBACK_DIAGNOSTICS.threshold_seconds,
+                )
             current = asyncio.current_task()
             tasks = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
             names = sorted({getattr(t.get_coro(), "__qualname__", "?") for t in tasks})[:12]
