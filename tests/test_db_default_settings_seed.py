@@ -64,3 +64,43 @@ def test_role_tier_seed_state_reads_marker_and_count_together():
     connection.executemany("INSERT INTO role_tiers (id) VALUES (?)", [(1,), (2,), (3,)])
     assert db._get_role_tier_seed_state(connection) == (True, 3)
     connection.close()
+
+
+def test_host_priority_normalization_skips_write_when_no_nulls_exist():
+    connection = sqlite3.connect(":memory:")
+    connection.execute(
+        "CREATE TABLE hosts (host_id INTEGER PRIMARY KEY, is_priority INTEGER)"
+    )
+    connection.executemany(
+        "INSERT INTO hosts (host_id, is_priority) VALUES (?, ?)",
+        [(1, 1), (2, 0)],
+    )
+    statements = []
+    connection.set_trace_callback(statements.append)
+
+    assert db._normalize_host_priorities(connection) is False
+    assert not any(
+        statement.lstrip().upper().startswith("UPDATE HOSTS")
+        for statement in statements
+    )
+    assert connection.execute(
+        "SELECT is_priority FROM hosts ORDER BY host_id"
+    ).fetchall() == [(1,), (0,)]
+    connection.close()
+
+
+def test_host_priority_normalization_repairs_only_null_values():
+    connection = sqlite3.connect(":memory:")
+    connection.execute(
+        "CREATE TABLE hosts (host_id INTEGER PRIMARY KEY, is_priority INTEGER)"
+    )
+    connection.executemany(
+        "INSERT INTO hosts (host_id, is_priority) VALUES (?, ?)",
+        [(1, None), (2, 0), (3, 1)],
+    )
+
+    assert db._normalize_host_priorities(connection) is True
+    assert connection.execute(
+        "SELECT is_priority FROM hosts ORDER BY host_id"
+    ).fetchall() == [(1,), (0,), (1,)]
+    connection.close()
