@@ -142,3 +142,47 @@ def test_request_reconnect_can_skip_host_reconfirmation(monkeypatch):
     assert targets == ["creator"]
     assert observer._RECONNECT_REQUESTED == {"creator"}
     assert observer._HOST_RECONFIRM_REQUESTED == set()
+
+
+
+def test_observer_task_exit_reports_unexpected_exception(monkeypatch):
+    logged = []
+    printed = []
+    monkeypatch.setattr(observer, "log_activity_event", lambda *args: logged.append(args))
+    monkeypatch.setattr("builtins.print", lambda *args: printed.append(" ".join(map(str, args))))
+
+    async def fail():
+        raise RuntimeError("unexpected websocket failure")
+
+    async def run():
+        task = asyncio.create_task(fail())
+        await asyncio.sleep(0)
+        observer._report_observer_task_exit("creator", task)
+
+    asyncio.run(run())
+
+    assert printed and "unexpected websocket failure" in printed[0]
+    assert logged and logged[0][0] == "error"
+    assert "@creator" in logged[0][1]
+
+
+def test_observer_task_exit_ignores_clean_and_cancelled_tasks(monkeypatch):
+    logged = []
+    monkeypatch.setattr(observer, "log_activity_event", lambda *args: logged.append(args))
+
+    async def run():
+        clean = asyncio.create_task(asyncio.sleep(0))
+        await clean
+        observer._report_observer_task_exit("creator", clean)
+
+        cancelled = asyncio.create_task(asyncio.sleep(10))
+        cancelled.cancel()
+        try:
+            await cancelled
+        except asyncio.CancelledError:
+            pass
+        observer._report_observer_task_exit("creator", cancelled)
+
+    asyncio.run(run())
+
+    assert logged == []
