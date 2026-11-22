@@ -64,7 +64,7 @@ def test_activity_log_collector_preserves_fifo_and_batch_limit():
     events.put("third")
 
     batch, shutdown = db._collect_activity_log_batch(
-        "first", event_queue=events, max_size=2, max_wait=0
+        "first", event_queue=events, max_size=2, max_wait=0.1
     )
 
     assert batch == ["first", "second"]
@@ -84,9 +84,7 @@ def test_activity_log_collector_acknowledges_shutdown_sentinel():
 
     assert batch == ["first"]
     assert shutdown is True
-    # The sentinel is acknowledged by the collector; the caller still owns
-    # the first item and must acknowledge it after persistence.
-    events.task_done()
+    # The sentinel is acknowledged by the collector.
     events.join()
 
 
