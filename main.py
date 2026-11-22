@@ -4288,7 +4288,9 @@ async def main():
     except Exception as e:
         log.exception("[Startup] Could not configure default executor: %s", e)
 
-    init_db()
+    # Schema creation/migrations perform synchronous Turso round-trips.
+    # Run them in the already-warmed executor so startup cannot stall asyncio.
+    await asyncio.to_thread(init_db)
     log.info("[Startup] Database initialised.")
 
     # Clear operational logs on every deploy/restart; retain technical logs for debugging.
