@@ -2350,6 +2350,7 @@ def init_db():
 
         # Dedupe index: TikTok can replay/duplicate gift messages (especially
         # across reconnects), so a gift log row is unique per message id.
+        gift_index_started = time.perf_counter()
         try:
             _execute_atomic_batch(conn, [
                 (
@@ -2365,8 +2366,10 @@ def init_db():
             except Exception:
                 pass
             print(f"[DB Migration] gift_logs msg_id index skipped: {e}")
+        _log_db_init_stage("gift_log_msg_id_index", gift_index_started)
 
         # Backfill host at gift time for old rows (host_name was added later).
+        gift_host_started = time.perf_counter()
         try:
             _execute_atomic_batch(conn, [
                 ("""
@@ -2383,9 +2386,11 @@ def init_db():
             except Exception:
                 pass
             print(f"[DB Migration] gift_logs host backfill skipped: {e}")
+        _log_db_init_stage("gift_log_host_backfill", gift_host_started)
 
         # Backfill log_date/log_time for legacy rows so analytics and range
         # filters can see every gift that is already in the log.
+        gift_dates_started = time.perf_counter()
         try:
             _execute_atomic_batch(conn, [
                 ("""
@@ -2413,6 +2418,7 @@ def init_db():
             except Exception:
                 pass
             print(f"[DB Migration] gift_logs date backfill skipped: {e}")
+        _log_db_init_stage("gift_log_date_backfills", gift_dates_started)
 
         stage_started = _log_db_init_stage("gift_log_backfills", stage_started)
 
@@ -2562,8 +2568,12 @@ def init_db():
             # TikTok or DB work before the bot answers with a timeout message.
             "verification_click_timeout_seconds": "45",
         }
+        settings_seed_started = time.perf_counter()
         _seed_default_settings(conn, defaults)
+        _log_db_init_stage("settings_seed_statement", settings_seed_started)
+        settings_commit_started = time.perf_counter()
         conn.commit()
+        _log_db_init_stage("settings_seed_commit", settings_commit_started)
         stage_started = _log_db_init_stage("settings_seed", stage_started)
 
         # Seed aliases once so existing welcome-message detection keeps working.
