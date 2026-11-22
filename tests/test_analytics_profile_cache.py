@@ -8,7 +8,7 @@ import routes.admin as admin
 def _reset_profile_cache():
     with admin._ANALYTICS_PROFILE_CACHE_LOCK:
         admin._ANALYTICS_PROFILE_CACHE.clear()
-        admin._ANALYTICS_PROFILE_INFLIGHT.clear()
+        admin._ANALYTICS_PROFILE_CACHE_INFLIGHT.clear()
 
 
 def test_profile_cache_reuses_fresh_result(monkeypatch):
