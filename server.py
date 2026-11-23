@@ -11,6 +11,7 @@ import secrets
 from routes.admin import admin_bp
 from routes.api import api_bp, set_announcement_handler
 from routes.settings import settings_bp
+from routes.qa import qa_bp
 import log_setup
 
 app = Flask(__name__)
@@ -370,6 +371,7 @@ def security_txt():
 app.register_blueprint(admin_bp)
 app.register_blueprint(api_bp)
 app.register_blueprint(settings_bp)
+app.register_blueprint(qa_bp)
 
 
 @app.route('/')
