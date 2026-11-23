@@ -159,3 +159,20 @@ def test_live_embed_without_room_cover_does_not_fall_back_to_avatar():
     )
     embed = social_preview.build_tiktok_live_embed(preview)
     assert embed.image.url is None
+
+
+def test_fetch_tiktok_live_preview_rejects_video_url_before_network(monkeypatch):
+    called = False
+
+    class UnexpectedSession:
+        def __init__(self, *args, **kwargs):
+            nonlocal called
+            called = True
+
+    monkeypatch.setattr(social_preview.aiohttp, "ClientSession", UnexpectedSession)
+    assert asyncio.run(
+        social_preview.fetch_tiktok_live_preview(
+            "https://www.tiktok.com/@creator/video/123"
+        )
+    ) is None
+    assert called is False
