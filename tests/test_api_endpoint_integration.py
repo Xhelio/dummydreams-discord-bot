@@ -286,3 +286,31 @@ def test_euler_webhook_rejects_oversized_event_batch(monkeypatch):
         "error": "Webhook batch exceeds maximum event count",
         "max_events": api.MAX_EULER_WEBHOOK_BATCH_SIZE,
     }
+
+
+
+def test_euler_webhook_rejects_oversized_request_body():
+    response = _client().post(
+        "/api/euler-webhook",
+        data=b"x" * (api.MAX_EULER_WEBHOOK_BODY_BYTES + 1),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 413
+    assert response.get_json() == {
+        "ok": False,
+        "error": "Webhook request body exceeds maximum size",
+        "max_bytes": api.MAX_EULER_WEBHOOK_BODY_BYTES,
+    }
+
+
+def test_euler_webhook_body_limit_does_not_affect_other_api_routes(monkeypatch):
+    monkeypatch.setenv("API_SECRET_KEY", "integration-secret")
+
+    response = _client().post(
+        "/api/heartbeat",
+        headers=_api_headers(),
+        json={"username": "creator"},
+    )
+
+    assert response.status_code == 200
