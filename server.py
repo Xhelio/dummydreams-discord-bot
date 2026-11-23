@@ -394,11 +394,8 @@ def health():
         bot_ready = False
         bot_user = None
     try:
-        from db import get_db_connection
-        conn = get_db_connection()
-        conn.execute("SELECT 1")
-        conn.close()
-        db_ok = True
+        from db import check_database_health
+        db_ok = check_database_health()
     except Exception:
         db_ok = False
     env = (os.environ.get("BOT_ENV") or os.environ.get("APP_ENV") or "stable").strip().lower()
