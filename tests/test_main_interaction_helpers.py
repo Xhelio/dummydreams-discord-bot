@@ -136,4 +136,4 @@ def test_safe_defer_returns_false_and_logs_unexpected_failure(monkeypatch):
 
     assert asyncio.run(main._safe_defer(interaction, "verify")) is False
     assert len(warnings) == 1
-    assert "simulated transport failure" in warnings[0][-1]
+    assert "simulated transport failure" in str(warnings[0][-1])
