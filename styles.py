@@ -433,15 +433,15 @@ AUTO_REFRESH_JS = r"""
                 const currentCards = document.querySelectorAll('.card');
                 const newCards = doc.querySelectorAll('.card');
 
-                const hasControls = (el) => !!(el && el.querySelector('input, select, textarea, button'));
                 currentCards.forEach((card, index) => {
                     if (!newCards[index]) return;
                     const currentTable = card.querySelector('table');
                     const newTable = newCards[index].querySelector('table');
-                    // Refresh tables even inside cards that contain forms (e.g. the
-                    // Live Monitor target list, whose buttons sit above the table),
-                    // but never tables with form controls so unsaved edits survive.
-                    if (currentTable && newTable && !hasControls(currentTable)) {
+                    // The refresh cycle is paused whenever an input/select/textarea
+                    // is focused (guard above), so tables containing action forms can
+                    // also be refreshed. Skipping those tables left Live Monitor host
+                    // names stale because its rows contain resolve/delete controls.
+                    if (currentTable && newTable) {
                         currentTable.innerHTML = newTable.innerHTML;
                     }
                     const currentTerminal = card.querySelector('.terminal-container');
