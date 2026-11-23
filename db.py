@@ -3015,19 +3015,36 @@ def prune_activity_logs(max_operational: int = 4000, max_technical: int = 6000):
         max_operational, max_technical = 4000, 6000
 
     def _op(conn):
-        for cat, keep in (("operational", max_operational), ("technical", max_technical)):
-            conn.execute(
-                """
-                DELETE FROM activity_logs
-                WHERE category = ? AND log_id NOT IN (
+        # One DELETE keeps the same per-category retention policy while
+        # avoiding a second sequential Turso HTTP round-trip under the write lock.
+        conn.execute(
+            """
+            DELETE FROM activity_logs
+            WHERE (
+                category = ? AND log_id NOT IN (
                     SELECT log_id FROM activity_logs
                     WHERE category = ?
                     ORDER BY log_id DESC
                     LIMIT ?
                 )
-                """,
-                (cat, cat, keep),
+            ) OR (
+                category = ? AND log_id NOT IN (
+                    SELECT log_id FROM activity_logs
+                    WHERE category = ?
+                    ORDER BY log_id DESC
+                    LIMIT ?
+                )
             )
+            """,
+            (
+                "operational",
+                "operational",
+                max_operational,
+                "technical",
+                "technical",
+                max_technical,
+            ),
+        )
 
     try:
         write_transaction(_op, timing_label="activity_log_prune")
