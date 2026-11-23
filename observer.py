@@ -71,6 +71,7 @@ from db import (
     queue_setting
 )
 import runtime_status
+from timed_executor import call_with_timing
 
 # Grace period setelah disconnect sebelum live benar-benar dinyatakan berakhir.
 LIVE_DISCONNECT_GRACE_SECONDS = 600
@@ -1554,14 +1555,21 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     )
                     start_session_heartbeat()
 
-                    result = await asyncio.to_thread(
+                    result, worker_elapsed = await asyncio.to_thread(
+                        call_with_timing,
                         _record_gift_event_db,
                         current_session_id, username_clean, user, display_name,
                         gift_name, repeat, coins, msg_id, diamond, current_host,
                     )
+                    total_elapsed = time.perf_counter() - database_started
                     _log_gift_timing(
-                        username_clean, "database", time.perf_counter() - database_started
+                        username_clean, "database.gift_event_worker", worker_elapsed
                     )
+                    _log_gift_timing(
+                        username_clean, "database.gift_event_dispatch",
+                        max(0.0, total_elapsed - worker_elapsed)
+                    )
+                    _log_gift_timing(username_clean, "database", total_elapsed)
                     if result["status"] == "duplicate":
                         print(
                             f"[{username_clean}] Duplicate gift message ignored "
