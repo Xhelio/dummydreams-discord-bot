@@ -57,6 +57,74 @@ from styles import BASE_CSS, NAV_HTML, AUTO_REFRESH_JS
 
 admin_bp = Blueprint('admin', __name__, url_prefix='/admin')
 
+# TikTok LIVE thumbnail previews are fetched off-request and cached briefly.
+# The monitor page only reads this cache, so browser refreshes never fan out
+# directly to TikTok or block the Flask request thread.
+_LIVE_THUMBNAIL_CACHE = {}
+_LIVE_THUMBNAIL_INFLIGHT = set()
+_LIVE_THUMBNAIL_LOCK = threading.Lock()
+_LIVE_THUMBNAIL_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="live-thumbnail"
+)
+_LIVE_THUMBNAIL_TTL = 90.0
+
+
+def _fetch_live_thumbnail_background(username):
+    username = (username or "").strip().lower().lstrip("@")
+    try:
+        from social_preview import fetch_tiktok_live_preview
+        preview = asyncio.run(
+            fetch_tiktok_live_preview(f"https://www.tiktok.com/@{username}/live")
+        )
+        state = {
+            "thumbnail_url": preview.thumbnail_url if preview else None,
+            "status": "ready" if preview and preview.thumbnail_url else "unavailable",
+            "checked_at": time.time(),
+        }
+    except Exception as exc:
+        state = {
+            "thumbnail_url": None,
+            "status": "error",
+            "checked_at": time.time(),
+            "error": type(exc).__name__,
+        }
+    finally:
+        # A request can finish after the observer has already marked the
+        # account offline. Do not resurrect an old preview in that case.
+        try:
+            if username not in get_live_snapshot():
+                state = {"thumbnail_url": None, "status": "offline", "checked_at": time.time()}
+        except Exception:
+            pass
+        with _LIVE_THUMBNAIL_LOCK:
+            _LIVE_THUMBNAIL_CACHE[username] = state
+            _LIVE_THUMBNAIL_INFLIGHT.discard(username)
+
+
+def _schedule_live_thumbnail_refresh(username):
+    username = (username or "").strip().lower().lstrip("@")
+    if not username:
+        return
+    now = time.time()
+    with _LIVE_THUMBNAIL_LOCK:
+        cached = _LIVE_THUMBNAIL_CACHE.get(username)
+        if cached and now - cached.get("checked_at", 0) < _LIVE_THUMBNAIL_TTL:
+            return
+        if username in _LIVE_THUMBNAIL_INFLIGHT:
+            return
+        _LIVE_THUMBNAIL_INFLIGHT.add(username)
+    try:
+        _LIVE_THUMBNAIL_EXECUTOR.submit(_fetch_live_thumbnail_background, username)
+    except RuntimeError:
+        with _LIVE_THUMBNAIL_LOCK:
+            _LIVE_THUMBNAIL_INFLIGHT.discard(username)
+
+
+def _get_live_thumbnail_state(username):
+    with _LIVE_THUMBNAIL_LOCK:
+        return dict(_LIVE_THUMBNAIL_CACHE.get((username or "").lower(), {}))
+
+
 # Historical hourly profile changes slowly; cache it briefly to avoid scanning
 # the full gift/session history on every analytics page refresh.
 _ANALYTICS_PROFILE_CACHE = {}
@@ -909,13 +977,23 @@ def view_monitor():
         if live_host in (None, "", "Host", "-"):
             live_host = None
         host_name = live_host or open_hosts.get(uname) or "-"
+        is_live = bool(live_item)
+        if is_live:
+            _schedule_live_thumbnail_refresh(uname)
+            thumbnail_state = _get_live_thumbnail_state(uname)
+        else:
+            with _LIVE_THUMBNAIL_LOCK:
+                _LIVE_THUMBNAIL_CACHE.pop(uname, None)
+            thumbnail_state = {"status": "offline"}
         hosts.append({
             "host_id": h[0],
             "username": h[1],
             "display_name": h[2] or h[1],
             "is_active": bool(h[3]),
-            "is_live": bool(live_item),
+            "is_live": is_live,
             "host_name": host_name,
+            "thumbnail_url": thumbnail_state.get("thumbnail_url"),
+            "thumbnail_status": thumbnail_state.get("status", "loading"),
         })
 
     # Observer/connection diagnostics (rate limits, offline polling, cooldowns...).
@@ -1189,6 +1267,40 @@ def view_monitor():
             </table>
             </div>
         </div>
+
+        <div class="card">
+            <h2>🖼️ LIVE Thumbnail Preview</h2>
+            <div class="section-note">Preview diperbarui di latar belakang dan di-cache selama sekitar 90 detik. Status LIVE tetap mengikuti observer; thumbnail yang gagal diambil tidak mengubah status akun.</div>
+            <div class="live-thumbnail-grid">
+                {% for h in hosts if h.is_live %}
+                <div class="live-thumbnail-card">
+                    <div class="live-thumbnail-media">
+                        {% if h.thumbnail_url %}
+                        <img src="{{ h.thumbnail_url }}" alt="LIVE thumbnail @{{ h.username }}" loading="lazy" referrerpolicy="no-referrer">
+                        {% else %}
+                        <div class="live-thumbnail-placeholder">
+                            {% if h.thumbnail_status == 'loading' %}⏳ Mengambil preview…{% elif h.thumbnail_status == 'error' %}⚠️ Gagal mengambil preview{% else %}🖼️ Thumbnail belum tersedia{% endif %}
+                        </div>
+                        {% endif %}
+                    </div>
+                    <div class="live-thumbnail-meta">
+                        <strong>@{{ h.username }}</strong>
+                        <span class="badge badge-active">🔴 LIVE</span>
+                    </div>
+                </div>
+                {% else %}
+                <div class="muted">Tidak ada akun yang sedang LIVE menurut observer.</div>
+                {% endfor %}
+            </div>
+        </div>
+        <style>
+            .live-thumbnail-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
+            .live-thumbnail-card{min-width:0;border:1px solid #334155;border-radius:12px;overflow:hidden;background:#0f172a}
+            .live-thumbnail-media{aspect-ratio:16/9;background:#111827;display:flex;align-items:center;justify-content:center}
+            .live-thumbnail-media img{width:100%;height:100%;object-fit:cover;display:block}
+            .live-thumbnail-placeholder{padding:18px;text-align:center;color:#94a3b8;font-size:.9rem}
+            .live-thumbnail-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 12px}
+        </style>
 
         <div class="card">
             <h2>🎙️ TikTok Target Accounts</h2>

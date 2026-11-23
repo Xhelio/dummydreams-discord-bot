@@ -363,8 +363,63 @@ def _parse_live_page_metadata(body: str, page_url: str) -> TikTokLivePreview | N
     )
 
 
+def _parse_live_room_payload(payload: object, page_url: str) -> TikTokLivePreview | None:
+    """Parse TikTok's public api-live/user/room response without using avatar URLs."""
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+    # Accept the documented data.user/liveRoom shape and the HTML-like
+    # liveRoomUserInfo shape used by some TikTok response variants.
+    user_info = data.get("liveRoomUserInfo")
+    if not isinstance(user_info, dict):
+        user_info = {}
+    user = data.get("user") or user_info.get("user")
+    room = data.get("liveRoom") or user_info.get("liveRoom")
+    if not isinstance(user, dict) or not isinstance(room, dict):
+        return None
+    try:
+        if int(room.get("status")) != 2:
+            return None
+    except (TypeError, ValueError):
+        return None
+
+    path_match = re.match(r"/@([^/]+)/live", urlsplit(page_url).path, re.IGNORECASE)
+    username = str(user.get("uniqueId") or (path_match.group(1) if path_match else "")).strip()
+    if not username:
+        return None
+
+    cover = room.get("coverUrl") or room.get("squareCoverImg") or room.get("cover")
+    if isinstance(cover, dict):
+        cover = cover.get("url_list") or cover.get("urlList") or cover.get("url")
+    if isinstance(cover, (list, tuple)):
+        cover = next((item for item in cover if isinstance(item, str) and item), None)
+    thumbnail = _safe_thumbnail_url(str(cover) if cover else None, page_url)
+
+    stats = room.get("liveRoomStats")
+    if not isinstance(stats, dict):
+        stats = {}
+    viewer_value = stats.get("userCount", stats.get("user_count", stats.get("totalUser")))
+    try:
+        viewer_count = max(0, int(viewer_value)) if viewer_value is not None else None
+    except (TypeError, ValueError):
+        viewer_count = None
+
+    display_name = str(user.get("nickname") or user.get("displayName") or "").strip() or None
+    title = str(room.get("title") or "").strip() or None
+    return TikTokLivePreview(
+        url=page_url,
+        username=username,
+        display_name=display_name,
+        title=title,
+        viewer_count=viewer_count,
+        thumbnail_url=thumbnail,
+    )
+
+
 async def fetch_tiktok_live_preview(url: str) -> TikTokLivePreview | None:
-    """Fetch bounded public LIVE page metadata; never infers LIVE from profile/avatar data."""
+    """Fetch bounded public LIVE metadata, falling back to TikTok's public room-info endpoint."""
     normalized = normalize_tiktok_url(url)
     if not normalized or not re.fullmatch(
         r"/@[A-Za-z0-9._-]+/live/?", urlsplit(normalized).path, re.IGNORECASE
@@ -412,6 +467,42 @@ async def fetch_tiktok_live_preview(url: str) -> TikTokLivePreview | None:
                         raw.decode("utf-8", errors="replace"), final_url
                     )
                     break
+
+            # TikTok's public room-info endpoint exposes coverUrl separately from
+            # profile avatars. Use it when the page state is blocked, incomplete,
+            # or has no room cover; never use user.avatar as a thumbnail.
+            if preview is None or not preview.thumbnail_url:
+                username_match = re.match(
+                    r"/@([^/]+)/live", urlsplit(normalized).path, re.IGNORECASE
+                )
+                username = username_match.group(1) if username_match else ""
+                api_url = "https://www.tiktok.com/api-live/user/room/?" + urlencode(
+                    {"uniqueId": username, "sourceType": "54"}
+                )
+                if username and _is_allowed_page_url(api_url):
+                    async with session.get(
+                        api_url,
+                        allow_redirects=False,
+                        headers={"Referer": normalized},
+                    ) as api_response:
+                        if api_response.status == 200:
+                            raw = await _read_limited(api_response)
+                            if raw is not None:
+                                try:
+                                    payload = json.loads(raw.decode("utf-8", errors="replace"))
+                                except (TypeError, ValueError):
+                                    payload = None
+                                api_preview = _parse_live_room_payload(payload, normalized)
+                                if api_preview and (
+                                    preview is None or api_preview.thumbnail_url
+                                ):
+                                    preview = api_preview
+                        else:
+                            log.debug(
+                                "TikTok LIVE room-info fallback returned HTTP %s for @%s",
+                                api_response.status,
+                                username,
+                            )
     except (aiohttp.ClientError, asyncio.TimeoutError, UnicodeError) as exc:
         log.debug("TikTok LIVE preview unavailable for %s: %s", normalized, type(exc).__name__)
     except Exception:
