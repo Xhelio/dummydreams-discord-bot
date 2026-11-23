@@ -398,6 +398,9 @@ def test_start_live_session_batches_duplicate_active_session_cleanup(
 
     connection = _BatchConnection(path)
     monkeypatch.setattr(db, "get_db_connection", lambda: connection)
+    monkeypatch.setattr(
+        db, "get_current_host_for_account", lambda *args, **kwargs: "Host"
+    )
 
     assert db.start_live_session("sample_user") == 2
 
