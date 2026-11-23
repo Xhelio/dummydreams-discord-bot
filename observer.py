@@ -774,6 +774,9 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
     except Exception:
         pass
     current_session_id = None
+    # A LiveIntro can arrive before ConnectEvent finishes restoring the session.
+    # This flag prevents stale persisted host data from overwriting that detection.
+    host_detected_this_connection = False
     is_connected = False
     disconnect_timer_task = None
     # Menyimpan sesi & waktu disconnect terakhir selama grace period, supaya
@@ -787,7 +790,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
 
     async def check_and_update_host_from_text(text: str, sender_username: str = None, source: str = "message", origin: str = "event"):
         """Detect host from Live Intro data only (event or strict intro fallback)."""
-        nonlocal current_host, current_session_id
+        nonlocal current_host, current_session_id, host_detected_this_connection
         allowed_sources = ("live_intro", "live_intro_fallback")
         sender = (sender_username or "").lower().lstrip("@")
         # Only accept host detection from Live Intro data for the target account.
@@ -821,6 +824,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
 
         detected, matched_alias = detect_host_match_from_welcome_message(text, block=False)
         if detected:
+            host_detected_this_connection = True
             if detected != current_host:
                 conclusion = f"host changed: {current_host} -> {detected} (alias match: {matched_alias!r})"
             else:
@@ -1101,6 +1105,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         return True
 
     while True:
+        host_detected_this_connection = False
         probe_result = None  # per-cycle: never log a previous cycle's probe result
         try:
             connect_mode = (await asyncio.to_thread(get_host_connect_mode, username_clean) or "normal").lower()
@@ -1281,7 +1286,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
 
         @client.on(ConnectEvent)
         async def on_connect(event: ConnectEvent):
-            nonlocal current_session_id, is_connected, disconnect_timer_task, current_host, connected_this_cycle, consecutive_failures, probed_live, attempts_since_success
+            nonlocal current_session_id, is_connected, disconnect_timer_task, current_host, connected_this_cycle, consecutive_failures, probed_live, host_detected_this_connection, attempts_since_success
             try:
                 reconnected_in_grace = await resolve_grace_reconnect()
                 if reconnected_in_grace:
@@ -1309,7 +1314,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                         _HOST_RECONFIRM_REQUESTED.discard(username_clean)
                         force_reconfirm_host = True
 
-                if force_reconfirm_host:
+                if force_reconfirm_host and not host_detected_this_connection:
                     print(f"[{username_clean}] Reconfirming host on reconnect (clearing stale host state).")
                     try:
                         await asyncio.to_thread(set_setting, f"current_host_{username_clean}", "")
@@ -1320,6 +1325,10 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     current_host = "Host"
                     _LAST_INTRO_ANALYZED.pop(username_clean, None)
                     _LAST_INTRO_TEXT.pop(username_clean, None)
+                elif host_detected_this_connection:
+                    # LiveIntro may beat ConnectEvent during startup/reconnect.
+                    # Its fresh result is authoritative; never restore an older host.
+                    print(f"[{username_clean}] Preserving host detected by LiveIntro before ConnectEvent: {current_host}.")
                 else:
                     # Refresh host/session context on (re)connect so host detection can continue/update.
                     stored_host = await asyncio.to_thread(
@@ -1331,6 +1340,11 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                         # Host is stale (previous live) or the session is gone:
                         # wait for this live's LiveIntro instead of showing a wrong name.
                         current_host = "Host"
+
+                if host_detected_this_connection and current_session_id:
+                    # The LiveIntro can arrive before the resumed session ID is adopted.
+                    # Synchronize that session now so its old scheduled_host cannot reappear.
+                    await asyncio.to_thread(update_live_session_host, current_session_id, current_host)
 
                 if not current_session_id:
                     # Placeholder means "not detected yet"; let start_live_session
