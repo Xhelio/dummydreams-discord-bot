@@ -6,6 +6,8 @@
 #   3. Render asks for the `sync: false` secrets. Use the STABLE bot token
 #      and STABLE Turso database for `dummydreams-stable`, and the TEST bot
 #      token and TEST database for `dummydreams-test`.
+# - `staging` is the shared pre-production deployment branch. Validate a
+#   candidate there before promoting it to `main`.
 #
 # Notes:
 # - `plan: starter` keeps the service always on. Render's free plan sleeps
