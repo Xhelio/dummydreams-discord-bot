@@ -1158,19 +1158,21 @@ async def refresh_live_announcement_previews():
             if not targets:
                 continue
 
-            async def refresh_one(username):
-                try:
-                    await process_live_announcement(username, True)
-                except Exception as exc:
-                    log.warning(
-                        "[Live Announcement Refresh] @%s failed: %s: %s",
-                        username,
-                        type(exc).__name__,
-                        exc,
-                    )
+            refresh_semaphore = asyncio.Semaphore(2)
 
-            # The announcement lock serializes Discord edits; two concurrent
-            # metadata fetches keep multiple live accounts from delaying one another.
+            async def refresh_one(username):
+                async with refresh_semaphore:
+                    try:
+                        await process_live_announcement(username, True)
+                    except Exception as exc:
+                        log.warning(
+                            "[Live Announcement Refresh] @%s failed: %s: %s",
+                            username,
+                            type(exc).__name__,
+                            exc,
+                        )
+
+            # Bound concurrent metadata fetches; the announcement lock serializes edits.
             await asyncio.gather(*(refresh_one(username) for username in targets))
             log.debug(
                 "[Live Announcement Refresh] checked %d active account(s).",
