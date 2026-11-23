@@ -8,7 +8,7 @@ This project supports two fully separate deployments:
 | Discord bot | Official bot application | Separate test bot application |
 | Token | `DISCORD_TOKEN` (stable) | `DISCORD_TOKEN` (test) |
 | Database | Production Turso DB | Separate test Turso DB |
-| Hosting | `dummydreams-stable` | `dummydreams-test` |
+| Hosting | `dummydreams-discord-bot` | `dummydreams-test` |
 | `BOT_ENV` | `stable` | `test` |
 | `EXPECTED_GUILD_ID` | Official server ID | Test server ID |
 | `DEBUG_MODE` | `0` | `1` (optional) |
@@ -108,17 +108,19 @@ What the blueprint creates:
 
 | Service | Branch | Plan | Health check |
 |---|---|---|---|
-| `dummydreams-stable` | `main` | starter | `/health` |
-| `dummydreams-test` | `staging` | starter | `/health` |
+| `dummydreams-discord-bot` | `main` | free | `/health` |
+| `dummydreams-test` | `staging` | free | `/health` |
 
 Render asks for the `sync: false` secrets at creation time. Fill the
 stable service with stable values and the test service with test values.
 
 Important:
 
-- **Use an always-on plan.** Free instances sleep after inactivity, which
-  stops the Discord gateway and the TikTok observer. `plan: starter` is
-  set for that reason.
+- The existing stable service currently uses the free plan. Free instances
+  sleep after inactivity, which interrupts the Discord gateway and TikTok
+  observer. This Blueprint preserves the current plan and does not introduce
+  a billing upgrade; move to an always-on paid plan only after explicit cost
+  approval.
 - Python version comes from `.python-version` (`3.11.9`).
 - Do not set `PORT` manually; Render injects it.
 - `libsql-experimental` may need build tools on some images. If the build

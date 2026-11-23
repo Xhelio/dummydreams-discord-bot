@@ -4,18 +4,15 @@
 #   1. Push this file to `main`.
 #   2. In Render: New + -> Blueprint -> pick this repo -> Apply.
 #   3. Render asks for the `sync: false` secrets. Use the STABLE bot token
-#      and STABLE Turso database for `dummydreams-stable`, and the TEST bot
+#      and STABLE Turso database for the existing `dummydreams-discord-bot` service, and the TEST bot
 #      token and TEST database for `dummydreams-test`.
 # - `staging` is the shared pre-production deployment branch. Validate a
 #   candidate there before promoting it to `main`.
 #
 # Notes:
-# - `plan: starter` keeps the service always on. Render's free plan sleeps
-#   after ~15 minutes without HTTP traffic, which stops the Discord gateway
-#   and the TikTok observer. Free + an external keep-alive ping (UptimeRobot
-#   every 5 minutes hitting /health) works as best effort, but the free plan
-#   allows only ~750 instance-hours/month per workspace, i.e. one always-on
-#   service. Use a paid always-on plan for stable.
+# - `plan: free` preserves the existing Render billing tier. Free services
+#   sleep after inactivity, interrupting the Discord gateway and TikTok
+#   observer. Use a paid always-on plan only after explicit cost approval.
 # - Python version comes from `.python-version` (3.11.9).
 # - Both services run the read-only preflight before starting the bot. A bad
 #   production database configuration therefore stops startup instead of
@@ -25,9 +22,9 @@
 services:
   # ---------------------------------------------------------------- STABLE
   - type: web
-    name: dummydreams-stable
+    name: dummydreams-discord-bot
     runtime: python
-    plan: starter
+    plan: free
     region: singapore
     branch: main
     autoDeploy: true
@@ -68,7 +65,7 @@ services:
   - type: web
     name: dummydreams-test
     runtime: python
-    plan: starter
+    plan: free
     region: singapore
     branch: staging
     autoDeploy: true

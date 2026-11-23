@@ -45,3 +45,6 @@ def test_render_services_run_preflight_before_starting_bot():
     ) == 2
     assert "    branch: staging" in render_config
     assert "    branch: test" not in render_config
+    assert "name: dummydreams-discord-bot" in render_config
+    assert "name: dummydreams-stable" not in render_config
+    assert render_config.count("    plan: free") == 2
