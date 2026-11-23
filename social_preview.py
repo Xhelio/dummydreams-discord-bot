@@ -15,7 +15,7 @@ import re
 import time
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from urllib.parse import parse_qs, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 
 import aiohttp
 import discord
@@ -208,7 +208,7 @@ async def fetch_tiktok_preview(url: str) -> TikTokPreview | None:
 
             # TikTok oEmbed is an official metadata fallback. Its current public
             # response does not guarantee a thumbnail_url, so never invent one.
-            if preview is None or not (preview.title or preview.author_name):
+            if (preview is None or not (preview.title or preview.author_name)) and _is_allowed_page_url(current_url):
                 oembed_url = "https://www.tiktok.com/oembed?" + urlencode({"url": current_url})
                 async with session.get(oembed_url, allow_redirects=False) as response:
                     if response.status == 200:
