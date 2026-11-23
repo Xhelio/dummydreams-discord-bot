@@ -2927,27 +2927,46 @@ async def on_message(message):
     # Social preview is deliberately isolated from command/chatbot handling.
     if not getattr(message.author, "bot", False):
         try:
-            from social_preview import build_tiktok_embed, extract_tiktok_urls, fetch_tiktok_preview
+            from social_preview import (
+                build_tiktok_embed,
+                build_tiktok_live_embed,
+                extract_tiktok_live_urls,
+                extract_tiktok_urls,
+                fetch_tiktok_live_preview,
+                fetch_tiktok_preview,
+            )
 
-            tiktok_urls = extract_tiktok_urls(message.content)
-            if tiktok_urls:
-                preview = await fetch_tiktok_preview(tiktok_urls[0])
-                if preview is not None:
-                    # Avoid showing Discord's generic link card as well when the
-                    # bot already has permission to suppress embeds in this channel.
-                    guild = getattr(message, "guild", None)
-                    me = getattr(guild, "me", None) if guild else None
-                    if me is not None:
-                        try:
-                            if message.channel.permissions_for(me).manage_messages:
-                                await message.edit(suppress=True)
-                        except discord.HTTPException:
-                            log.debug("[Social Preview] Could not suppress native link embed.")
-                    await message.reply(
-                        embed=build_tiktok_embed(preview),
-                        mention_author=False,
-                        allowed_mentions=discord.AllowedMentions.none(),
-                    )
+            live_urls = extract_tiktok_live_urls(message.content)
+            preview_embed = None
+            if live_urls:
+                # LIVE links must never fall back to generic profile metadata:
+                # that can show an avatar and falsely imply a room preview.
+                live_preview = await fetch_tiktok_live_preview(live_urls[0])
+                if live_preview is not None:
+                    preview_embed = build_tiktok_live_embed(live_preview)
+            else:
+                tiktok_urls = extract_tiktok_urls(message.content)
+                if tiktok_urls:
+                    preview = await fetch_tiktok_preview(tiktok_urls[0])
+                    if preview is not None:
+                        preview_embed = build_tiktok_embed(preview)
+
+            if preview_embed is not None:
+                # Avoid showing Discord's generic link card as well when the
+                # bot already has permission to suppress embeds in this channel.
+                guild = getattr(message, "guild", None)
+                me = getattr(guild, "me", None) if guild else None
+                if me is not None:
+                    try:
+                        if message.channel.permissions_for(me).manage_messages:
+                            await message.edit(suppress=True)
+                    except discord.HTTPException:
+                        log.debug("[Social Preview] Could not suppress native link embed.")
+                await message.reply(
+                    embed=preview_embed,
+                    mention_author=False,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
         except Exception as e:
             log.warning("[Social Preview] handler error: %s", e)
 
