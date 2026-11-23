@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DummyDreams · Puter Codex PoC</title>
+  <script src="https://js.puter.com/v2/"></script>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #10141c; color: #e8edf5; }
+    body { max-width: 960px; margin: 40px auto; padding: 0 20px; }
+    h1 { margin-bottom: 8px; } p { color: #aeb9ca; line-height: 1.55; }
+    button { border: 0; border-radius: 8px; padding: 10px 16px; margin: 8px 8px 8px 0; cursor: pointer; font-weight: 650; }
+    button:disabled { opacity: .5; cursor: wait; }
+    #signin { background: #647ff5; color: white; } #run { background: #26a269; color: white; }
+    #status { padding: 12px; border: 1px solid #344154; border-radius: 8px; margin: 16px 0; white-space: pre-wrap; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(260px,1fr)); gap: 12px; }
+    article { background: #1a2230; border: 1px solid #344154; border-radius: 10px; padding: 14px; min-height: 170px; }
+    article h2 { font-size: 1rem; margin: 0 0 10px; } article pre { white-space: pre-wrap; overflow-wrap: anywhere; color: #d3dceb; font: 13px/1.5 ui-monospace,monospace; }
+    .warning { border-left: 3px solid #d6a64a; padding-left: 12px; }
+  </style>
+</head>
+<body>
+  <h1>DummyDreams · Puter Codex PoC</h1>
+  <p>Uji kelayakan Puter.js dan tiga permintaan Codex paralel. Ini belum menjalankan agent yang mengubah repository.</p>
+  <p class="warning">Permintaan AI memakai akun Puter yang sedang login. Periksa kebijakan penggunaan/biaya akun Puter sebelum menjalankan tes. Jangan masukkan token, secret, data produksi, atau kode privat ke halaman PoC ini.</p>
+  <button id="signin">1. Login Puter</button>
+  <button id="run" disabled>2. Jalankan tes paralel (3 agent)</button>
+  <div id="status" role="status">Status: belum login.</div>
+  <section class="grid" aria-live="polite">
+    <article><h2>Agent A · Core Bot</h2><pre id="core">Menunggu…</pre></article>
+    <article><h2>Agent B · TikTok Engine</h2><pre id="tiktok">Menunggu…</pre></article>
+    <article><h2>Agent C · QA &amp; Security</h2><pre id="qa">Menunggu…</pre></article>
+  </section>
+<script>
+(() => {
+  const MODEL = "openai/gpt-5.3-codex";
+  const status = document.getElementById("status");
+  const signin = document.getElementById("signin");
+  const run = document.getElementById("run");
+  const setStatus = (message) => { status.textContent = message; };
+  const output = (id, value) => { document.getElementById(id).textContent = value; };
+  let signedIn = false;
+
+  signin.addEventListener("click", async () => {
+    signin.disabled = true;
+    try {
+      await puter.auth.signIn();
+      signedIn = true;
+      run.disabled = false;
+      setStatus("Login Puter berhasil. Model target: " + MODEL);
+    } catch (error) {
+      setStatus("Login gagal: " + (error?.message || String(error)));
+    } finally {
+      signin.disabled = false;
+    }
+  });
+
+  run.addEventListener("click", async () => {
+    if (!signedIn) return;
+    run.disabled = true;
+    const tasks = [
+      ["core", "CORE BOT", "Buat checklist audit read-only untuk stabilitas Discord bot Python. Maksimal 5 poin. Jangan mengasumsikan isi repository."],
+      ["tiktok", "TIKTOK ENGINE", "Buat checklist audit read-only untuk koneksi TikTok LIVE, reconnect, event parsing, dan rate limiting. Maksimal 5 poin. Jangan mengasumsikan isi repository."],
+      ["qa", "QA & SECURITY", "Buat checklist audit read-only untuk authentication, secret handling, regression, dan pengujian staging. Maksimal 5 poin. Jangan mengasumsikan isi repository."]
+    ];
+    for (const [id] of tasks) output(id, "Sedang berjalan…");
+    setStatus("Mengirim 3 permintaan secara paralel ke " + MODEL + "…");
+    const started = performance.now();
+    try {
+      const results = await Promise.allSettled(tasks.map(async ([id, role, prompt]) => {
+        const response = await puter.ai.chat(
+          "Kamu adalah agent " + role + " untuk proyek DummyDreams. " + prompt,
+          { model: MODEL }
+        );
+        const content = response?.message?.content ?? response?.text ?? response;
+        output(id, typeof content === "string" ? content : JSON.stringify(content, null, 2));
+        return id;
+      }));
+      const failed = results.filter(x => x.status === "rejected");
+      setStatus("Selesai dalam " + ((performance.now() - started) / 1000).toFixed(1) +
+        " detik. Berhasil: " + (results.length - failed.length) + "/3. Gagal: " + failed.length +
+        (failed.length ? "\n" + failed.map(x => String(x.reason?.message || x.reason)).join("\n") : ""));
+    } catch (error) {
+      setStatus("Tes gagal: " + (error?.message || String(error)));
+    } finally {
+      run.disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>
