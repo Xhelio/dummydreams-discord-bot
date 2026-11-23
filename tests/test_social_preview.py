@@ -133,6 +133,50 @@ def test_parse_live_page_metadata_never_marks_offline_or_unknown_room_live():
     ) is None
 
 
+def test_parse_live_room_payload_extracts_public_room_cover():
+    payload = {
+        "statusCode": 0,
+        "data": {
+            "user": {"uniqueId": "creator", "nickname": "Creator Name"},
+            "liveRoom": {
+                "status": 2,
+                "title": "Room API title",
+                "coverUrl": "https://p16-webcast.tiktokcdn.com/room-cover.jpeg",
+                "liveRoomStats": {"userCount": 987},
+            },
+        },
+    }
+    preview = social_preview._parse_live_room_payload(
+        payload, "https://www.tiktok.com/@creator/live"
+    )
+    assert preview is not None
+    assert preview.username == "creator"
+    assert preview.display_name == "Creator Name"
+    assert preview.title == "Room API title"
+    assert preview.viewer_count == 987
+    assert preview.thumbnail_url == "https://p16-webcast.tiktokcdn.com/room-cover.jpeg"
+
+
+def test_parse_live_room_payload_rejects_offline_and_untrusted_cover():
+    offline = {
+        "data": {
+            "user": {"uniqueId": "creator", "nickname": "Creator"},
+            "liveRoom": {"status": 4, "coverUrl": "https://p16-webcast.tiktokcdn.com/old.jpeg"},
+        }
+    }
+    untrusted = {
+        "data": {
+            "user": {"uniqueId": "creator", "nickname": "Creator"},
+            "liveRoom": {"status": 2, "coverUrl": "https://evil.example/avatar.jpeg"},
+        }
+    }
+    page = "https://www.tiktok.com/@creator/live"
+    assert social_preview._parse_live_room_payload(offline, page) is None
+    preview = social_preview._parse_live_room_payload(untrusted, page)
+    assert preview is not None
+    assert preview.thumbnail_url is None
+
+
 def test_live_embed_uses_room_cover_not_profile_avatar():
     preview = social_preview.TikTokLivePreview(
         url="https://www.tiktok.com/@creator/live",
