@@ -580,3 +580,25 @@ def test_touch_live_session_explicit_timestamp_bypasses_throttle(
     db.touch_live_session(1, when="2026-11-23 10:02:00")
 
     assert calls == ["live_session_touch", "live_session_touch"]
+
+
+
+def test_touch_live_session_allows_retry_after_write_failure(monkeypatch):
+    now = [1000.0]
+    calls = []
+
+    def flaky_write_transaction(operation, timing_label=None):
+        calls.append(timing_label)
+        if len(calls) == 1:
+            raise RuntimeError("temporary database failure")
+
+    monkeypatch.setattr(db, "write_transaction", flaky_write_transaction)
+    monkeypatch.setattr(db.time, "time", lambda: now[0])
+    monkeypatch.setattr(db, "_TOUCH_LIVE_CACHE", {})
+    monkeypatch.setattr(db, "_TOUCH_LIVE_MIN_INTERVAL", 90.0)
+
+    db.touch_live_session(42)
+    db.touch_live_session(42)
+
+    assert calls == ["live_session_touch", "live_session_touch"]
+    assert db._TOUCH_LIVE_CACHE[42] == now[0]
