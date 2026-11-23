@@ -2979,12 +2979,16 @@ def _activity_log_writer_loop():
             _ACTIVITY_LOG_QUEUE.task_done()
             return
         batch, shutdown = _collect_activity_log_batch(item)
+        pending_count = _ACTIVITY_LOG_QUEUE.qsize()
+        timing_label = (
+            f"activity_log_batch_rows_{len(batch)}_pending_{pending_count}"
+        )
 
         def _write_batch(conn, rows=batch):
             _insert_activity_log_batch(conn, rows)
 
         try:
-            write_transaction(_write_batch, timing_label="activity_log_batch")
+            write_transaction(_write_batch, timing_label=timing_label)
             with _ACTIVITY_LOG_PRUNE_LOCK:
                 _ACTIVITY_LOG_PRUNE_COUNTER += len(batch)
                 should_prune = _ACTIVITY_LOG_PRUNE_COUNTER >= 250
