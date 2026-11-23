@@ -183,12 +183,61 @@ textarea { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px soli
 .info-i:hover, .info-i:focus { border-color: #38bdf8; color: #7dd3fc; }
 .info-i::after { content: attr(data-tip); position: absolute; left: 50%; bottom: calc(100% + 7px); transform: translateX(-50%) scale(0.98); background: #0f172a; border: 1px solid #334155; color: #cbd5e1; padding: 6px 9px; border-radius: 7px; font-size: 0.72rem; font-weight: 500; line-height: 1.35; width: max-content; max-width: 240px; white-space: normal; text-align: left; z-index: 60; opacity: 0; pointer-events: none; transition: opacity 0.12s ease; box-shadow: 0 8px 20px rgba(2,6,23,0.5); }
 .info-i:hover::after, .info-i:focus::after { opacity: 1; }
+/* Admin overview and safer destructive actions */
+.dashboard-links {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+.dashboard-link {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #0f172a;
+  color: var(--text);
+  text-decoration: none;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease;
+}
+.dashboard-link strong { color: #7dd3fc; font-size: 0.9rem; }
+.dashboard-link span { color: var(--muted); font-size: 0.78rem; line-height: 1.4; }
+.dashboard-link:hover { background: #17243a; border-color: #0ea5e9; transform: translateY(-1px); }
+.danger-zone {
+  border: 1px solid rgba(239,68,68,0.45);
+  border-radius: 10px;
+  padding: 14px;
+  background: rgba(127,29,29,0.10);
+}
+.danger-zone > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+  color: #fca5a5;
+  font-weight: 700;
+  list-style: none;
+}
+.danger-zone > summary::-webkit-details-marker { display: none; }
+.danger-zone > summary::after { content: '+'; font-size: 1.15rem; line-height: 1; }
+.danger-zone[open] > summary::after { content: '−'; }
+.danger-zone-hint { color: #94a3b8; font-size: 0.78rem; font-weight: 500; }
+.danger-zone-content { margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(239,68,68,0.25); }
+@media (max-width: 760px) {
+  .dashboard-links { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .dashboard-link { padding: 11px; }
+  .danger-zone > summary { align-items: flex-start; flex-direction: column; gap: 4px; }
+}
+
 """
 
 NAV_HTML = """
 <div class="nav-bar-container">
     <nav class="nav-links" aria-label="Admin navigation">
-        <a href="/admin/data" class="nav-btn" data-path="/admin/data">🏠 Main Menu</a>
+        <a href="/admin/data" class="nav-btn" data-path="/admin/data">🏠 Admin Overview</a>
         <a href="/admin/viewers" class="nav-btn" data-path="/admin/viewers">👥 Viewers & Coins</a>
         <a href="/admin/monitor" class="nav-btn" data-path="/admin/monitor">📹 Live Monitor</a>
         <a href="/admin/activity" class="nav-btn" data-path="/admin/activity">📊 Activity Log</a>
