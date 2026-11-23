@@ -38,3 +38,22 @@ def test_health_uses_cached_database_health_helper(
         "started_at",
         "admin_auth",
     }.issubset(response.get_json())
+
+@pytest.mark.parametrize("cached_value", [True, False])
+def test_database_health_helper_reuses_fresh_cached_result(
+    monkeypatch, cached_value
+):
+    import time
+
+    monkeypatch.setattr(
+        db,
+        "_DB_HEALTH_CACHE",
+        {"ok": cached_value, "at": time.time()},
+    )
+
+    def unexpected_connection():
+        raise AssertionError("a fresh health-cache entry must avoid a DB connection")
+
+    monkeypatch.setattr(db, "get_db_connection", unexpected_connection)
+
+    assert db.check_database_health() is cached_value
