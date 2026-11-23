@@ -10,6 +10,12 @@ class FakeConnection:
 
 
 def test_setting_batch_uses_one_upsert_and_keeps_latest_value(monkeypatch):
+    import queue
+
+    pending = queue.Queue()
+    for index in range(4):
+        pending.put((f"queued_{index}", str(index)))
+    monkeypatch.setattr(db, "_SETTING_WRITE_QUEUE", pending)
     captured = []
 
     def capture_transaction(operation, timing_label=None):
@@ -24,7 +30,7 @@ def test_setting_batch_uses_one_upsert_and_keeps_latest_value(monkeypatch):
     assert count == 2
     assert len(captured) == 1
     operation, timing_label = captured[0]
-    assert timing_label == "setting_write_batch"
+    assert timing_label == "setting_write_batch_rows_2_pending_4"
 
     connection = FakeConnection()
     operation(connection)
