@@ -34,7 +34,7 @@ def test_test_preflight_allows_local_sqlite_fallback():
     result = _run_preflight("test")
 
     assert result.returncode == 0
-    assert "using local SQLite instead of Turso" in result.stdout
+    assert "TURSO_DATABASE_URL not set -> local SQLite fallback" in result.stdout
 
 
 def test_render_services_run_preflight_before_starting_bot():
