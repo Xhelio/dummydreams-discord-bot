@@ -3847,7 +3847,7 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
 
         def _execute_pending_writes():
             started_at = time.perf_counter()
-            results = _execute_pending_writes()
+            results = _execute_atomic_batch(conn, pending_writes)
             _log_session_stage("write_batch", started_at)
             return results
 
@@ -4012,7 +4012,7 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                 (user_clean, now_str, current_host, now_str),
             )
         )
-        results = _execute_atomic_batch(conn, pending_writes)
+        results = _execute_pending_writes()
         return results[-1].lastrowid
 
     return write_transaction(_start, timing_label="live_session_start")
