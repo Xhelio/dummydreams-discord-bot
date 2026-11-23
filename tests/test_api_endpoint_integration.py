@@ -230,3 +230,59 @@ def test_euler_webhook_processes_signed_offline_event(monkeypatch):
     assert payload["results"][0]["is_live"] is False
     assert ended == [42]
     assert cleared == ["creator"]
+
+
+
+def test_heartbeat_and_announcement_reject_malformed_json(monkeypatch):
+    monkeypatch.setenv("API_SECRET_KEY", "integration-secret")
+    client = _client()
+
+    for endpoint in ("/api/heartbeat", "/api/announcement"):
+        response = client.post(
+            endpoint,
+            data=b"{",
+            content_type="application/json",
+            headers=_api_headers(),
+        )
+        assert response.status_code == 400
+        assert response.get_json()["message"] == "JSON object payload required"
+
+
+def test_config_endpoint_hides_internal_read_errors(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("API_SECRET_KEY", "integration-secret")
+    monkeypatch.chdir(tmp_path)
+
+    response = _client().get("/api/config", headers=_api_headers())
+
+    assert response.status_code == 500
+    assert response.get_json() == {
+        "status": "error",
+        "message": "Unable to read configuration",
+    }
+    assert str(tmp_path) not in response.get_data(as_text=True)
+    assert "Failed to read API configuration" in caplog.text
+
+
+def test_euler_webhook_rejects_oversized_event_batch(monkeypatch):
+    secret = "webhook-secret"
+    raw_body = json.dumps([{"event": "unrecognized"}] * (
+        api.MAX_EULER_WEBHOOK_BATCH_SIZE + 1
+    )).encode("utf-8")
+    signature = hmac.new(
+        secret.encode("utf-8"), raw_body, hashlib.sha256
+    ).hexdigest()
+    monkeypatch.setenv("EULER_WEBHOOK_SECRET", secret)
+
+    response = _client().post(
+        "/api/euler-webhook",
+        data=raw_body,
+        content_type="application/json",
+        headers={"X-Webhook-Signature": signature},
+    )
+
+    assert response.status_code == 413
+    assert response.get_json() == {
+        "ok": False,
+        "error": "Webhook batch exceeds maximum event count",
+        "max_events": api.MAX_EULER_WEBHOOK_BATCH_SIZE,
+    }
