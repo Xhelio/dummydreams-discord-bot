@@ -19,9 +19,37 @@ except ImportError:
 TURSO_URL = os.environ.get("TURSO_DATABASE_URL")
 TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
 
+
+def _requires_remote_database() -> bool:
+    """Return whether this process must use the configured remote database."""
+    environment = (
+        os.environ.get("BOT_ENV") or os.environ.get("APP_ENV") or ""
+    ).strip().lower()
+    return environment in {"stable", "prod", "production", "live"}
+
+
 def get_db_connection():
+    # Stable deployments must never silently write to an ephemeral local file.
+    # Keep SQLite fallback available for local development and isolated tests.
+    if _requires_remote_database():
+        missing = []
+        if not HAS_LIBSQL:
+            missing.append("turso_serverless driver")
+        if not TURSO_URL:
+            missing.append("TURSO_DATABASE_URL")
+        if not TURSO_TOKEN:
+            missing.append("TURSO_AUTH_TOKEN")
+        if missing:
+            raise RuntimeError(
+                "Production database configuration is incomplete: "
+                + ", ".join(missing)
+            )
+
     if HAS_LIBSQL and TURSO_URL:
+        if _requires_remote_database() and not TURSO_TOKEN:
+            raise RuntimeError("TURSO_AUTH_TOKEN is required in stable deployments")
         return libsql.connect(TURSO_URL, auth_token=TURSO_TOKEN)
+
     import sqlite3
     db_file = os.environ.get("LOCAL_DB_PATH", "database.db")
     return sqlite3.connect(db_file)
