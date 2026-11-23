@@ -3837,12 +3837,28 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
         cur = conn.cursor()
         pending_writes = []
 
+        def _log_session_stage(stage: str, started_at: float) -> None:
+            elapsed = time.perf_counter() - started_at
+            if elapsed >= 0.1:
+                print(
+                    f"[DB Timing] operation=live_session_start "
+                    f"stage={stage} elapsed={elapsed:.3f}s"
+                )
+
+        def _execute_pending_writes():
+            started_at = time.perf_counter()
+            results = _execute_pending_writes()
+            _log_session_stage("write_batch", started_at)
+            return results
+
         # 1) Resume a session suspended during bot restart/deploy.
         resume_key = f"resume_session_{user_clean}"
         resume_last_key = f"resume_last_seen_{user_clean}"
+        read_started_at = time.perf_counter()
         resume_settings, resume_session_row, active_rows = _load_live_session_start_state(
             conn, cur, user_clean, resume_key, resume_last_key
         )
+        _log_session_stage("state_read_batch", read_started_at)
         resume_value = resume_settings.get(resume_key)
         resume_last_value = resume_settings.get(resume_last_key)
         if resume_value and str(resume_value).strip():
@@ -3909,11 +3925,13 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
             )
 
         if active_rows is None:
+            active_read_started_at = time.perf_counter()
             active_rows = cur.execute("""
                 SELECT session_id, last_seen_at FROM live_sessions
                 WHERE tiktok_username = ? AND end_time IS NULL
                 ORDER BY session_id DESC
             """, (user_clean,)).fetchall()
+            _log_session_stage("active_session_fallback_read", active_read_started_at)
 
         if active_rows:
             active_id, last_seen_value = active_rows[0]
