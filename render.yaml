@@ -15,6 +15,9 @@
 #   allows only ~750 instance-hours/month per workspace, i.e. one always-on
 #   service. Use a paid always-on plan for stable.
 # - Python version comes from `.python-version` (3.11.9).
+# - Both services run the read-only preflight before starting the bot. A bad
+#   production database configuration therefore stops startup instead of
+#   allowing a misleading healthy process.
 # - `PORT` is injected by Render automatically; do not set it here.
 
 services:
@@ -27,7 +30,7 @@ services:
     branch: main
     autoDeploy: true
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-    startCommand: python main.py
+    startCommand: python scripts/preflight.py && python main.py
     healthCheckPath: /health
     envVars:
       - key: BOT_ENV
@@ -68,7 +71,7 @@ services:
     branch: test
     autoDeploy: true
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-    startCommand: python main.py
+    startCommand: python scripts/preflight.py && python main.py
     healthCheckPath: /health
     envVars:
       - key: BOT_ENV
