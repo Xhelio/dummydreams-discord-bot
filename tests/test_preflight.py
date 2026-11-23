@@ -11,7 +11,6 @@ def _run_preflight(bot_env):
     env = {
         "BOT_ENV": bot_env,
         "DISCORD_TOKEN": "test-token",
-        "PYTHONPATH": str(REPO_ROOT),
     }
     return subprocess.run(
         [sys.executable, str(PREFLIGHT)],
@@ -35,6 +34,30 @@ def test_test_preflight_allows_local_sqlite_fallback():
 
     assert result.returncode == 0
     assert "TURSO_DATABASE_URL not set -> local SQLite fallback" in result.stdout
+
+
+
+def test_turso_preflight_can_import_project_db_module_without_pythonpath():
+    env = {
+        "BOT_ENV": "test",
+        "DISCORD_TOKEN": "test-token",
+        "TURSO_DATABASE_URL": "libsql://invalid.example",
+        "TURSO_AUTH_TOKEN": "test-token",
+    }
+    result = subprocess.run(
+        [sys.executable, str(PREFLIGHT)],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    # The invalid endpoint may fail connectivity, but module discovery must
+    # succeed before the connection attempt is made.
+    assert "turso_serverless importable" in result.stdout
+    assert "No module named 'db'" not in result.stdout
+    assert "database connection failed:" in result.stdout
 
 
 def test_render_services_run_preflight_before_starting_bot():
