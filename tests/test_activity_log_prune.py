@@ -2,6 +2,8 @@ import sqlite3
 
 import db
 
+# Keep pruning atomic while limiting the remote SQL round-trips.
+
 
 class _RecordingConnection:
     def __init__(self, path):
