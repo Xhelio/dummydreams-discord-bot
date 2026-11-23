@@ -766,6 +766,15 @@ def _record_gift_event_db(session_id, username_clean, user, display_name, gift_n
     }
 
 
+def _has_fresh_host_detection(current_host: str, detected_this_connection: bool) -> bool:
+    """Whether a LiveIntro on this connection must outrank stored session state."""
+    return bool(
+        detected_this_connection
+        and current_host
+        and current_host not in ("Host", "-")
+    )
+
+
 async def start_single_observer(tiktok_username: str, announcement_callback, role_callback, comment_callback=None):
     username_clean = tiktok_username.lower().lstrip("@")
     # Notifications from this observer task should always name the host.
@@ -1325,7 +1334,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     current_host = "Host"
                     _LAST_INTRO_ANALYZED.pop(username_clean, None)
                     _LAST_INTRO_TEXT.pop(username_clean, None)
-                elif host_detected_this_connection:
+                elif _has_fresh_host_detection(current_host, host_detected_this_connection):
                     # LiveIntro may beat ConnectEvent during startup/reconnect.
                     # Its fresh result is authoritative; never restore an older host.
                     print(f"[{username_clean}] Preserving host detected by LiveIntro before ConnectEvent: {current_host}.")
