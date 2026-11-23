@@ -19,6 +19,10 @@ class AgentSelectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown agent"):
             select_roles(["not-a-role"])
 
+    def test_empty_selection_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "at least one"):
+            select_roles([])
+
     def test_duplicate_role_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "unique"):
             select_roles(["qa", "qa"])
