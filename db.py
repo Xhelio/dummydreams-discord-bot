@@ -2104,6 +2104,8 @@ def _ensure_analytics_indexes(conn):
          "ON gift_logs(substr(log_date, 1, 10))"),
         ("live_sessions", "CREATE INDEX IF NOT EXISTS idx_live_sessions_analytics_date "
          "ON live_sessions(substr(start_time, 1, 10))"),
+        ("live_sessions", "CREATE INDEX IF NOT EXISTS idx_live_sessions_open_account "
+         "ON live_sessions(tiktok_username, session_id DESC) WHERE end_time IS NULL"),
     )
     for label, statement in statements:
         index_started = time.perf_counter()
