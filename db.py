@@ -3017,7 +3017,8 @@ def prune_activity_logs(max_operational: int = 4000, max_technical: int = 6000):
     def _op(conn):
         # One DELETE keeps the same per-category retention policy while
         # avoiding a second sequential Turso HTTP round-trip under the write lock.
-        conn.execute(
+        _execute_atomic_statement(
+            conn,
             """
             DELETE FROM activity_logs
             WHERE (
