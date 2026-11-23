@@ -4,7 +4,7 @@ This project supports two fully separate deployments:
 
 | | **Stable** | **Test** |
 |---|---|---|
-| Git branch | `main` | `test` |
+| Git branch | `main` | `staging` |
 | Discord bot | Official bot application | Separate test bot application |
 | Token | `DISCORD_TOKEN` (stable) | `DISCORD_TOKEN` (test) |
 | Database | Production Turso DB | Separate test Turso DB |
@@ -107,7 +107,7 @@ What the blueprint creates:
 | Service | Branch | Plan | Health check |
 |---|---|---|---|
 | `dummydreams-stable` | `main` | starter | `/health` |
-| `dummydreams-test` | `test` | starter | `/health` |
+| `dummydreams-test` | `staging` | starter | `/health` |
 
 Render asks for the `sync: false` secrets at creation time. Fill the
 stable service with stable values and the test service with test values.
@@ -122,8 +122,9 @@ Important:
 - `libsql-experimental` may need build tools on some images. If the build
   fails, add `cmake`/`build-essential` to the build command or pin a
   version with a prebuilt wheel.
-- Auto-deploy is on: pushing to `test` updates only the test service,
-  pushing/merging to `main` updates only stable.
+- Auto-deploy is on: pushing to `staging` updates only the test service;
+  pushing/merging to `main` updates only stable. Keep staging isolated and
+  promote only a validated candidate to `main`.
 
 Health check:
 
@@ -190,7 +191,7 @@ For two Repls (stable + test), give each Repl its own:
 - `BOT_ENV` (`stable` / `test`).
 - Run command: `python main.py`.
 
-Keep the stable Repl on `main` and the test Repl on `test`; pull and
+Keep the stable Repl on `main` and the test Repl on `staging`; pull and
 restart the matching Repl after each push.
 
 ---
@@ -252,11 +253,11 @@ both share `database.db`.
 
 ## 7. Test deployment (test server)
 
-1. Checkout the test branch:
+1. Checkout the staging branch:
 
    ```bash
-   git checkout test
-   git pull origin test
+   git checkout staging
+   git pull origin staging
    ```
 
 2. Configure environment variables for the **test** bot, database and
@@ -277,10 +278,10 @@ testing cannot affect the stable deployment.
 
 ## 8. Development workflow
 
-1. Switch to the test branch:
+1. Switch to the staging branch:
 
    ```bash
-   git checkout test
+   git checkout staging
    ```
 
 2. Make and commit changes.
@@ -294,7 +295,7 @@ testing cannot affect the stable deployment.
 
    ```bash
    git checkout main
-   git merge --no-ff test
+   git merge --no-ff staging
    git push origin main
    ```
 
