@@ -42,7 +42,7 @@ jobs:
         run: >-
           pytest
           --cov=.
-          --cov-omit=tests/*,_test_features.py,artifacts/*
+          --cov-config=.coveragerc
           --cov-report=term-missing
           --cov-report=xml
           --cov-report=html
