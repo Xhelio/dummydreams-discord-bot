@@ -4,13 +4,22 @@ import discord
 import main
 
 
+class FakeUser:
+    id = 7
+    name = "viewer"
+    display_name = "Viewer"
+
+    def __str__(self):
+        return "viewer"
+
+
 def test_bind_interaction_context_records_application_command(monkeypatch):
     bound = {}
     monkeypatch.setattr(main.log_setup, "bind_log_context", lambda **kwargs: bound.update(kwargs))
     interaction = SimpleNamespace(
         data={"name": "status"},
         type=discord.InteractionType.application_command,
-        user=SimpleNamespace(id=7, name="viewer", display_name="Viewer", __str__=lambda self: "viewer"),
+        user=FakeUser(),
         guild=SimpleNamespace(name="Community"),
         channel=SimpleNamespace(name="general", id=10, guild=object()),
     )
@@ -18,7 +27,7 @@ def test_bind_interaction_context_records_application_command(monkeypatch):
     main._bind_interaction_context(interaction)
 
     assert bound == {
-        "actor": "namespace(id=7, name='viewer', display_name='Viewer', __str__=<function test_bind_interaction_context_records_application_command.<locals>.<lambda> at 0x...>)",
+        "actor": "viewer (Viewer)",
         "user_id": 7,
         "guild": "Community",
         "channel": "#general",
@@ -47,7 +56,7 @@ def test_bind_interaction_context_records_component_and_dm(monkeypatch):
     main._bind_interaction_context(interaction)
 
     assert bound == {
-        "actor": "member",
+        "actor": "member (Member)",
         "user_id": 8,
         "guild": "DM",
         "channel": "DM",
