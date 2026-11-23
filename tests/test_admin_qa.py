@@ -5,14 +5,17 @@ import server
 import routes.qa as qa
 
 
-def _auth_headers():
-    credentials = base64.b64encode(b"qa-admin:qa-password").decode("ascii")
+def _auth_headers(username="qa-admin", password="qa-password"):
+    credentials = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
     return {"Authorization": f"Basic {credentials}"}
 
 
 def _client(monkeypatch):
-    monkeypatch.setattr(server, "ADMIN_USERNAME", "qa-admin")
-    monkeypatch.setattr(server, "ADMIN_PASSWORD", "qa-password")
+    # QA credentials are deliberately independent from the shared admin account.
+    monkeypatch.delenv("ADMIN_USERNAME", raising=False)
+    monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
+    monkeypatch.setenv("STAGING_QA_USERNAME", "qa-admin")
+    monkeypatch.setenv("STAGING_QA_PASSWORD", "qa-password")
     monkeypatch.setenv("BOT_ENV", "test")
     monkeypatch.setenv("STAGING_QA_DASHBOARD_ENABLED", "1")
     server.app.config.update(TESTING=True, SECRET_KEY="qa-dashboard-test-secret")
@@ -37,15 +40,30 @@ def test_dashboard_is_disabled_until_explicit_feature_flag(monkeypatch):
     assert response.status_code == 404
 
 
-def test_dashboard_requires_existing_admin_auth(monkeypatch):
+def test_dashboard_fails_closed_when_dedicated_credentials_are_missing(monkeypatch):
     client = _client(monkeypatch)
+    monkeypatch.delenv("STAGING_QA_USERNAME")
+    monkeypatch.delenv("STAGING_QA_PASSWORD")
 
-    response = client.get("/admin/qa")
+    response = client.get("/admin/qa", headers=_auth_headers())
+
+    assert response.status_code == 503
+
+
+def test_dashboard_requires_dedicated_qa_auth_even_if_admin_credentials_are_present(monkeypatch):
+    client = _client(monkeypatch)
+    monkeypatch.setattr(server, "ADMIN_USERNAME", "production-admin")
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", "production-password")
+
+    response = client.get(
+        "/admin/qa",
+        headers=_auth_headers("production-admin", "production-password"),
+    )
 
     assert response.status_code == 401
 
 
-def test_dashboard_renders_only_when_staging_flag_and_admin_auth_are_present(monkeypatch):
+def test_dashboard_renders_only_with_dedicated_qa_credentials(monkeypatch):
     client = _client(monkeypatch)
 
     response = client.get("/admin/qa", headers=_auth_headers())
