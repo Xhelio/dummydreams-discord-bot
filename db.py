@@ -2115,16 +2115,17 @@ def _execute_atomic_batch(conn, statements):
         for statement in statements
     ]
     if not normalized:
-        return
+        return []
     batch = getattr(conn, "batch", None)
     if callable(batch):
-        batch(normalized, mode="immediate")
-        return
+        return batch(normalized, mode="immediate")
+    results = []
     for sql, params in normalized:
         if params:
-            conn.execute(sql, params)
+            results.append(conn.execute(sql, params))
         else:
-            conn.execute(sql)
+            results.append(conn.execute(sql))
+    return results
 
 
 def _execute_schema_statements(conn, statements):
@@ -3776,8 +3777,9 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
 
     def _start(conn):
         cur = conn.cursor()
+        pending_writes = []
 
-        # 1) Coba lanjutkan sesi yang di-suspend saat bot restart/deploy.
+        # 1) Resume a session suspended during bot restart/deploy.
         resume_key = f"resume_session_{user_clean}"
         resume_last_key = f"resume_last_seen_{user_clean}"
         resume_settings, resume_session_row, active_rows = _load_live_session_start_state(
@@ -3813,28 +3815,39 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                     resume_host = str(current_host or "").strip()
                     if resume_host in ("Host", "-"):
                         resume_host = None
-                    cur.execute("""
-                        UPDATE live_sessions
-                        SET end_time = NULL,
-                            duration_seconds = 0,
-                            paused_seconds = COALESCE(paused_seconds, 0) + ?,
-                            scheduled_host = CASE WHEN ? IS NULL THEN scheduled_host ELSE ? END,
-                            last_seen_at = ?
-                        WHERE session_id = ?
-                    """, (gap, resume_host, resume_host, now_str, resume_id))
-                    cur.execute(
-                        "DELETE FROM bot_settings WHERE key IN (?, ?)",
-                        (resume_key, resume_last_key),
+                    pending_writes.extend(
+                        [
+                            (
+                                """
+                                UPDATE live_sessions
+                                SET end_time = NULL,
+                                    duration_seconds = 0,
+                                    paused_seconds = COALESCE(paused_seconds, 0) + ?,
+                                    scheduled_host = CASE WHEN ? IS NULL THEN scheduled_host ELSE ? END,
+                                    last_seen_at = ?
+                                WHERE session_id = ?
+                                """,
+                                (gap, resume_host, resume_host, now_str, resume_id),
+                            ),
+                            (
+                                "DELETE FROM bot_settings WHERE key IN (?, ?)",
+                                (resume_key, resume_last_key),
+                            ),
+                        ]
                     )
+                    _execute_atomic_batch(conn, pending_writes)
                     print(
                         f"[LiveSession] Resumed session {resume_id} for @{user_clean} "
                         f"after {gap}s restart gap (paused time excluded)."
                     )
                     return resume_id
-            # Resume window expired / data tidak valid: jangan buka sesi lama.
-            cur.execute(
-                "DELETE FROM bot_settings WHERE key IN (?, ?)",
-                (resume_key, resume_last_key),
+            # Expired/invalid resume metadata is removed in the same transaction
+            # as whichever active-session update or new-session insert follows.
+            pending_writes.append(
+                (
+                    "DELETE FROM bot_settings WHERE key IN (?, ?)",
+                    (resume_key, resume_last_key),
+                )
             )
 
         if active_rows is None:
@@ -3846,10 +3859,8 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
 
         if active_rows:
             active_id, last_seen_value = active_rows[0]
-            # A session left open by a missed disconnect (e.g. websocket error
-            # instead of DisconnectEvent) must not be resumed hours later: that
-            # inflates live duration. If heartbeats stopped long ago, close it at
-            # its last confirmation time and start a fresh session below.
+            # A session left open by a missed disconnect must not be resumed
+            # hours later: close it at its last confirmed heartbeat.
             stale_end = None
             try:
                 last_seen = str(last_seen_value or "")[:19]
@@ -3860,15 +3871,20 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
             except Exception:
                 stale_end = None
             if stale_end:
-                cur.execute("""
-                    UPDATE live_sessions
-                    SET end_time = ?, duration_seconds = CASE
-                        WHEN start_time IS NULL THEN 0
-                        ELSE MAX(0, CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0))
-                    END,
-                    last_seen_at = ?
-                    WHERE session_id = ? AND end_time IS NULL
-                """, (stale_end, stale_end, stale_end, active_id))
+                pending_writes.append(
+                    (
+                        """
+                        UPDATE live_sessions
+                        SET end_time = ?, duration_seconds = CASE
+                            WHEN start_time IS NULL THEN 0
+                            ELSE MAX(0, CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0))
+                        END,
+                        last_seen_at = ?
+                        WHERE session_id = ? AND end_time IS NULL
+                        """,
+                        (stale_end, stale_end, stale_end, active_id),
+                    )
+                )
                 print(
                     f"[LiveSession] Closed stale open session {active_id} for @{user_clean} "
                     f"at last heartbeat {stale_end} (no activity > {LIVE_SESSION_STALE_SECONDS // 60}m)."
@@ -3877,37 +3893,54 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
             # Only one live session may be open per account. Close stale
             # duplicates left behind by crashes/older versions.
             for stale_id, _last_seen in active_rows[1:]:
-                cur.execute("""
-                    UPDATE live_sessions
-                    SET end_time = ?, duration_seconds = CASE
-                        WHEN start_time IS NULL THEN 0
-                        ELSE CASE
-                            WHEN CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0) < 0 THEN 0
-                            ELSE CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0)
-                        END
-                    END,
-                    last_seen_at = COALESCE(last_seen_at, ?)
-                    WHERE session_id = ?
-                """, (now_str, now_str, now_str, now_str, stale_id))
+                pending_writes.append(
+                    (
+                        """
+                        UPDATE live_sessions
+                        SET end_time = ?, duration_seconds = CASE
+                            WHEN start_time IS NULL THEN 0
+                            ELSE CASE
+                                WHEN CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0) < 0 THEN 0
+                                ELSE CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0)
+                            END
+                        END,
+                        last_seen_at = COALESCE(last_seen_at, ?)
+                        WHERE session_id = ?
+                        """,
+                        (now_str, now_str, now_str, now_str, stale_id),
+                    )
+                )
             if active_rows:
                 active_id = active_rows[0][0]
-                cur.execute(
-                    "UPDATE live_sessions SET last_seen_at = ? WHERE session_id = ?",
-                    (now_str, active_id),
+                pending_writes.append(
+                    (
+                        """
+                        UPDATE live_sessions
+                        SET last_seen_at = ?,
+                            scheduled_host = CASE WHEN ? THEN ? ELSE scheduled_host END
+                        WHERE session_id = ?
+                        """,
+                        (now_str, bool(explicit_host), current_host, active_id),
+                    )
                 )
-                if explicit_host:
-                    cur.execute("UPDATE live_sessions SET scheduled_host = ? WHERE session_id = ?", (current_host, active_id))
+                _execute_atomic_batch(conn, pending_writes)
                 return active_id
 
-        # A live that has already ended must NOT be reopened: a new connect
-        # after the disconnect/offline grace period always starts a new session
-        # (with the host detected for that new live).
-        cur.execute("""
-            INSERT INTO live_sessions (tiktok_username, start_time, scheduled_host, last_seen_at) 
-            VALUES (?, ?, ?, ?)
-        """, (user_clean, now_str, current_host, now_str))
-        return cur.lastrowid
+        # A connect after the prior live ended always creates a fresh session.
+        pending_writes.append(
+            (
+                """
+                INSERT INTO live_sessions (tiktok_username, start_time, scheduled_host, last_seen_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (user_clean, now_str, current_host, now_str),
+            )
+        )
+        results = _execute_atomic_batch(conn, pending_writes)
+        return results[-1].lastrowid
+
     return write_transaction(_start, timing_label="live_session_start")
+
 def end_live_session(session_id: int, end_time: str = None):
     """Close a live session. ``end_time`` lets callers record the actual
     disconnect moment instead of the moment the grace timer fired."""
