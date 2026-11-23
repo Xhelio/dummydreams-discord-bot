@@ -3699,6 +3699,55 @@ def get_open_live_session_id(tiktok_username: str):
         conn.close()
 
 
+def _load_live_session_start_state(conn, cur, user_clean: str, resume_key: str, resume_last_key: str):
+    """Read resume metadata and active sessions with one Turso HTTP batch."""
+    batch = getattr(conn, "batch", None)
+    if callable(batch):
+        results = batch(
+            [
+                (
+                    "SELECT key, value FROM bot_settings WHERE key IN (?, ?)",
+                    (resume_key, resume_last_key),
+                ),
+                (
+                    """
+                    SELECT tiktok_username, end_time
+                    FROM live_sessions
+                    WHERE session_id = CAST(
+                        (SELECT value FROM bot_settings WHERE key = ?) AS INTEGER
+                    )
+                    LIMIT 1
+                    """,
+                    (resume_key,),
+                ),
+                (
+                    """
+                    SELECT session_id, last_seen_at FROM live_sessions
+                    WHERE tiktok_username = ? AND end_time IS NULL
+                    ORDER BY session_id DESC
+                    """,
+                    (user_clean,),
+                ),
+            ]
+        )
+        resume_settings = {
+            str(key): value for key, value in results[0].rows
+        }
+        resume_session_row = results[1].rows[0] if results[1].rows else None
+        active_rows = results[2].rows
+        return resume_settings, resume_session_row, active_rows
+
+    # SQLite and older DB-API fallback: retain the established query path.
+    resume_settings = {
+        str(key): value
+        for key, value in cur.execute(
+            "SELECT key, value FROM bot_settings WHERE key IN (?, ?)",
+            (resume_key, resume_last_key),
+        ).fetchall()
+    }
+    return resume_settings, None, None
+
+
 def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
     wib = pytz.timezone('Asia/Jakarta')
     now_dt = datetime.now(wib)
@@ -3713,13 +3762,9 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
         # 1) Coba lanjutkan sesi yang di-suspend saat bot restart/deploy.
         resume_key = f"resume_session_{user_clean}"
         resume_last_key = f"resume_last_seen_{user_clean}"
-        resume_settings = {
-            str(key): value
-            for key, value in cur.execute(
-                "SELECT key, value FROM bot_settings WHERE key IN (?, ?)",
-                (resume_key, resume_last_key),
-            ).fetchall()
-        }
+        resume_settings, resume_session_row, active_rows = _load_live_session_start_state(
+            conn, cur, user_clean, resume_key, resume_last_key
+        )
         resume_value = resume_settings.get(resume_key)
         resume_last_value = resume_settings.get(resume_last_key)
         if resume_value and str(resume_value).strip():
@@ -3740,10 +3785,12 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
             if resume_last_dt is not None:
                 gap = max(0, int((now_dt - resume_last_dt).total_seconds()))
             if resume_id and resume_last_dt is not None and gap <= LIVE_RESUME_GRACE_SECONDS:
-                old = cur.execute(
-                    "SELECT tiktok_username, end_time FROM live_sessions WHERE session_id = ?",
-                    (resume_id,),
-                ).fetchone()
+                old = resume_session_row
+                if resume_session_row is None and not callable(getattr(conn, "batch", None)):
+                    old = cur.execute(
+                        "SELECT tiktok_username, end_time FROM live_sessions WHERE session_id = ?",
+                        (resume_id,),
+                    ).fetchone()
                 if old and str(old[0] or "").lower() == user_clean and old[1]:
                     resume_host = str(current_host or "").strip()
                     if resume_host in ("Host", "-"):
@@ -3772,11 +3819,12 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                 (resume_key, resume_last_key),
             )
 
-        active_rows = cur.execute("""
-            SELECT session_id, last_seen_at FROM live_sessions 
-            WHERE tiktok_username = ? AND end_time IS NULL
-            ORDER BY session_id DESC
-        """, (user_clean,)).fetchall()
+        if active_rows is None:
+            active_rows = cur.execute("""
+                SELECT session_id, last_seen_at FROM live_sessions
+                WHERE tiktok_username = ? AND end_time IS NULL
+                ORDER BY session_id DESC
+            """, (user_clean,)).fetchall()
 
         if active_rows:
             active_id, last_seen_value = active_rows[0]
