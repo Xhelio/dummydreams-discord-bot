@@ -539,6 +539,37 @@ def clear_active_live_status(username: str):
 # Priority: SIGN_API_KEY / TIKTOK_SIGN_API_KEY env var, then DB setting "sign_api_key".
 _SIGN_KEY_LOGGED = {"value": None}
 
+# A single process-wide pacing gate prevents multiple account observers from
+# requesting signed WebSocket URLs at once. This is intentionally independent
+# of per-account backoff: a healthy account must not inherit another account's
+# cooldown, but all sign requests share the provider's global request budget.
+_SIGNER_START_LOCK = asyncio.Lock()
+_SIGNER_LAST_START_MONOTONIC = 0.0
+_SIGNER_DEFAULT_START_INTERVAL_SECONDS = 15.0
+
+
+def _signer_start_interval_seconds() -> float:
+    """Return a conservative global spacing between signer/start requests."""
+    raw = os.environ.get("TIKTOK_SIGN_START_INTERVAL_SECONDS", "")
+    try:
+        interval = float(raw) if raw.strip() else _SIGNER_DEFAULT_START_INTERVAL_SECONDS
+    except (TypeError, ValueError):
+        interval = _SIGNER_DEFAULT_START_INTERVAL_SECONDS
+    return max(0.0, min(interval, 300.0))
+
+
+async def _start_client_with_signer_pacing(client, **kwargs):
+    """Serialize TikTokLive start calls and pace them across all accounts."""
+    global _SIGNER_LAST_START_MONOTONIC
+    async with _SIGNER_START_LOCK:
+        interval = _signer_start_interval_seconds()
+        now = time.monotonic()
+        elapsed = now - _SIGNER_LAST_START_MONOTONIC
+        if _SIGNER_LAST_START_MONOTONIC and elapsed < interval:
+            await asyncio.sleep(interval - elapsed)
+        _SIGNER_LAST_START_MONOTONIC = time.monotonic()
+        return await client.start(**kwargs)
+
 
 def _apply_sign_api_key() -> bool:
     key = (os.environ.get("SIGN_API_KEY") or os.environ.get("TIKTOK_SIGN_API_KEY") or "").strip()
@@ -1618,12 +1649,12 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             # task immediately. Await the task so the observer does not create a
             # new client every cycle while old clients keep running.
             try:
-                client_task = await client.start(fetch_room_info=True)
+                client_task = await _start_client_with_signer_pacing(client, fetch_room_info=True)
             except Exception as room_info_error:
                 err_text = str(room_info_error).lower()
                 if "age" in err_text and "restrict" in err_text:
                     print(f"[{username_clean}] Room info unavailable (age-restricted); connecting without it.")
-                    client_task = await client.start(fetch_room_info=False)
+                    client_task = await _start_client_with_signer_pacing(client, fetch_room_info=False)
                 else:
                     raise
             await client_task
