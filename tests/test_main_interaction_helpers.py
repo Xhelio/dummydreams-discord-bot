@@ -1,7 +1,6 @@
+import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
-
-import pytest
 
 import main
 
@@ -62,8 +61,11 @@ def test_note_interaction_lag_ignores_invalid_timestamps(monkeypatch):
     assert warnings == []
 
 
-@pytest.mark.asyncio
-async def test_safe_defer_acknowledges_unanswered_interaction(monkeypatch):
+async def _record_defer(calls, kwargs):
+    calls.append(kwargs)
+
+
+def test_safe_defer_acknowledges_unanswered_interaction(monkeypatch):
     deferred = []
     monkeypatch.setattr(main, "_bind_interaction_context", lambda interaction: None)
     monkeypatch.setattr(main.log, "info", lambda *args: None)
@@ -77,18 +79,15 @@ async def test_safe_defer_acknowledges_unanswered_interaction(monkeypatch):
         data={"custom_id": "verify"},
     )
 
-    assert await main._safe_defer(
-        interaction, "verify", ephemeral=True, thinking=True
-    ) is True
+    result = asyncio.run(
+        main._safe_defer(interaction, "verify", ephemeral=True, thinking=True)
+    )
+
+    assert result is True
     assert deferred == [{"ephemeral": True, "thinking": True}]
 
 
-async def _record_defer(calls, kwargs):
-    calls.append(kwargs)
-
-
-@pytest.mark.asyncio
-async def test_safe_defer_accepts_interaction_already_acknowledged(monkeypatch):
+def test_safe_defer_accepts_interaction_already_acknowledged(monkeypatch):
     monkeypatch.setattr(main, "_bind_interaction_context", lambda interaction: None)
     monkeypatch.setattr(main.log, "info", lambda *args: None)
 
@@ -101,4 +100,4 @@ async def test_safe_defer_accepts_interaction_already_acknowledged(monkeypatch):
         data={},
     )
 
-    assert await main._safe_defer(interaction, "verify") is True
+    assert asyncio.run(main._safe_defer(interaction, "verify")) is True
