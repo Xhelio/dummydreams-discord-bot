@@ -13,6 +13,13 @@ Exit code 0 = ready, 1 = blocking problem.
 import os
 import sys
 
+# When executed as python scripts/preflight.py, Python puts scripts/ at
+# sys.path[0]. Add the repository root so application modules such as db.py
+# remain importable exactly as they are when main.py starts.
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 OK = "\033[92mOK\033[0m"
 WARN = "\033[93mWARN\033[0m"
 FAIL = "\033[91mFAIL\033[0m"

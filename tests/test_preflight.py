@@ -11,7 +11,6 @@ def _run_preflight(bot_env):
     env = {
         "BOT_ENV": bot_env,
         "DISCORD_TOKEN": "test-token",
-        "PYTHONPATH": str(REPO_ROOT),
     }
     return subprocess.run(
         [sys.executable, str(PREFLIGHT)],
@@ -35,6 +34,26 @@ def test_test_preflight_allows_local_sqlite_fallback():
 
     assert result.returncode == 0
     assert "TURSO_DATABASE_URL not set -> local SQLite fallback" in result.stdout
+
+
+
+def test_preflight_adds_repository_root_for_application_imports():
+    code = (
+        "import runpy, sys; "
+        "sys.path[0] = 'scripts'; "
+        "runpy.run_path('scripts/preflight.py'); "
+        "import db"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT,
+        env={"BOT_ENV": "test"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_render_services_run_preflight_before_starting_bot():
