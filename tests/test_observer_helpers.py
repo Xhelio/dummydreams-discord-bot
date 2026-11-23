@@ -126,3 +126,42 @@ def test_exception_chain_types_reports_causes_without_messages():
     except RuntimeError as error:
         assert observer._exception_chain_types(error) == "RuntimeError -> ValueError"
         assert "sensitive response body" not in observer._exception_chain_types(error)
+
+
+def test_transport_runtime_fingerprint_reports_versions_without_secrets(monkeypatch):
+    versions = {
+        "TikTokLive": "7.0.1",
+        "websockets": "12.0",
+        "websockets-proxy": "0.1.3",
+        "httpx": "0.28.1",
+        "httpcore": "1.0.7",
+        "python-socks": "2.7.1",
+    }
+
+    def fake_version(package):
+        if package not in versions:
+            raise observer.metadata.PackageNotFoundError(package)
+        return versions[package]
+
+    monkeypatch.setattr(observer.metadata, "version", fake_version)
+
+    fingerprint = observer._transport_runtime_fingerprint()
+
+    assert f"python={observer.sys.version.split()[0]}" in fingerprint
+    assert f"openssl={observer.ssl.OPENSSL_VERSION}" in fingerprint
+    for package, version in versions.items():
+        assert f"{package}={version}" in fingerprint
+    assert "token" not in fingerprint.lower()
+    assert "password" not in fingerprint.lower()
+
+
+def test_transport_runtime_fingerprint_handles_missing_distributions(monkeypatch):
+    def missing_version(package):
+        raise observer.metadata.PackageNotFoundError(package)
+
+    monkeypatch.setattr(observer.metadata, "version", missing_version)
+
+    fingerprint = observer._transport_runtime_fingerprint()
+
+    assert "TikTokLive=missing" in fingerprint
+    assert "websockets=missing" in fingerprint
