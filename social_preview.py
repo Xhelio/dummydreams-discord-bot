@@ -419,6 +419,12 @@ def _parse_live_room_payload(payload: object, page_url: str) -> TikTokLivePrevie
     )
 
 
+def _clear_live_preview_inflight(task: asyncio.Task, cache_key: str) -> None:
+    """Remove a completed shared request without deleting a newer replacement."""
+    if _LIVE_INFLIGHT.get(cache_key) is task:
+        _LIVE_INFLIGHT.pop(cache_key, None)
+
+
 async def fetch_tiktok_live_preview(url: str) -> TikTokLivePreview | None:
     """Fetch bounded public LIVE metadata, coalescing concurrent requests per account."""
     normalized = normalize_tiktok_url(url)
@@ -438,6 +444,9 @@ async def fetch_tiktok_live_preview(url: str) -> TikTokLivePreview | None:
     if task is None:
         task = asyncio.create_task(_fetch_tiktok_live_preview_uncached(normalized))
         _LIVE_INFLIGHT[normalized] = task
+        task.add_done_callback(
+            lambda completed: _clear_live_preview_inflight(completed, normalized)
+        )
     try:
         # A cancelled waiter must not cancel the shared request for other callers.
         return await asyncio.shield(task)
