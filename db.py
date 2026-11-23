@@ -250,7 +250,10 @@ def _execute_atomic_batch(conn, statements):
 
 def _execute_atomic_statement(conn, sql: str, params=()):
     """Execute one write as a single remote batch when the driver supports it."""
-    return _execute_atomic_batch(conn, [(sql, params)])[0]
+    batch = getattr(conn, "batch", None)
+    if callable(batch):
+        return batch([(sql, params)], mode="immediate")
+    return conn.execute(sql, params)
 
 
 def write_transaction(
