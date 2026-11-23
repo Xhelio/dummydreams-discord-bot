@@ -533,11 +533,39 @@ async def fetch_tiktok_live_preview(url: str) -> TikTokLivePreview | None:
         log.exception("Unexpected TikTok LIVE preview failure for @%s", username)
 
     if preview is None or not preview.thumbnail_url:
+        # Log only structural metadata; never log response bodies, URLs, or user data.
+        payload_shape = "unavailable"
+        if "payload" in locals():
+            if isinstance(payload, dict):
+                top_keys = sorted(str(key)[:32] for key in payload.keys())[:12]
+                data_value = payload.get("data")
+                data_keys = (
+                    sorted(str(key)[:32] for key in data_value.keys())[:12]
+                    if isinstance(data_value, dict)
+                    else []
+                )
+                room_value = None
+                if isinstance(data_value, dict):
+                    room_value = data_value.get("liveRoom")
+                    if not isinstance(room_value, dict):
+                        info = data_value.get("liveRoomUserInfo")
+                        room_value = info.get("liveRoom") if isinstance(info, dict) else None
+                room_status = (
+                    str(room_value.get("status"))[:16]
+                    if isinstance(room_value, dict) and room_value.get("status") is not None
+                    else "missing"
+                )
+                payload_shape = (
+                    f"top_keys={top_keys},data_keys={data_keys},room_status={room_status}"
+                )
+            else:
+                payload_shape = f"type={type(payload).__name__}"
         log.info(
-            "TikTok LIVE thumbnail unavailable for @%s (page=%s, room_api=%s)",
+            "TikTok LIVE thumbnail unavailable for @%s (page=%s, room_api=%s, api_shape=%s)",
             username,
             page_reason,
             api_reason,
+            payload_shape,
         )
 
     if len(_LIVE_CACHE) >= _CACHE_MAX_ITEMS:
