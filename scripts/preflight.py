@@ -71,6 +71,12 @@ def main() -> int:
 
         if driver_available and turso_token:
             try:
+                # Executing this file by path sets sys.path[0] to scripts/, not
+                # the repository root. Add the project root so the top-level
+                # db module used by main.py is importable on Render.
+                project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                if project_root not in sys.path:
+                    sys.path.insert(0, project_root)
                 import db
 
                 if not db.HAS_LIBSQL:
