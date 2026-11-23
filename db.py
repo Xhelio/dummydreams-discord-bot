@@ -185,6 +185,9 @@ def _schedule_setting_refresh(key: str):
 # SQLITE_BUSY ("stream was idle for too long"). Serialise writes in this process
 # and retry the transient failures with a fresh connection.
 _DB_WRITE_LOCK = threading.Lock()
+# Approximate number of writers currently queued for the process-wide lock.
+_DB_WRITE_WAITERS = 0
+_DB_WRITE_WAITERS_LOCK = threading.Lock()
 _DB_MODULE_DIAGNOSTIC_LOCK = threading.Lock()
 _DB_MODULE_DIAGNOSTICS_EMITTED = False
 
@@ -253,17 +256,19 @@ def write_transaction(
     all covered by the retry boundary. The optional timing label records slow
     lock/connection/operation/commit stages for selected hot paths.
     """
+    global _DB_WRITE_WAITERS
     try:
         attempts = max(1, int(attempts))
         base_delay = max(0.0, float(base_delay))
     except (TypeError, ValueError):
         raise ValueError("attempts and base_delay must be numeric")
 
-    def _log_stage(stage: str, elapsed: float, attempt: int) -> None:
+    def _log_stage(stage: str, elapsed: float, attempt: int, queue_depth=None) -> None:
         if timing_label and elapsed >= 0.1:
+            queue_field = f" queue_depth={queue_depth}" if queue_depth is not None else ""
             print(
                 f"[DB Timing] operation={timing_label} stage={stage} "
-                f"elapsed={elapsed:.3f}s attempt={attempt}"
+                f"elapsed={elapsed:.3f}s attempt={attempt}{queue_field}"
             )
 
     _log_duplicate_db_module_instances()
@@ -271,13 +276,21 @@ def write_transaction(
     for attempt in range(1, attempts + 1):
         attempt_started = time.perf_counter()
         lock_started = time.perf_counter()
-        acquired = _DB_WRITE_LOCK.acquire(timeout=30.0)
+        with _DB_WRITE_WAITERS_LOCK:
+            _DB_WRITE_WAITERS += 1
+            queue_depth = _DB_WRITE_WAITERS
+        try:
+            acquired = _DB_WRITE_LOCK.acquire(timeout=30.0)
+        finally:
+            with _DB_WRITE_WAITERS_LOCK:
+                _DB_WRITE_WAITERS = max(0, _DB_WRITE_WAITERS - 1)
         lock_wait = time.perf_counter() - lock_started
-        _log_stage("lock_wait", lock_wait, attempt)
+        _log_stage("lock_wait", lock_wait, attempt, queue_depth=queue_depth)
         if not acquired:
             raise TimeoutError(
                 "Database write lock busy for 30s; another write is stalled"
             )
+        lock_acquired_at = time.perf_counter()
         conn = None
         lock_released = False
 
@@ -286,6 +299,9 @@ def write_transaction(
             if not lock_released:
                 _DB_WRITE_LOCK.release()
                 lock_released = True
+                _log_stage(
+                    "lock_hold", time.perf_counter() - lock_acquired_at, attempt
+                )
 
         try:
             connect_started = time.perf_counter()
@@ -3011,7 +3027,7 @@ def prune_activity_logs(max_operational: int = 4000, max_technical: int = 6000):
             )
 
     try:
-        write_transaction(_op)
+        write_transaction(_op, timing_label="activity_log_prune")
     except Exception as e:
         _ACTIVITY_LOGGER.error("[ActivityLog] Prune failed: %s", e)
 
@@ -3881,7 +3897,7 @@ def end_live_session(session_id: int, end_time: str = None):
             SET end_time = ?, duration_seconds = ?, last_seen_at = COALESCE(last_seen_at, ?)
             WHERE session_id = ?
         """, (effective_end_str, duration_sec, effective_end_str, session_id))
-    return write_transaction(_end)
+    return write_transaction(_end, timing_label="live_session_end")
 def _get_table_column_info(cur, table: str) -> list:
     """Ambil detail kolom tabel: nama, tipe, NOT NULL, default, primary key."""
     try:
@@ -5286,7 +5302,7 @@ def create_pending_verification(discord_id, tiktok_user: str, method: str = 'bio
     # Turso can roll back an idle stream ("SQLITE_BUSY ... idle for too long")
     # during a CPU stall. Retry on a fresh connection instead of failing the
     # whole verification with a generic error.
-    write_transaction(_store)
+    write_transaction(_store, timing_label="verification_create")
     return code
 
 def get_pending_verification(discord_id) -> dict:
@@ -5401,7 +5417,7 @@ def cancel_pending_verification(discord_id):
     def _delete(conn):
         conn.execute("DELETE FROM pending_verifications WHERE discord_id = ?", (did,))
     try:
-        write_transaction(_delete)
+        write_transaction(_delete, timing_label="verification_cancel")
     except Exception as e:
         if is_transient_db_error(e):
             # Best-effort: a pending row will expire on its own.
