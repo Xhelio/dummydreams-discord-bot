@@ -64,6 +64,7 @@ from db import (
 from utils import get_schedule_info_async, load_summary_config
 from server import keep_alive
 from observer import run_all_observers, get_current_live_hosts, is_any_host_live, probe_room_live, probe_priority_targets_once, _log_gift_timing
+from timed_executor import call_with_timing
 from verification import async_verify_tiktok_bio
 from routes.settings import set_verification_refresh_handler, set_presence_refresh_handler
 import runtime_status
@@ -772,7 +773,15 @@ async def auto_assign_role(tiktok_user: str, total_coins: int):
         return
 
     stage_started = time.perf_counter()
-    discord_id = await asyncio.to_thread(get_discord_id_from_tiktok, tiktok_user)
+    (discord_id, worker_elapsed) = await asyncio.to_thread(
+        call_with_timing, get_discord_id_from_tiktok, tiktok_user
+    )
+    total_elapsed = time.perf_counter() - stage_started
+    _log_gift_timing(tiktok_user, "role.db_mapping_worker", worker_elapsed, context="viewer")
+    _log_gift_timing(
+        tiktok_user, "role.db_mapping_dispatch",
+        max(0.0, total_elapsed - worker_elapsed), context="viewer"
+    )
     _log_role_stage_timing(tiktok_user, "role.db_mapping", stage_started)
     if not discord_id:
         return
