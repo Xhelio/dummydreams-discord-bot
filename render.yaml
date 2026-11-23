@@ -68,7 +68,7 @@ services:
     runtime: python
     plan: starter
     region: singapore
-    branch: test
+    branch: staging
     autoDeploy: true
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: python scripts/preflight.py && python main.py
