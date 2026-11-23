@@ -70,6 +70,10 @@ from routes.settings import set_verification_refresh_handler, set_presence_refre
 import runtime_status
 import chatbot
 import log_setup
+from live_announcement_refresh import (
+    LIVE_ANNOUNCEMENT_REFRESH_INTERVAL_SECONDS,
+    get_live_announcement_refresh_targets,
+)
 
 DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN')
 ANNOUNCEMENT_CHANNEL_ID = int(os.environ.get('ANNOUNCEMENT_CHANNEL_ID', "0"))
@@ -1137,6 +1141,46 @@ async def reconcile_announcement_sessions(delay_seconds: int = 180):
                 print(f"[Discord] Reconcile skipped @{username}: live status unknown.")
     except Exception as e:
         print(f"[Discord] Announcement reconciliation failed: {e}")
+
+
+async def refresh_live_announcement_previews():
+    """Refresh active LIVE embeds without relying on another observer event."""
+    while True:
+        await asyncio.sleep(LIVE_ANNOUNCEMENT_REFRESH_INTERVAL_SECONDS)
+        try:
+            if not bot.is_ready() or not is_feature_enabled("announcements"):
+                continue
+
+            sessions = await asyncio.to_thread(get_all_active_live_announcements)
+            targets = get_live_announcement_refresh_targets(
+                sessions, get_current_live_hosts()
+            )
+            if not targets:
+                continue
+
+            async def refresh_one(username):
+                try:
+                    await process_live_announcement(username, True)
+                except Exception as exc:
+                    log.warning(
+                        "[Live Announcement Refresh] @%s failed: %s: %s",
+                        username,
+                        type(exc).__name__,
+                        exc,
+                    )
+
+            # The announcement lock serializes Discord edits; two concurrent
+            # metadata fetches keep multiple live accounts from delaying one another.
+            await asyncio.gather(*(refresh_one(username) for username in targets))
+            log.debug(
+                "[Live Announcement Refresh] checked %d active account(s).",
+                len(targets),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("[Live Announcement Refresh] background cycle failed.")
+
 
 # --- Leaderboard, tier reset, verification panel tasks ---
 
@@ -3076,6 +3120,7 @@ async def on_ready():
         except Exception as e:
             print(f"[Discord] Slash command sync failed: {e}")
         asyncio.create_task(reconcile_announcement_sessions())
+        asyncio.create_task(refresh_live_announcement_previews())
         asyncio.create_task(leaderboard_loop())
         asyncio.create_task(tier_reset_loop())
 
