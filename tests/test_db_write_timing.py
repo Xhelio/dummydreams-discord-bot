@@ -4,7 +4,12 @@ import db
 
 
 class _FakeLock:
-    def acquire(self, timeout=None):
+    def __init__(self, initially_busy=False):
+        self.initially_busy = initially_busy
+
+    def acquire(self, blocking=True, timeout=-1):
+        if not blocking:
+            return not self.initially_busy
         return True
 
     def release(self):
@@ -25,7 +30,7 @@ class _FakeConnection:
 def test_write_transaction_emits_slow_stage_timings(monkeypatch, capsys):
     ticks = iter(index * 0.6 for index in range(30))
     monkeypatch.setattr(db.time, "perf_counter", lambda: next(ticks))
-    monkeypatch.setattr(db, "_DB_WRITE_LOCK", _FakeLock())
+    monkeypatch.setattr(db, "_DB_WRITE_LOCK", _FakeLock(initially_busy=True))
     monkeypatch.setattr(db, "_DB_WRITE_WAITERS", 0)
     monkeypatch.setattr(db, "get_db_connection", lambda: _FakeConnection())
 
@@ -62,7 +67,7 @@ def test_db_init_stage_timing_reports_elapsed(monkeypatch, capsys):
 
 
 class _BusyLock:
-    def acquire(self, timeout=None):
+    def acquire(self, blocking=True, timeout=-1):
         return False
 
     def release(self):
