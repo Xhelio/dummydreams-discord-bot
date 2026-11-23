@@ -236,18 +236,6 @@ def is_transient_db_error(exc) -> bool:
     return any(token in text for token in _TRANSIENT_DB_TOKENS)
 
 
-def _execute_atomic_batch(conn, statements):
-    """Execute a related write set atomically in one Turso HTTP batch."""
-    statements = list(statements or [])
-    if not statements:
-        return []
-    batch = getattr(conn, "batch", None)
-    if callable(batch):
-        return batch(statements, mode="immediate")
-    cur = conn.cursor()
-    return [cur.execute(sql, params) for sql, params in statements]
-
-
 def _execute_atomic_statement(conn, sql: str, params=()):
     """Execute one write as a single remote batch when the driver supports it."""
     batch = getattr(conn, "batch", None)
@@ -2127,16 +2115,17 @@ def _execute_atomic_batch(conn, statements):
         for statement in statements
     ]
     if not normalized:
-        return
+        return []
     batch = getattr(conn, "batch", None)
     if callable(batch):
-        batch(normalized, mode="immediate")
-        return
+        return batch(normalized, mode="immediate")
+    results = []
     for sql, params in normalized:
         if params:
-            conn.execute(sql, params)
+            results.append(conn.execute(sql, params))
         else:
-            conn.execute(sql)
+            results.append(conn.execute(sql))
+    return results
 
 
 def _execute_schema_statements(conn, statements):
