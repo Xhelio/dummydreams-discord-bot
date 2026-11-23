@@ -1,3 +1,4 @@
+# Regression coverage: TLS handshakes must never observe a runtime debug-mode toggle.
 from event_loop_diagnostics import SlowCallbackDiagnostics
 
 
