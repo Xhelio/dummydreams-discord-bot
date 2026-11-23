@@ -139,12 +139,27 @@ class _BatchConnection:
 
     def batch(self, statements, mode=None):
         self.batch_calls.append((statements, mode))
-        results = []
-        for sql, parameters in statements:
-            cursor = self.connection.execute(sql, parameters)
-            rows = cursor.fetchall() if cursor.description else []
-            results.append(type("BatchResult", (), {"rows": rows})())
-        return results
+        if mode == "immediate":
+            self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            results = []
+            for sql, parameters in statements:
+                cursor = self.connection.execute(sql, parameters)
+                rows = cursor.fetchall() if cursor.description else []
+                results.append(
+                    type(
+                        "BatchResult",
+                        (),
+                        {"rows": rows, "lastrowid": cursor.lastrowid},
+                    )()
+                )
+            if mode == "immediate":
+                self.connection.commit()
+            return results
+        except Exception:
+            if mode == "immediate":
+                self.connection.rollback()
+            raise
 
     def cursor(self):
         return self.connection.cursor()
@@ -171,10 +186,13 @@ def test_start_live_session_batches_remote_state_reads(tmp_path, monkeypatch):
     session_id = db.start_live_session("sample_user")
 
     assert session_id == 1
-    assert len(connection.batch_calls) == 1
-    statements, mode = connection.batch_calls[0]
-    assert len(statements) == 3
-    assert mode is None
+    assert len(connection.batch_calls) == 2
+    read_statements, read_mode = connection.batch_calls[0]
+    write_statements, write_mode = connection.batch_calls[1]
+    assert len(read_statements) == 3
+    assert read_mode is None
+    assert len(write_statements) == 1
+    assert write_mode == "immediate"
 
     conn = sqlite3.connect(path)
     try:
@@ -219,8 +237,11 @@ def test_start_live_session_batches_resume_state_reads(tmp_path, monkeypatch):
     )
 
     assert db.start_live_session("sample_user") == 1
-    assert len(connection.batch_calls) == 1
+    assert len(connection.batch_calls) == 2
     assert len(connection.batch_calls[0][0]) == 3
+    assert connection.batch_calls[0][1] is None
+    assert len(connection.batch_calls[1][0]) == 2
+    assert connection.batch_calls[1][1] == "immediate"
 
     conn = sqlite3.connect(path)
     try:
@@ -237,3 +258,90 @@ def test_start_live_session_batches_resume_state_reads(tmp_path, monkeypatch):
     assert session[0] is None
     assert session[1] >= 120
     assert remaining_settings == 0
+
+
+def test_start_live_session_batches_existing_session_touch_and_host_update(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "batched-active-session.sqlite3"
+    _create_session_schema(path)
+    now = datetime.now(pytz.timezone("Asia/Jakarta"))
+    seen = (now - timedelta(seconds=20)).strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            "INSERT INTO live_sessions "
+            "(tiktok_username, start_time, scheduled_host, last_seen_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("sample_user", seen, "Old Host", seen),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    connection = _BatchConnection(path)
+    monkeypatch.setattr(db, "get_db_connection", lambda: connection)
+
+    assert db.start_live_session("sample_user", initial_host="New Host") == 1
+
+    assert len(connection.batch_calls) == 2
+    assert connection.batch_calls[1][1] == "immediate"
+    assert len(connection.batch_calls[1][0]) == 1
+
+    conn = sqlite3.connect(path)
+    try:
+        row = conn.execute(
+            "SELECT scheduled_host, last_seen_at FROM live_sessions WHERE session_id = 1"
+        ).fetchone()
+        count = conn.execute("SELECT COUNT(*) FROM live_sessions").fetchone()[0]
+    finally:
+        conn.close()
+    assert row[0] == "New Host"
+    assert row[1] >= seen
+    assert count == 1
+
+
+def test_start_live_session_batches_stale_close_and_new_insert(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "batched-stale-session.sqlite3"
+    _create_session_schema(path)
+    now = datetime.now(pytz.timezone("Asia/Jakarta"))
+    last_seen = now - timedelta(seconds=db.LIVE_SESSION_STALE_SECONDS + 60)
+    last_seen_str = last_seen.strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            "INSERT INTO live_sessions "
+            "(tiktok_username, start_time, last_seen_at) VALUES (?, ?, ?)",
+            ("sample_user", last_seen_str, last_seen_str),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    connection = _BatchConnection(path)
+    monkeypatch.setattr(db, "get_db_connection", lambda: connection)
+    monkeypatch.setattr(
+        db, "get_current_host_for_account", lambda *args, **kwargs: "Host"
+    )
+
+    new_session_id = db.start_live_session("sample_user")
+
+    assert new_session_id == 2
+    assert len(connection.batch_calls) == 2
+    assert connection.batch_calls[1][1] == "immediate"
+    assert len(connection.batch_calls[1][0]) == 2
+
+    conn = sqlite3.connect(path)
+    try:
+        old_session = conn.execute(
+            "SELECT end_time FROM live_sessions WHERE session_id = 1"
+        ).fetchone()
+        new_session = conn.execute(
+            "SELECT end_time FROM live_sessions WHERE session_id = 2"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert old_session[0] == last_seen_str
+    assert new_session[0] is None
