@@ -373,3 +373,98 @@ def test_atomic_live_session_batch_rolls_back_when_a_statement_fails(tmp_path):
     ).fetchone()[0]
     assert count == 0
     connection.close()
+
+
+def test_start_live_session_batches_duplicate_active_session_cleanup(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "batched-duplicate-sessions.sqlite3"
+    _create_session_schema(path)
+    now = datetime.now(pytz.timezone("Asia/Jakarta"))
+    seen = (now - timedelta(seconds=30)).strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(path)
+    try:
+        conn.executemany(
+            "INSERT INTO live_sessions "
+            "(tiktok_username, start_time, last_seen_at) VALUES (?, ?, ?)",
+            [
+                ("sample_user", seen, seen),
+                ("sample_user", seen, seen),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    connection = _BatchConnection(path)
+    monkeypatch.setattr(db, "get_db_connection", lambda: connection)
+
+    assert db.start_live_session("sample_user") == 2
+
+    assert len(connection.batch_calls) == 2
+    assert connection.batch_calls[1][1] == "immediate"
+    assert len(connection.batch_calls[1][0]) == 2
+
+    conn = sqlite3.connect(path)
+    try:
+        rows = conn.execute(
+            "SELECT session_id, end_time FROM live_sessions ORDER BY session_id"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert rows[0][1] is not None
+    assert rows[1][1] is None
+
+
+def test_start_live_session_batches_expired_resume_cleanup_with_insert(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "batched-expired-resume.sqlite3"
+    _create_session_schema(path)
+    now = datetime.now(pytz.timezone("Asia/Jakarta"))
+    last_seen = now - timedelta(seconds=db.LIVE_RESUME_GRACE_SECONDS + 60)
+    last_seen_str = last_seen.strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            "INSERT INTO live_sessions "
+            "(tiktok_username, start_time, end_time, last_seen_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("sample_user", last_seen_str, last_seen_str, last_seen_str),
+        )
+        conn.executemany(
+            "INSERT INTO bot_settings (key, value) VALUES (?, ?)",
+            [
+                ("resume_session_sample_user", "1"),
+                ("resume_last_seen_sample_user", last_seen_str),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    connection = _BatchConnection(path)
+    monkeypatch.setattr(db, "get_db_connection", lambda: connection)
+    monkeypatch.setattr(
+        db, "get_current_host_for_account", lambda *args, **kwargs: "Host"
+    )
+
+    assert db.start_live_session("sample_user") == 2
+
+    assert len(connection.batch_calls) == 2
+    assert connection.batch_calls[1][1] == "immediate"
+    assert len(connection.batch_calls[1][0]) == 2
+
+    conn = sqlite3.connect(path)
+    try:
+        settings_count = conn.execute(
+            "SELECT COUNT(*) FROM bot_settings WHERE key IN (?, ?)",
+            ("resume_session_sample_user", "resume_last_seen_sample_user"),
+        ).fetchone()[0]
+        sessions = conn.execute(
+            "SELECT session_id, end_time FROM live_sessions ORDER BY session_id"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert settings_count == 0
+    assert sessions == [(1, last_seen_str), (2, None)]
