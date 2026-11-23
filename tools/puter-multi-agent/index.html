@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DummyDreams Multi-Agent Workbench</title>
+<script src="https://js.puter.com/v2/"></script>
+<style>
+:root{color-scheme:dark;font-family:Inter,system-ui,sans-serif;background:#0d1118;color:#e7edf6}
+*{box-sizing:border-box}body{max-width:1180px;margin:32px auto;padding:0 18px}
+header{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;flex-wrap:wrap}
+h1{margin:0 0 8px;font-size:1.65rem}p{color:#aebbd0;line-height:1.55}
+.panel{background:#151d29;border:1px solid #2b394d;border-radius:12px;padding:16px;margin:14px 0}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+button{border:0;border-radius:8px;padding:10px 15px;font-weight:650;cursor:pointer;background:#526ee8;color:white}
+button.secondary{background:#29374a;color:#e7edf6}button:disabled{opacity:.45;cursor:not-allowed}
+textarea{width:100%;min-height:100px;background:#0c121b;border:1px solid #34445b;color:#e7edf6;border-radius:8px;padding:12px;font:inherit;resize:vertical}
+#status{white-space:pre-wrap;color:#d8e3f4;font-size:.92rem}
+.notice{border-left:3px solid #d6a447;padding-left:12px}
+small,.muted{color:#9cabc1}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:12px}
+article{background:#151d29;border:1px solid #2b394d;border-radius:10px;padding:14px;min-height:170px}
+article h3{margin:0 0 8px;font-size:1rem}article pre{white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.55 ui-monospace,monospace;color:#d7e0ee;max-height:420px;overflow:auto}
+.pill{font-size:12px;border:1px solid #40516b;padding:3px 8px;border-radius:99px;color:#b8c7dd}
+</style>
+</head>
+<body>
+<header><div><h1>DummyDreams · Multi-Agent Workbench</h1><p>Orkestrator analisis repository berbasis Puter.js. Tujuh peran agent, maksimal tiga permintaan aktif bersamaan.</p></div><span class="pill">READ-ONLY MVP · v0.1</span></header>
+<section class="panel">
+<p class="notice"><strong>Batas keamanan:</strong> agent hanya dapat melihat file yang kamu pilih secara lokal. Tidak ada edit file, shell, Git push, deployment, atau akses ke production. Isi file yang dibaca akan dikirim ke Puter untuk dianalisis. Jangan pilih workspace yang berisi secret atau data sensitif. Penggunaan mengikuti akun dan kebijakan User-Pays Puter.</p>
+<div class="row"><button id="login">1. Login Puter</button><button id="folder" class="secondary" disabled>2. Pilih folder repository</button><span id="auth" class="muted">Belum login</span></div>
+<p id="workspace" class="muted">Folder belum dipilih.</p>
+<label for="task"><strong>Task untuk seluruh agent</strong></label>
+<textarea id="task" placeholder="Contoh: Audit arsitektur event processing TikTok LIVE, cari risiko reconnect dan duplikasi event. Berikan temuan berbasis file dan prioritas perbaikan."></textarea>
+<div class="row" style="margin-top:12px"><button id="run" disabled>3. Jalankan 7 agent (maks. 3 paralel)</button><button id="clear" class="secondary">Bersihkan hasil</button><span class="muted">Model: openai/gpt-5.3-codex</span></div>
+</section>
+<section class="panel"><strong>Status eksekusi</strong><p id="status">Menunggu autentikasi Puter dan pemilihan folder.</p><small id="progress"></small></section>
+<section class="grid" id="results">
+<article><h3>1. Architect</h3><pre id="agent-0">Menunggu…</pre></article><article><h3>2. Core Bot</h3><pre id="agent-1">Menunggu…</pre></article><article><h3>3. TikTok Engine</h3><pre id="agent-2">Menunggu…</pre></article><article><h3>4. Database</h3><pre id="agent-3">Menunggu…</pre></article><article><h3>5. Admin Dashboard</h3><pre id="agent-4">Menunggu…</pre></article><article><h3>6. QA & Security</h3><pre id="agent-5">Menunggu…</pre></article><article><h3>7. DevOps & Observability</h3><pre id="agent-6">Menunggu…</pre></article>
+</section>
+<script>
+(() => {
+  const MODEL="openai/gpt-5.3-codex", MAX_ACTIVE=3, MAX_TOOL_CALLS=8;
+  const $=id=>document.getElementById(id);
+  let signedIn=false, rootHandle=null, indexedFiles=[];
+  const roles=[
+    {name:"Lead Architect",goal:"Review architecture boundaries, dependencies, coupling, data flow, and propose a safe implementation plan. Do not modify files."},
+    {name:"Core Bot Engineer",goal:"Review Discord bot lifecycle, event handlers, commands, concurrency, and runtime resilience."},
+    {name:"TikTok Engine Engineer",goal:"Review TikTok LIVE connection lifecycle, reconnect behavior, event parsing, deduplication, and rate limits."},
+    {name:"Database Engineer",goal:"Review database access, schema, migrations, transactions, concurrency, query performance, and data integrity."},
+    {name:"Admin Dashboard Engineer",goal:"Review Flask routes, API contracts, authentication, frontend behavior, and observability UX."},
+    {name:"QA & Security Engineer",goal:"Perform read-only regression and security analysis. Prioritize exploitable risks, missing tests, and verification steps."},
+    {name:"DevOps & Observability Engineer",goal:"Review Render configuration, GitHub Actions, staging/production separation, health checks, logs, metrics, and deployment safety."}
+  ];
+  const ignoredDirs=new Set([".git","node_modules",".venv","venv","__pycache__",".pytest_cache",".mypy_cache","dist","build","coverage","artifacts"]);
+  const allowedExt=new Set([".py",".toml",".yml",".yaml",".md",".html",".htm",".js",".mjs",".cjs",".json",".txt",".cfg",".ini",".sh",".ps1",".sql"]);
+  const secretName=/(^|\/)(\.env[^/]*|.*secret.*|.*credential.*|.*token.*|.*private.?key.*|.*\.pem|.*\.p12|.*\.sqlite3?|.*\.db|.*\.log)$/i;
+  const safePath=p=>typeof p==="string"&&!p.startsWith("/")&&!p.split("/").some(x=>!x||x==="."||x===".."||ignoredDirs.has(x))&&!secretName.test(p);
+  const setStatus=s=>$("status").textContent=s;
+  const setProgress=s=>$("progress").textContent=s;
+  const textOf=v=>typeof v==="string"?v:JSON.stringify(v);
+  async function indexDirectory(dir,prefix=""){
+    const out=[];
+    for await(const [name,handle] of dir.entries()){
+      const path=prefix?prefix+"/"+name:name;
+      if(handle.kind==="directory"){if(!ignoredDirs.has(name))out.push(...await indexDirectory(handle,path));continue;}
+      const ext=name.includes(".")?name.slice(name.lastIndexOf(".")).toLowerCase():"";
+      if(!safePath(path)||!allowedExt.has(ext))continue;
+      try{const f=await handle.getFile();if(f.size<=100*1024)out.push({path,size:f.size,handle});}catch{}
+      if(out.length>=500)break;
+    }
+    return out;
+  }
+  async function getFileText(path){
+    if(!safePath(path))throw Error("Path ditolak oleh kebijakan keamanan.");
+    const entry=indexedFiles.find(x=>x.path===path);
+    if(!entry)throw Error("File tidak ditemukan dalam indeks workspace yang diizinkan.");
+    const f=await entry.handle.getFile();
+    if(f.size>100*1024)throw Error("File melebihi batas 100 KB.");
+    return await f.text();
+  }
+  const tools=[
+    {type:"function",function:{name:"list_files",description:"List source/documentation files available in the selected repository. Optionally filter by a case-insensitive path substring.",parameters:{type:"object",properties:{contains:{type:"string"}},additionalProperties:false}}},
+    {type:"function",function:{name:"read_file",description:"Read one indexed text file by exact relative path. Sensitive files and files over 100 KB are blocked.",parameters:{type:"object",properties:{path:{type:"string"}},required:["path"],additionalProperties:false}}},
+    {type:"function",function:{name:"search_files",description:"Search case-insensitive text in indexed files. Returns matching paths and short snippets, with bounded results.",parameters:{type:"object",properties:{query:{type:"string"},contains:{type:"string"}},required:["query"],additionalProperties:false}}}
+  ];
+  async function executeTool(name,args){
+    if(name==="list_files"){
+      const needle=(args.contains||"").toLowerCase();
+      return indexedFiles.filter(x=>x.path.toLowerCase().includes(needle)).slice(0,200).map(x=>x.path+" ("+x.size+" bytes)").join("\n")||"Tidak ada file yang cocok.";
+    }
+    if(name==="read_file")return await getFileText(args.path);
+    if(name==="search_files"){
+      const q=String(args.query||"").toLowerCase();if(!q)throw Error("Query kosong.");
+      const matches=[];
+      for(const item of indexedFiles){
+        if(args.contains&&!item.path.toLowerCase().includes(String(args.contains).toLowerCase()))continue;
+        const body=await getFileText(item.path), lines=body.split(/\r?\n/);
+        for(let i=0;i<lines.length;i++)if(lines[i].toLowerCase().includes(q)){matches.push(item.path+":"+(i+1)+": "+lines[i].slice(0,240));if(matches.length>=40)return matches.join("\n");}
+      }
+      return matches.join("\n")||"Tidak ditemukan.";
+    }
+    throw Error("Tool tidak diizinkan: "+name);
+  }
+  async function runAgent(index,task){
+    const role=roles[index],out=$("agent-"+index);out.textContent="Berjalan…";
+    const messages=[
+      {role:"system",content:"Kamu adalah "+role.name+" untuk repository DummyDreams Discord Bot. "+role.goal+"\n\nAturan: kerja READ-ONLY. Gunakan list_files/read_file/search_files untuk memverifikasi temuan. Jangan mengarang file atau fakta. Jangan meminta secret. Jangan mengusulkan menjalankan perintah yang mengubah production. Laporkan: Ringkasan, Temuan berbasis path:baris, Risiko (Critical/High/Medium/Low), Rekomendasi, dan test/validasi. Jika bukti tidak cukup, nyatakan."},
+      {role:"user",content:"Task: "+task+"\n\nWorkspace terindeks: "+indexedFiles.length+" file. Maksimalkan bukti langsung dari source."}
+    ];
+    let calls=0;
+    try{
+      while(calls<MAX_TOOL_CALLS){
+        const response=await puter.ai.chat(messages,{model:MODEL,tools,reasoning_effort:"medium",verbosity:"medium"});
+        const msg=response?.message||{};
+        if(msg.tool_calls&&msg.tool_calls.length){
+          messages.push({role:"assistant",content:msg.content||"",tool_calls:msg.tool_calls});
+          for(const call of msg.tool_calls){
+            calls++;
+            if(calls>MAX_TOOL_CALLS)break;
+            let result;
+            try{const args=JSON.parse(call.function.arguments||"{}");result=await executeTool(call.function.name,args);}
+            catch(e){result="Tool error: "+(e?.message||String(e));}
+            messages.push({role:"tool",tool_call_id:call.id,content:String(result).slice(0,14000)});
+          }
+          continue;
+        }
+        const content=msg.content??response?.text??response;
+        out.textContent=textOf(content);
+        return {ok:true,name:role.name};
+      }
+      messages.push({role:"user",content:"Batas tool tercapai. Berikan laporan sementara berdasarkan bukti yang sudah dikumpulkan."});
+      const final=await puter.ai.chat(messages,{model:MODEL,reasoning_effort:"medium",verbosity:"medium"});
+      out.textContent=textOf(final?.message?.content??final?.text??final);
+      return {ok:true,name:role.name,limited:true};
+    }catch(e){out.textContent="Gagal: "+(e?.message||String(e));return {ok:false,name:role.name,error:String(e)};}
+  }
+  async function runPool(items,limit,worker){
+    let next=0,done=0,failed=0;
+    const runners=Array.from({length:Math.min(limit,items.length)},async()=>{
+      while(true){const i=next++;if(i>=items.length)return;
+        const result=await worker(i,items[i]);done++;if(!result.ok)failed++;
+        setProgress("Selesai "+done+"/"+items.length+" · gagal "+failed+" · aktif maks. "+limit);
+      }
+    });
+    await Promise.all(runners);return {done,failed};
+  }
+  $("login").addEventListener("click",async()=>{
+    $("login").disabled=true;
+    try{await puter.auth.signIn();signedIn=true;$("auth").textContent="Login berhasil";$("folder").disabled=false;setStatus("Puter terautentikasi. Pilih folder repository lokal.");}
+    catch(e){setStatus("Login gagal: "+(e?.message||String(e)));}
+    finally{$("login").disabled=false;}
+  });
+  $("folder").addEventListener("click",async()=>{
+    try{
+      if(!window.showDirectoryPicker)throw Error("Browser ini belum mendukung pemilih folder. Gunakan Edge atau Chrome terbaru.");
+      rootHandle=await window.showDirectoryPicker({mode:"read"});
+      indexedFiles=await indexDirectory(rootHandle);
+      $("workspace").textContent="Workspace: "+rootHandle.name+" · "+indexedFiles.length+" file teks diindeks · hanya baca";
+      $("run").disabled=!signedIn||indexedFiles.length===0;
+      setStatus("Workspace siap. File sensitif, database, folder dependency, dan file di atas 100 KB dikecualikan.");
+    }catch(e){setStatus("Pemilihan folder gagal/dibatalkan: "+(e?.message||String(e)));}
+  });
+  $("run").addEventListener("click",async()=>{
+    const task=$("task").value.trim();if(!task||!signedIn||!rootHandle)return;
+    $("run").disabled=true;setStatus("Menjalankan 7 agent dengan batas 3 permintaan aktif. Agent hanya dapat membaca file terindeks.");
+    setProgress("Menyiapkan…");const started=performance.now();
+    const result=await runPool(roles,MAX_ACTIVE,(i)=>runAgent(i,task));
+    setStatus("Selesai dalam "+((performance.now()-started)/1000).toFixed(1)+" detik. Berhasil "+(result.done-result.failed)+"/7; gagal "+result.failed+". Hasil bersifat analisis, belum mengubah repository.");
+    $("run").disabled=false;
+  });
+  $("clear").addEventListener("click",()=>{roles.forEach((_,i)=>$("agent-"+i).textContent="Menunggu…");setProgress("");setStatus("Hasil dibersihkan.");});
+})();
+</script>
+</body></html>
