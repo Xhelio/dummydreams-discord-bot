@@ -1,5 +1,3 @@
-import sqlite3
-
 import pytest
 
 import db
@@ -21,7 +19,9 @@ def test_stable_environment_rejects_incomplete_turso_configuration(
     monkeypatch.setattr(db, "TURSO_URL", database_url)
     monkeypatch.setattr(db, "TURSO_TOKEN", auth_token)
 
-    with pytest.raises(RuntimeError, match="Production database configuration is incomplete"):
+    with pytest.raises(
+        RuntimeError, match="Production database configuration is incomplete"
+    ):
         db.get_db_connection()
 
 
