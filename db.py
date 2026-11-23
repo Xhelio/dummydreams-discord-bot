@@ -4956,6 +4956,8 @@ def _write_setting_rows(rows) -> int:
     values_sql = ", ".join("(?, ?)" for _ in items)
     params = tuple(value for item in items for value in item)
 
+    pending_count = _SETTING_WRITE_QUEUE.qsize()
+
     def _op(conn):
         _execute_atomic_statement(
             conn,
@@ -4965,7 +4967,8 @@ def _write_setting_rows(rows) -> int:
             params,
         )
 
-    write_transaction(_op, timing_label="setting_write_batch")
+    timing_label = f"setting_write_batch_rows_{len(items)}_pending_{pending_count}"
+    write_transaction(_op, timing_label=timing_label)
     return len(items)
 
 
