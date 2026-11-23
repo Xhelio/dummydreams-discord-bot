@@ -4,8 +4,9 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+import hmac
 
-from flask import Blueprint, abort, jsonify, render_template_string, request
+from flask import Blueprint, Response, abort, jsonify, render_template_string, request
 
 qa_bp = Blueprint("staging_qa", __name__, url_prefix="/admin/qa")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -128,6 +129,31 @@ def _dashboard_enabled() -> bool:
     environment = (os.environ.get("BOT_ENV") or "").strip().lower()
     enabled = (os.environ.get("STAGING_QA_DASHBOARD_ENABLED") or "").strip()
     return environment == "test" and enabled == "1"
+
+
+@qa_bp.before_request
+def _protect_qa_dashboard():
+    """Require dedicated staging-only credentials, independent of admin auth."""
+    if not _dashboard_enabled():
+        abort(404)
+
+    username = os.environ.get("STAGING_QA_USERNAME", "")
+    password = os.environ.get("STAGING_QA_PASSWORD", "")
+    if not username or not password:
+        return jsonify({"ok": False, "error": "Staging QA authentication is not configured"}), 503
+
+    auth = request.authorization
+    supplied_username = str(auth.username) if auth and auth.username else ""
+    supplied_password = str(auth.password or "") if auth else ""
+    username_ok = hmac.compare_digest(supplied_username, username)
+    password_ok = hmac.compare_digest(supplied_password, password)
+    if not (username_ok and password_ok):
+        return Response(
+            "Authentication required.",
+            401,
+            {"WWW-Authenticate": 'Basic realm="Staging QA Console"'},
+        )
+    return None
 
 
 def _clean_subprocess_environment() -> dict:
