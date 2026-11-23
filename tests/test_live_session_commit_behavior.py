@@ -345,3 +345,31 @@ def test_start_live_session_batches_stale_close_and_new_insert(
         conn.close()
     assert old_session[0] == last_seen_str
     assert new_session[0] is None
+
+
+def test_atomic_live_session_batch_rolls_back_when_a_statement_fails(tmp_path):
+    path = tmp_path / "atomic-session-write.sqlite3"
+    connection = _BatchConnection(path)
+    connection.connection.execute(
+        "CREATE TABLE sample (id INTEGER PRIMARY KEY, value TEXT)"
+    )
+    connection.connection.commit()
+
+    try:
+        db._execute_atomic_batch(
+            connection,
+            [
+                ("INSERT INTO sample (id, value) VALUES (?, ?)", (1, "first")),
+                ("INSERT INTO sample (id, value) VALUES (?, ?)", (1, "duplicate")),
+            ],
+        )
+    except sqlite3.IntegrityError:
+        pass
+    else:
+        raise AssertionError("duplicate insert should fail the atomic batch")
+
+    count = connection.connection.execute(
+        "SELECT COUNT(*) FROM sample"
+    ).fetchone()[0]
+    assert count == 0
+    connection.close()
