@@ -22,13 +22,10 @@ def test_observer_client_initialization_retry_delay_is_bounded(failures, expecte
 
 
 def test_live_intro_detected_before_connect_wins_over_stale_session_host():
-    current_host = "Zize"
-    stored_host = "Luna"
-    detected_this_connection = True
-
-    # ConnectEvent must not restore Luna after the intro has already identified Zize.
-    assert detected_this_connection is True
-    assert current_host != stored_host
+    assert observer._has_fresh_host_detection("Zize", True) is True
+    assert observer._has_fresh_host_detection("Luna", False) is False
+    assert observer._has_fresh_host_detection("Host", True) is False
+    assert observer._has_fresh_host_detection("-", True) is False
 
 
 def _reset_priority_probe_state(monkeypatch):
