@@ -43,3 +43,5 @@ def test_render_services_run_preflight_before_starting_bot():
     assert render_config.count(
         "startCommand: python scripts/preflight.py && python main.py"
     ) == 2
+    assert "    branch: staging" in render_config
+    assert "    branch: test" not in render_config
