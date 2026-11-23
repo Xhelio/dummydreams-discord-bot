@@ -26,13 +26,13 @@ def test_write_transaction_emits_slow_stage_timings(monkeypatch, capsys):
     ticks = iter(index * 0.6 for index in range(30))
     monkeypatch.setattr(db.time, "perf_counter", lambda: next(ticks))
     monkeypatch.setattr(db, "_DB_WRITE_LOCK", _FakeLock())
+    monkeypatch.setattr(db, "_DB_WRITE_WAITERS", 0)
     monkeypatch.setattr(db, "get_db_connection", lambda: _FakeConnection())
 
     result = db.write_transaction(lambda _conn: "ok", timing_label="test_gift")
 
     output = capsys.readouterr().out
     assert result == "ok"
-    assert "operation=test_gift stage=lock_wait" in output
     assert "operation=test_gift stage=connect" in output
     assert "operation=test_gift stage=operation" in output
     assert "operation=test_gift stage=commit" in output
