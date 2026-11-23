@@ -299,13 +299,47 @@ def view_data():
     </head>
     <body>
         <div class="header">
-            <h1>🛡️ Database Admin Panel</h1>
+            <h1>🛡️ Admin Overview</h1>
         </div>
         NAV_HTML_PLACEHOLDER
         
         <div class="card">
-            <h2>📌 Admin Menu</h2>
-            <p class="muted" style="font-size:0.9rem;">Manage viewers, coins, live monitoring, and activity logs from the modules above.</p>
+            <div class="card-header">
+                <div>
+                    <h2>📌 Admin Overview</h2>
+                    <p class="page-subtitle">Akses cepat ke modul utama dan pantau integritas data.</p>
+                </div>
+            </div>
+            <div class="dashboard-links">
+                <a class="dashboard-link" href="/admin/monitor">
+                    <strong>📹 Live Monitor</strong>
+                    <span>Status observer, akun target, dan preview LIVE.</span>
+                </a>
+                <a class="dashboard-link" href="/admin/viewers">
+                    <strong>👥 Viewers & Coins</strong>
+                    <span>Daftar viewer, saldo koin, dan aktivitas terkini.</span>
+                </a>
+                <a class="dashboard-link" href="/admin/activity">
+                    <strong>📊 Activity Logs</strong>
+                    <span>Riwayat operasional, warning, dan error teknikal.</span>
+                </a>
+                <a class="dashboard-link" href="/admin/analytics">
+                    <strong>📈 Analytics</strong>
+                    <span>Tren gift, performa akun, dan ringkasan statistik.</span>
+                </a>
+                <a class="dashboard-link" href="/admin/timeline">
+                    <strong>🗓️ Timeline</strong>
+                    <span>Jelajahi sesi LIVE berdasarkan tanggal.</span>
+                </a>
+                <a class="dashboard-link" href="/admin/verifications">
+                    <strong>🔐 Verification</strong>
+                    <span>Kelola status dan metode verifikasi.</span>
+                </a>
+                <a class="dashboard-link" href="/admin/settings">
+                    <strong>⚙️ Settings</strong>
+                    <span>Atur perilaku dan konfigurasi bot.</span>
+                </a>
+            </div>
         </div>
 
         <div class="card">
@@ -398,12 +432,20 @@ def view_data():
             {% endif %}
         </div>
 
-        <div class="card" style="border-color: #ef4444;">
-            <h2 style="color: #ef4444;">⚠️ Danger Zone</h2>
-            <form action="/admin/reset-db" method="POST" onsubmit="return confirm('DELETE ALL GIFT AND LIVE SESSION DATA?')">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <button type="submit" class="btn-danger">🔥 Reset Gift & Live Session Data</button>
-            </form>
+        <div class="card">
+            <details class="danger-zone">
+                <summary>
+                    <span>⚠️ Danger Zone</span>
+                    <span class="danger-zone-hint">Tindakan destruktif · buka hanya jika benar-benar diperlukan</span>
+                </summary>
+                <div class="danger-zone-content">
+                    <p class="section-note">Reset ini menghapus data gift dan sesi LIVE. Pastikan backup dan lingkungan database sudah benar sebelum melanjutkan.</p>
+                    <form action="/admin/reset-db" method="POST" onsubmit="return confirm('PERINGATAN: tindakan ini akan menghapus seluruh data gift dan sesi LIVE. Lanjutkan hanya jika Anda yakin database dan backup sudah benar. Lanjutkan?')">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <button type="submit" class="btn-danger">🔥 Reset Gift & Live Session Data</button>
+                    </form>
+                </div>
+            </details>
         </div>
         AUTO_REFRESH_JS_PLACEHOLDER
     </body>
