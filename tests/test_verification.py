@@ -86,7 +86,7 @@ def test_async_fetch_tiktok_bio_returns_scraped_bio(monkeypatch):
         response=FakeResponse(text='{"signature":"  hello  "}'),
     )
 
-    result = await verification.async_fetch_tiktok_bio("@Creator")
+    result = asyncio.run(verification.async_fetch_tiktok_bio("@Creator"))
 
     assert result == "  hello  "
     assert client.request[0].startswith("https://www.tiktok.com/@creator?")
