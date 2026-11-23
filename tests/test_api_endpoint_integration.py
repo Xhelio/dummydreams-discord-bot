@@ -314,3 +314,17 @@ def test_euler_webhook_body_limit_does_not_affect_other_api_routes(monkeypatch):
     )
 
     assert response.status_code == 200
+
+def test_euler_webhook_alias_rejects_oversized_request_body():
+    response = _client().post(
+        "/api/webhooks/eulerstream",
+        data=b"x" * (api.MAX_EULER_WEBHOOK_BODY_BYTES + 1),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 413
+    assert response.get_json() == {
+        "ok": False,
+        "error": "Webhook request body exceeds maximum size",
+        "max_bytes": api.MAX_EULER_WEBHOOK_BODY_BYTES,
+    }
