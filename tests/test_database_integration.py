@@ -157,7 +157,20 @@ def test_database_health_checks_connection_and_uses_short_cache(
     # A recent successful probe is reused without opening another connection.
     assert db.check_database_health() is True
 
+    scheduled = []
+    monkeypatch.setattr(db, "_DB_HEALTH_REFRESHING", False)
+    monkeypatch.setattr(
+        db,
+        "_schedule_database_health_refresh",
+        lambda: scheduled.append(db._refresh_database_health),
+    )
+
     clock[0] += 6
+    # The stale successful result is served while the refresh runs off-thread.
+    assert db.check_database_health() is True
+    assert len(scheduled) == 1
+
+    scheduled[0]()
     assert db.check_database_health() is False
 
 

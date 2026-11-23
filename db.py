@@ -59,6 +59,9 @@ import pytz
 
 _DB_HEALTH_CACHE = {"ok": True, "at": 0.0}
 _DB_HEALTH_LOCK = threading.Lock()
+_DB_HEALTH_TTL = 10.0
+_DB_HEALTH_MAX_STALE = 30.0
+_DB_HEALTH_REFRESHING = False
 _ACTIVITY_LOGGER = logging.getLogger("bot.activity")
 
 # Short-lived cache for bot_settings. Hot paths (gift/comment handlers) read
@@ -422,31 +425,72 @@ def get_database_backend() -> str:
     return "SQLite lokal"
 
 
+def _probe_database_health() -> bool:
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        row = cur.fetchone()
+        return bool(row and row[0] == 1)
+    except Exception as e:
+        print(f"[HealthCheck Error] {e}")
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _refresh_database_health() -> None:
+    global _DB_HEALTH_REFRESHING
+    try:
+        ok = _probe_database_health()
+        with _DB_HEALTH_LOCK:
+            _DB_HEALTH_CACHE["ok"] = ok
+            _DB_HEALTH_CACHE["at"] = time.time()
+    finally:
+        with _DB_HEALTH_LOCK:
+            _DB_HEALTH_REFRESHING = False
+
+
+def _schedule_database_health_refresh() -> None:
+    threading.Thread(
+        target=_refresh_database_health,
+        name="database-health-refresh",
+        daemon=True,
+    ).start()
+
+
 def check_database_health() -> bool:
-    # Single-flight the cache refresh: simultaneous health requests should
-    # share one remote probe instead of stampeding Turso on cache expiry.
+    # The first probe remains synchronous so startup never reports a healthy
+    # database before it has been checked. Later expired entries use stale-
+    # while-revalidate: monitors get the last result immediately while one
+    # daemon worker refreshes it. A hard age limit prevents an indefinitely
+    # stuck probe from keeping a stale healthy result forever.
+    global _DB_HEALTH_REFRESHING
     with _DB_HEALTH_LOCK:
         now = time.time()
-        if now - _DB_HEALTH_CACHE["at"] < 10:
+        cache_age = now - _DB_HEALTH_CACHE["at"]
+        if cache_age < _DB_HEALTH_TTL:
             return bool(_DB_HEALTH_CACHE["ok"])
 
-        conn = None
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute("SELECT 1")
-            row = cur.fetchone()
-            ok = bool(row and row[0] == 1)
-        except Exception as e:
-            print(f"[HealthCheck Error] {e}")
-            ok = False
-        finally:
-            if conn is not None:
+        if _DB_HEALTH_CACHE["at"] > 0:
+            if not _DB_HEALTH_REFRESHING:
+                _DB_HEALTH_REFRESHING = True
                 try:
-                    conn.close()
-                except Exception:
-                    pass
+                    _schedule_database_health_refresh()
+                except Exception as e:
+                    _DB_HEALTH_REFRESHING = False
+                    print(f"[HealthCheck Error] failed to start refresh worker: {e}")
+            if cache_age <= _DB_HEALTH_MAX_STALE:
+                return bool(_DB_HEALTH_CACHE["ok"])
+            return False
 
+        # Cold start: do not return the initial placeholder as a real result.
+        ok = _probe_database_health()
         _DB_HEALTH_CACHE["ok"] = ok
         _DB_HEALTH_CACHE["at"] = time.time()
         return ok
