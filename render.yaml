@@ -4,7 +4,7 @@
 #   1. Push this file to `main`.
 #   2. In Render: New + -> Blueprint -> pick this repo -> Apply.
 #   3. Render asks for the `sync: false` secrets. Use the STABLE bot token
-#      and STABLE Turso database for `dummydreams-stable`, and the TEST bot
+#      and STABLE Turso database for `dummydreams-discord-bot`, and the TEST bot
 #      token and TEST database for `dummydreams-test`.
 # - `staging` is the shared pre-production deployment branch. Validate a
 #   candidate there before promoting it to `main`.
@@ -27,7 +27,7 @@ services:
   - type: web
     name: dummydreams-discord-bot
     runtime: python
-    plan: starter
+    plan: free
     region: singapore
     branch: main
     autoDeploy: true
@@ -68,7 +68,7 @@ services:
   - type: web
     name: dummydreams-test
     runtime: python
-    plan: starter
+    plan: free
     region: singapore
     branch: staging
     autoDeploy: true
