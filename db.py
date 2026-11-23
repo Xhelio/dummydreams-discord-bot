@@ -57,6 +57,7 @@ from datetime import datetime, timedelta
 import pytz
 
 _DB_HEALTH_CACHE = {"ok": True, "at": 0.0}
+_DB_HEALTH_LOCK = threading.Lock()
 _ACTIVITY_LOGGER = logging.getLogger("bot.activity")
 
 # Short-lived cache for bot_settings. Hot paths (gift/comment handlers) read
@@ -349,22 +350,33 @@ def get_database_backend() -> str:
 
 
 def check_database_health() -> bool:
-    now = time.time()
-    if now - _DB_HEALTH_CACHE["at"] < 10:
-        return bool(_DB_HEALTH_CACHE["ok"])
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT 1")
-        row = cur.fetchone()
-        conn.close()
-        ok = bool(row and row[0] == 1)
-    except Exception as e:
-        print(f"[HealthCheck Error] {e}")
-        ok = False
-    _DB_HEALTH_CACHE["ok"] = ok
-    _DB_HEALTH_CACHE["at"] = now
-    return ok
+    # Single-flight the cache refresh: simultaneous health requests should
+    # share one remote probe instead of stampeding Turso on cache expiry.
+    with _DB_HEALTH_LOCK:
+        now = time.time()
+        if now - _DB_HEALTH_CACHE["at"] < 10:
+            return bool(_DB_HEALTH_CACHE["ok"])
+
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            row = cur.fetchone()
+            ok = bool(row and row[0] == 1)
+        except Exception as e:
+            print(f"[HealthCheck Error] {e}")
+            ok = False
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        _DB_HEALTH_CACHE["ok"] = ok
+        _DB_HEALTH_CACHE["at"] = time.time()
+        return ok
 
 # Hanya host asli yang digunakan untuk deteksi host (6 akun resmi).
 def _load_valid_target_accounts():
