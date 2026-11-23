@@ -112,6 +112,66 @@ def test_announcement_endpoint_validates_payload_and_invokes_handler(monkeypatch
     assert calls == [("creator", True)]
 
 
+
+def test_heartbeat_rejects_non_object_json_payloads(monkeypatch):
+    monkeypatch.setenv("API_SECRET_KEY", "integration-secret")
+    client = _client()
+
+    for payload in ([], "creator", 42, None):
+        response = client.post(
+            "/api/heartbeat", headers=_api_headers(), json=payload
+        )
+        assert response.status_code == 400
+        assert response.get_json()["message"] == "JSON object payload required"
+
+
+def test_heartbeat_rejects_non_string_usernames(monkeypatch):
+    monkeypatch.setenv("API_SECRET_KEY", "integration-secret")
+    client = _client()
+
+    for username in (123, [], {}, True):
+        response = client.post(
+            "/api/heartbeat", headers=_api_headers(), json={"username": username}
+        )
+        assert response.status_code == 400
+        assert response.get_json()["message"] == "username must be a string"
+
+
+def test_announcement_rejects_non_object_json_payloads(monkeypatch):
+    monkeypatch.setenv("API_SECRET_KEY", "integration-secret")
+    client = _client()
+
+    for payload in ([], "creator", 42, None):
+        response = client.post(
+            "/api/announcement", headers=_api_headers(), json=payload
+        )
+        assert response.status_code == 400
+        assert response.get_json()["message"] == "JSON object payload required"
+
+
+def test_announcement_rejects_invalid_field_types(monkeypatch):
+    monkeypatch.setenv("API_SECRET_KEY", "integration-secret")
+    calls = []
+    monkeypatch.setattr(
+        api, "async_announcement_handler",
+        lambda username, is_live: calls.append((username, is_live)),
+    )
+    client = _client()
+
+    invalid_payloads = (
+        {"username": 123, "is_live": True},
+        {"username": "creator", "is_live": "true"},
+        {"username": "creator", "is_live": 1},
+        {"username": "   ", "is_live": False},
+    )
+    for payload in invalid_payloads:
+        response = client.post(
+            "/api/announcement", headers=_api_headers(), json=payload
+        )
+        assert response.status_code == 400
+
+    assert calls == []
+
 def test_euler_webhook_rejects_missing_secret(monkeypatch):
     monkeypatch.delenv("EULER_WEBHOOK_SECRET", raising=False)
     monkeypatch.delenv("EULER_WEBHOOK_SIGNING_SECRET", raising=False)
