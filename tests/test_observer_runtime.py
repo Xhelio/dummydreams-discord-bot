@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 import observer
 
 
