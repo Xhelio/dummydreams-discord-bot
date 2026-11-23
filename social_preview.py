@@ -45,6 +45,7 @@ _URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
 _CACHE: dict[str, tuple[float, "TikTokPreview | None"]] = {}
 _LIVE_CACHE_TTL_SECONDS = 45
 _LIVE_CACHE: dict[str, tuple[float, "TikTokLivePreview | None"]] = {}
+_LIVE_INFLIGHT: dict[str, asyncio.Task] = {}
 
 
 @dataclass(frozen=True)
@@ -418,8 +419,14 @@ def _parse_live_room_payload(payload: object, page_url: str) -> TikTokLivePrevie
     )
 
 
+def _clear_live_preview_inflight(task: asyncio.Task, cache_key: str) -> None:
+    """Remove a completed shared request without deleting a newer replacement."""
+    if _LIVE_INFLIGHT.get(cache_key) is task:
+        _LIVE_INFLIGHT.pop(cache_key, None)
+
+
 async def fetch_tiktok_live_preview(url: str) -> TikTokLivePreview | None:
-    """Fetch bounded public LIVE metadata, falling back to TikTok's public room-info endpoint."""
+    """Fetch bounded public LIVE metadata, coalescing concurrent requests per account."""
     normalized = normalize_tiktok_url(url)
     if not normalized or not re.fullmatch(
         r"/@[A-Za-z0-9._-]+/live/?", urlsplit(normalized).path, re.IGNORECASE
@@ -433,6 +440,23 @@ async def fetch_tiktok_live_preview(url: str) -> TikTokLivePreview | None:
     if cached:
         _LIVE_CACHE.pop(normalized, None)
 
+    task = _LIVE_INFLIGHT.get(normalized)
+    if task is None:
+        task = asyncio.create_task(_fetch_tiktok_live_preview_uncached(normalized))
+        _LIVE_INFLIGHT[normalized] = task
+        task.add_done_callback(
+            lambda completed: _clear_live_preview_inflight(completed, normalized)
+        )
+    try:
+        # A cancelled waiter must not cancel the shared request for other callers.
+        return await asyncio.shield(task)
+    finally:
+        if task.done() and _LIVE_INFLIGHT.get(normalized) is task:
+            _LIVE_INFLIGHT.pop(normalized, None)
+
+
+async def _fetch_tiktok_live_preview_uncached(normalized: str) -> TikTokLivePreview | None:
+    """Fetch one bounded public LIVE metadata request for a normalized URL."""
     timeout = aiohttp.ClientTimeout(total=9, connect=3, sock_read=5)
     headers = {
         "User-Agent": "Mozilla/5.0 (compatible; DummyDreamsPreview/1.0)",
