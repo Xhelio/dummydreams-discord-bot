@@ -100,4 +100,4 @@ services:
       - key: EULER_WEBHOOK_SECRET
         sync: false
       - key: LOG_ERROR_CHANNEL_ID
-        value: "1572123726839947305"
+        value: "1571473445714133075"
