@@ -89,3 +89,78 @@ def test_non_admin_mutation_does_not_require_admin_csrf_token(monkeypatch):
 
     # The API probe route is intentionally absent.
     assert response.status_code == 404
+
+
+
+def test_admin_mutation_accepts_valid_csrf_form_field(monkeypatch):
+    client = _client(monkeypatch)
+    token = _set_csrf_token(client)
+
+    response = client.post(
+        "/admin/__csrf_probe__",
+        data={"csrf_token": token},
+        headers=_auth_headers(),
+    )
+
+    # Missing route confirms the CSRF and authentication guards both passed.
+    assert response.status_code == 404
+
+
+def test_admin_mutation_accepts_legacy_csrf_header_alias(monkeypatch):
+    client = _client(monkeypatch)
+    token = _set_csrf_token(client)
+
+    response = client.post(
+        "/admin/__csrf_probe__",
+        headers={**_auth_headers(), "X-CSRFToken": token},
+    )
+
+    assert response.status_code == 404
+
+
+def test_admin_mutation_rejects_cross_origin_referer_without_origin(monkeypatch):
+    client = _client(monkeypatch)
+    token = _set_csrf_token(client)
+
+    response = client.post(
+        "/admin/__csrf_probe__",
+        headers={
+            **_auth_headers(),
+            "X-CSRF-Token": token,
+            "Referer": "https://attacker.example/submit",
+            "Sec-Fetch-Site": "cross-site",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.get_json() == {
+        "ok": False,
+        "error": "Cross-origin request blocked",
+    }
+
+
+def test_admin_safe_method_does_not_require_csrf_token(monkeypatch):
+    client = _client(monkeypatch)
+
+    response = client.get(
+        "/admin/__csrf_probe__",
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 404
+
+
+def test_admin_json_mutation_returns_json_csrf_error(monkeypatch):
+    client = _client(monkeypatch)
+
+    response = client.post(
+        "/admin/__csrf_probe__",
+        json={"action": "probe"},
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 403
+    assert response.get_json() == {
+        "ok": False,
+        "error": "Invalid or missing CSRF token",
+    }
