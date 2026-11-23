@@ -10,7 +10,7 @@
 #   candidate there before promoting it to `main`.
 #
 # Notes:
-# - `plan: starter` keeps the service always on. Render's free plan sleeps
+# - `plan: free` keeps the service always on. Render's free plan sleeps
 #   after ~15 minutes without HTTP traffic, which stops the Discord gateway
 #   and the TikTok observer. Free + an external keep-alive ping (UptimeRobot
 #   every 5 minutes hitting /health) works as best effort, but the free plan
@@ -25,7 +25,7 @@
 services:
   # ---------------------------------------------------------------- STABLE
   - type: web
-    name: dummydreams-stable
+    name: dummydreams-discord-bot
     runtime: python
     plan: starter
     region: singapore
