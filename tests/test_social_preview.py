@@ -1,7 +1,5 @@
 import asyncio
 
-import discord
-
 import social_preview
 
 
@@ -62,7 +60,7 @@ def test_build_tiktok_embed_uses_video_thumbnail_not_creator_avatar():
     assert embed.url == preview.url
     assert embed.image.url == preview.thumbnail_url
     assert embed.author.name == "creator"
-    assert embed.thumbnail.url is discord.Embed.Empty if hasattr(discord.Embed, "Empty") else True
+    assert embed.thumbnail.url is None
 
 
 def test_fetch_tiktok_preview_rejects_non_tiktok_before_network(monkeypatch):
