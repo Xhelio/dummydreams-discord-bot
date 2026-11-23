@@ -1,4 +1,5 @@
 from flask import Blueprint, request, jsonify
+from werkzeug.exceptions import RequestEntityTooLarge
 import os
 import json
 import logging
@@ -32,6 +33,38 @@ from runtime_status import (
 api_bp = Blueprint('api', __name__, url_prefix='/api')
 logger = logging.getLogger(__name__)
 MAX_EULER_WEBHOOK_BATCH_SIZE = 100
+# A 1 MiB cap comfortably accommodates 100 small provider events while
+# bounding memory and parsing work for oversized or chunked webhook requests.
+MAX_EULER_WEBHOOK_BODY_BYTES = 1024 * 1024
+
+
+@api_bp.before_request
+def _limit_euler_webhook_body():
+    if request.path not in (
+        "/api/euler-webhook",
+        "/api/webhooks/eulerstream",
+    ):
+        return None
+
+    # Set Werkzeug's stream limit as well as checking Content-Length. The
+    # former also protects requests without a trustworthy length header.
+    request.max_content_length = MAX_EULER_WEBHOOK_BODY_BYTES
+    if request.content_length is not None and request.content_length > MAX_EULER_WEBHOOK_BODY_BYTES:
+        return jsonify({
+            "ok": False,
+            "error": "Webhook request body exceeds maximum size",
+            "max_bytes": MAX_EULER_WEBHOOK_BODY_BYTES,
+        }), 413
+    return None
+
+
+@api_bp.errorhandler(RequestEntityTooLarge)
+def _handle_oversized_euler_webhook(error):
+    return jsonify({
+        "ok": False,
+        "error": "Webhook request body exceeds maximum size",
+        "max_bytes": MAX_EULER_WEBHOOK_BODY_BYTES,
+    }), 413
 async_announcement_handler = None
 
 def set_announcement_handler(handler):
