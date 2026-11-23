@@ -474,7 +474,6 @@ def test_start_live_session_batches_expired_resume_cleanup_with_insert(
     assert sessions == [(1, last_seen_str), (2, None)]
 
 
-
 def test_start_live_session_reports_read_and_write_batch_timings(
     tmp_path, monkeypatch, capsys
 ):
