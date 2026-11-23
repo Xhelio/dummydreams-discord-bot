@@ -237,7 +237,7 @@ textarea { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px soli
 NAV_HTML = """
 <div class="nav-bar-container">
     <nav class="nav-links" aria-label="Admin navigation">
-        <a href="/admin/data" class="nav-btn" data-path="/admin/data">🏠 Main Menu</a>
+        <a href="/admin/data" class="nav-btn" data-path="/admin/data">🏠 Admin Overview</a>
         <a href="/admin/viewers" class="nav-btn" data-path="/admin/viewers">👥 Viewers & Coins</a>
         <a href="/admin/monitor" class="nav-btn" data-path="/admin/monitor">📹 Live Monitor</a>
         <a href="/admin/activity" class="nav-btn" data-path="/admin/activity">📊 Activity Log</a>
