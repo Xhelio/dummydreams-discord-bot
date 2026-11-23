@@ -220,3 +220,38 @@ def test_fetch_tiktok_live_preview_rejects_video_url_before_network(monkeypatch)
         )
     ) is None
     assert called is False
+
+def test_fetch_tiktok_live_preview_coalesces_concurrent_requests(monkeypatch):
+    calls = 0
+    preview = social_preview.TikTokLivePreview(
+        url="https://www.tiktok.com/@creator/live",
+        username="creator",
+    )
+
+    async def fake_fetch(normalized):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.02)
+        return preview
+
+    social_preview._LIVE_CACHE.clear()
+    social_preview._LIVE_INFLIGHT.clear()
+    monkeypatch.setattr(
+        social_preview, "_fetch_tiktok_live_preview_uncached", fake_fetch
+    )
+
+    async def run_concurrent():
+        return await asyncio.gather(
+            social_preview.fetch_tiktok_live_preview(
+                "https://www.tiktok.com/@creator/live"
+            ),
+            social_preview.fetch_tiktok_live_preview(
+                "https://www.tiktok.com/@creator/live"
+            ),
+        )
+
+    results = asyncio.run(run_concurrent())
+    assert calls == 1
+    assert results == [preview, preview]
+    assert not social_preview._LIVE_INFLIGHT
+

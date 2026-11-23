@@ -45,6 +45,7 @@ _URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
 _CACHE: dict[str, tuple[float, "TikTokPreview | None"]] = {}
 _LIVE_CACHE_TTL_SECONDS = 45
 _LIVE_CACHE: dict[str, tuple[float, "TikTokLivePreview | None"]] = {}
+_LIVE_INFLIGHT: dict[str, asyncio.Task] = {}
 
 
 @dataclass(frozen=True)
@@ -419,7 +420,7 @@ def _parse_live_room_payload(payload: object, page_url: str) -> TikTokLivePrevie
 
 
 async def fetch_tiktok_live_preview(url: str) -> TikTokLivePreview | None:
-    """Fetch bounded public LIVE metadata, falling back to TikTok's public room-info endpoint."""
+    """Fetch bounded public LIVE metadata, coalescing concurrent requests per account."""
     normalized = normalize_tiktok_url(url)
     if not normalized or not re.fullmatch(
         r"/@[A-Za-z0-9._-]+/live/?", urlsplit(normalized).path, re.IGNORECASE
@@ -433,6 +434,20 @@ async def fetch_tiktok_live_preview(url: str) -> TikTokLivePreview | None:
     if cached:
         _LIVE_CACHE.pop(normalized, None)
 
+    task = _LIVE_INFLIGHT.get(normalized)
+    if task is None:
+        task = asyncio.create_task(_fetch_tiktok_live_preview_uncached(normalized))
+        _LIVE_INFLIGHT[normalized] = task
+    try:
+        # A cancelled waiter must not cancel the shared request for other callers.
+        return await asyncio.shield(task)
+    finally:
+        if task.done() and _LIVE_INFLIGHT.get(normalized) is task:
+            _LIVE_INFLIGHT.pop(normalized, None)
+
+
+async def _fetch_tiktok_live_preview_uncached(normalized: str) -> TikTokLivePreview | None:
+    """Fetch one bounded public LIVE metadata request for a normalized URL."""
     timeout = aiohttp.ClientTimeout(total=9, connect=3, sock_read=5)
     headers = {
         "User-Agent": "Mozilla/5.0 (compatible; DummyDreamsPreview/1.0)",
@@ -533,16 +548,32 @@ async def fetch_tiktok_live_preview(url: str) -> TikTokLivePreview | None:
         log.exception("Unexpected TikTok LIVE preview failure for @%s", username)
 
     if preview is None or not preview.thumbnail_url:
-        # Log only structural metadata; never log response bodies, URLs, or user data.
+        # Log only bounded structural metadata and numeric API codes; never log
+        # response messages, bodies, credentials, URLs, or thumbnail values.
         payload_shape = "unavailable"
         if "payload" in locals():
             if isinstance(payload, dict):
                 top_keys = sorted(str(key)[:32] for key in payload.keys())[:12]
                 data_value = payload.get("data")
+                data_type = type(data_value).__name__
                 data_keys = (
                     sorted(str(key)[:32] for key in data_value.keys())[:12]
                     if isinstance(data_value, dict)
                     else []
+                )
+                raw_status_code = payload.get("statusCode")
+                status_code = (
+                    str(raw_status_code)
+                    if (
+                        isinstance(raw_status_code, int)
+                        and not isinstance(raw_status_code, bool)
+                    )
+                    or (
+                        isinstance(raw_status_code, str)
+                        and raw_status_code.isdigit()
+                        and len(raw_status_code) <= 8
+                    )
+                    else "unavailable"
                 )
                 room_value = None
                 if isinstance(data_value, dict):
@@ -556,7 +587,8 @@ async def fetch_tiktok_live_preview(url: str) -> TikTokLivePreview | None:
                     else "missing"
                 )
                 payload_shape = (
-                    f"top_keys={top_keys},data_keys={data_keys},room_status={room_status}"
+                    f"top_keys={top_keys},data_type={data_type},data_keys={data_keys},"
+                    f"room_status={room_status},status_code={status_code}"
                 )
             else:
                 payload_shape = f"type={type(payload).__name__}"
