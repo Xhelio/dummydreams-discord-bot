@@ -230,7 +230,7 @@ class _TrackingLock:
     def __init__(self):
         self.held = False
 
-    def acquire(self, timeout=None):
+    def acquire(self, blocking=True, timeout=-1):
         assert not self.held
         self.held = True
         return True

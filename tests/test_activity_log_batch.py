@@ -91,3 +91,27 @@ def test_activity_log_collector_acknowledges_shutdown_sentinel():
 def test_activity_log_batch_window_is_bounded():
     assert db._ACTIVITY_LOG_BATCH_MAX_SIZE == 100
     assert db._ACTIVITY_LOG_BATCH_WAIT_SECONDS == 1.25
+
+
+def test_activity_log_writer_reports_batch_size_and_pending_backlog(monkeypatch):
+    import queue
+
+    events = queue.Queue()
+    events.put(
+        ("gift", "message", "viewer", "2026-11-23 14:00:00", "operational", "info", "test")
+    )
+    events.put(None)
+    captured = {}
+
+    def fake_write_transaction(operation, timing_label=None):
+        captured["operation"] = operation
+        captured["timing_label"] = timing_label
+
+    monkeypatch.setattr(db, "_ACTIVITY_LOG_QUEUE", events)
+    monkeypatch.setattr(db, "_ACTIVITY_LOG_PRUNE_COUNTER", 0)
+    monkeypatch.setattr(db, "write_transaction", fake_write_transaction)
+
+    db._activity_log_writer_loop()
+
+    assert captured["timing_label"] == "activity_log_batch_rows_1_pending_0"
+    assert events.unfinished_tasks == 0

@@ -1,3 +1,4 @@
+import atexit
 import os
 import json
 import logging
@@ -57,6 +58,7 @@ from datetime import datetime, timedelta
 import pytz
 
 _DB_HEALTH_CACHE = {"ok": True, "at": 0.0}
+_DB_HEALTH_LOCK = threading.Lock()
 _ACTIVITY_LOGGER = logging.getLogger("bot.activity")
 
 # Short-lived cache for bot_settings. Hot paths (gift/comment handlers) read
@@ -184,6 +186,13 @@ def _schedule_setting_refresh(key: str):
 # SQLITE_BUSY ("stream was idle for too long"). Serialise writes in this process
 # and retry the transient failures with a fresh connection.
 _DB_WRITE_LOCK = threading.Lock()
+# Turso's serverless driver keeps a stream baton on the connection. Reuse one
+# write-only connection under _DB_WRITE_LOCK to avoid a remote close request
+# after every committed transaction. SQLite keeps fresh thread-affine handles.
+_DB_WRITE_CONNECTION = None
+# Approximate number of writers waiting after an immediate lock acquisition fails.
+_DB_WRITE_WAITERS = 0
+_DB_WRITE_WAITERS_LOCK = threading.Lock()
 _DB_MODULE_DIAGNOSTIC_LOCK = threading.Lock()
 _DB_MODULE_DIAGNOSTICS_EMITTED = False
 
@@ -229,6 +238,11 @@ _TRANSIENT_DB_TOKENS = (
 
 def is_transient_db_error(exc) -> bool:
     text = f"{type(exc).__name__}: {exc}".lower()
+    # The Turso serverless protocol uses HTTP 404 for an expired/unknown
+    # stream baton. The driver resets the baton and the rejected request has
+    # not executed, so opening a fresh stream and retrying is safe.
+    if HAS_LIBSQL and TURSO_URL and "http status 404" in text:
+        return True
     return any(token in text for token in _TRANSIENT_DB_TOKENS)
 
 
@@ -240,6 +254,43 @@ def _execute_atomic_statement(conn, sql: str, params=()):
     return conn.execute(sql, params)
 
 
+def _get_write_connection():
+    """Return the serialized write connection and whether it is reusable."""
+    global _DB_WRITE_CONNECTION
+    if HAS_LIBSQL and TURSO_URL:
+        if _DB_WRITE_CONNECTION is None:
+            _DB_WRITE_CONNECTION = get_db_connection()
+        return _DB_WRITE_CONNECTION, True
+    return get_db_connection(), False
+
+
+def _discard_persistent_write_connection(conn) -> None:
+    """Forget a failed cached connection; the caller closes it in finally."""
+    global _DB_WRITE_CONNECTION
+    if _DB_WRITE_CONNECTION is conn:
+        _DB_WRITE_CONNECTION = None
+
+
+def _close_persistent_write_connection() -> None:
+    """Close the process-local Turso write stream during orderly shutdown."""
+    global _DB_WRITE_CONNECTION
+    if not _DB_WRITE_LOCK.acquire(timeout=5.0):
+        return
+    try:
+        conn = _DB_WRITE_CONNECTION
+        _DB_WRITE_CONNECTION = None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    finally:
+        _DB_WRITE_LOCK.release()
+
+
+atexit.register(_close_persistent_write_connection)
+
+
 def write_transaction(
     operation,
     attempts: int = 4,
@@ -248,21 +299,24 @@ def write_transaction(
 ):
     """Run one complete write transaction under the process-wide lock.
 
-    Connection creation, callback execution, commit, rollback, and close are
-    all covered by the retry boundary. The optional timing label records slow
-    lock/connection/operation/commit stages for selected hot paths.
+    Turso uses one process-local write connection because the driver closes a
+    remote stream with an extra HTTP request. The global lock serializes every
+    use; failed transactions discard the cached connection. SQLite still gets
+    a fresh connection per call to preserve thread affinity.
     """
+    global _DB_WRITE_WAITERS
     try:
         attempts = max(1, int(attempts))
         base_delay = max(0.0, float(base_delay))
     except (TypeError, ValueError):
         raise ValueError("attempts and base_delay must be numeric")
 
-    def _log_stage(stage: str, elapsed: float, attempt: int) -> None:
+    def _log_stage(stage: str, elapsed: float, attempt: int, queue_depth=None) -> None:
         if timing_label and elapsed >= 0.1:
+            queue_field = f" queue_depth={queue_depth}" if queue_depth is not None else ""
             print(
                 f"[DB Timing] operation={timing_label} stage={stage} "
-                f"elapsed={elapsed:.3f}s attempt={attempt}"
+                f"elapsed={elapsed:.3f}s attempt={attempt}{queue_field}"
             )
 
     _log_duplicate_db_module_instances()
@@ -270,14 +324,26 @@ def write_transaction(
     for attempt in range(1, attempts + 1):
         attempt_started = time.perf_counter()
         lock_started = time.perf_counter()
-        acquired = _DB_WRITE_LOCK.acquire(timeout=30.0)
+        acquired = _DB_WRITE_LOCK.acquire(blocking=False)
+        queue_depth = 0
+        if not acquired:
+            with _DB_WRITE_WAITERS_LOCK:
+                _DB_WRITE_WAITERS += 1
+                queue_depth = _DB_WRITE_WAITERS
+            try:
+                acquired = _DB_WRITE_LOCK.acquire(timeout=30.0)
+            finally:
+                with _DB_WRITE_WAITERS_LOCK:
+                    _DB_WRITE_WAITERS = max(0, _DB_WRITE_WAITERS - 1)
         lock_wait = time.perf_counter() - lock_started
-        _log_stage("lock_wait", lock_wait, attempt)
+        _log_stage("lock_wait", lock_wait, attempt, queue_depth=queue_depth)
         if not acquired:
             raise TimeoutError(
                 "Database write lock busy for 30s; another write is stalled"
             )
+        lock_acquired_at = time.perf_counter()
         conn = None
+        persistent_connection = False
         lock_released = False
 
         def _release_write_lock():
@@ -285,10 +351,13 @@ def write_transaction(
             if not lock_released:
                 _DB_WRITE_LOCK.release()
                 lock_released = True
+                _log_stage(
+                    "lock_hold", time.perf_counter() - lock_acquired_at, attempt
+                )
 
         try:
             connect_started = time.perf_counter()
-            conn = get_db_connection()
+            conn, persistent_connection = _get_write_connection()
             _log_stage("connect", time.perf_counter() - connect_started, attempt)
 
             operation_started = time.perf_counter()
@@ -298,8 +367,8 @@ def write_transaction(
             commit_started = time.perf_counter()
             conn.commit()
             _log_stage("commit", time.perf_counter() - commit_started, attempt)
-            # The transaction is durable now. Do not make other writers wait
-            # for the driver's HTTP stream-close cleanup request.
+            # The transaction is durable now. Keep the serialized Turso
+            # stream open for the next write; SQLite handles are closed below.
             _release_write_lock()
             return result
         except Exception as exc:
@@ -311,18 +380,23 @@ def write_transaction(
                     rollback_succeeded = True
                 except Exception:
                     pass
+            if persistent_connection:
+                # Never reuse a connection after an error, even when rollback
+                # succeeds; discard it and let the retry open a fresh stream.
+                _discard_persistent_write_connection(conn)
+                persistent_connection = False
             # A confirmed rollback also ends the critical section. If rollback
             # failed, keep the lock until close() can tear down the stream.
             if rollback_succeeded:
                 _release_write_lock()
         finally:
-            close_started = time.perf_counter()
-            if conn is not None:
+            if conn is not None and not persistent_connection:
+                close_started = time.perf_counter()
                 try:
                     conn.close()
                 except Exception:
                     pass
-            _log_stage("close", time.perf_counter() - close_started, attempt)
+                _log_stage("close", time.perf_counter() - close_started, attempt)
             _release_write_lock()
             _log_stage("transaction_total", time.perf_counter() - attempt_started, attempt)
 
@@ -349,22 +423,33 @@ def get_database_backend() -> str:
 
 
 def check_database_health() -> bool:
-    now = time.time()
-    if now - _DB_HEALTH_CACHE["at"] < 10:
-        return bool(_DB_HEALTH_CACHE["ok"])
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT 1")
-        row = cur.fetchone()
-        conn.close()
-        ok = bool(row and row[0] == 1)
-    except Exception as e:
-        print(f"[HealthCheck Error] {e}")
-        ok = False
-    _DB_HEALTH_CACHE["ok"] = ok
-    _DB_HEALTH_CACHE["at"] = now
-    return ok
+    # Single-flight the cache refresh: simultaneous health requests should
+    # share one remote probe instead of stampeding Turso on cache expiry.
+    with _DB_HEALTH_LOCK:
+        now = time.time()
+        if now - _DB_HEALTH_CACHE["at"] < 10:
+            return bool(_DB_HEALTH_CACHE["ok"])
+
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            row = cur.fetchone()
+            ok = bool(row and row[0] == 1)
+        except Exception as e:
+            print(f"[HealthCheck Error] {e}")
+            ok = False
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        _DB_HEALTH_CACHE["ok"] = ok
+        _DB_HEALTH_CACHE["at"] = time.time()
+        return ok
 
 # Hanya host asli yang digunakan untuk deteksi host (6 akun resmi).
 def _load_valid_target_accounts():
@@ -2084,16 +2169,17 @@ def _execute_atomic_batch(conn, statements):
         for statement in statements
     ]
     if not normalized:
-        return
+        return []
     batch = getattr(conn, "batch", None)
     if callable(batch):
-        batch(normalized, mode="immediate")
-        return
+        return batch(normalized, mode="immediate")
+    results = []
     for sql, params in normalized:
         if params:
-            conn.execute(sql, params)
+            results.append(conn.execute(sql, params))
         else:
-            conn.execute(sql)
+            results.append(conn.execute(sql))
+    return results
 
 
 def _execute_schema_statements(conn, statements):
@@ -2947,12 +3033,16 @@ def _activity_log_writer_loop():
             _ACTIVITY_LOG_QUEUE.task_done()
             return
         batch, shutdown = _collect_activity_log_batch(item)
+        pending_count = _ACTIVITY_LOG_QUEUE.qsize()
+        timing_label = (
+            f"activity_log_batch_rows_{len(batch)}_pending_{pending_count}"
+        )
 
         def _write_batch(conn, rows=batch):
             _insert_activity_log_batch(conn, rows)
 
         try:
-            write_transaction(_write_batch, timing_label="activity_log_batch")
+            write_transaction(_write_batch, timing_label=timing_label)
             with _ACTIVITY_LOG_PRUNE_LOCK:
                 _ACTIVITY_LOG_PRUNE_COUNTER += len(batch)
                 should_prune = _ACTIVITY_LOG_PRUNE_COUNTER >= 250
@@ -2984,22 +3074,40 @@ def prune_activity_logs(max_operational: int = 4000, max_technical: int = 6000):
         max_operational, max_technical = 4000, 6000
 
     def _op(conn):
-        for cat, keep in (("operational", max_operational), ("technical", max_technical)):
-            conn.execute(
-                """
-                DELETE FROM activity_logs
-                WHERE category = ? AND log_id NOT IN (
+        # One DELETE keeps the same per-category retention policy while
+        # avoiding a second sequential Turso HTTP round-trip under the write lock.
+        _execute_atomic_statement(
+            conn,
+            """
+            DELETE FROM activity_logs
+            WHERE (
+                category = ? AND log_id NOT IN (
                     SELECT log_id FROM activity_logs
                     WHERE category = ?
                     ORDER BY log_id DESC
                     LIMIT ?
                 )
-                """,
-                (cat, cat, keep),
+            ) OR (
+                category = ? AND log_id NOT IN (
+                    SELECT log_id FROM activity_logs
+                    WHERE category = ?
+                    ORDER BY log_id DESC
+                    LIMIT ?
+                )
             )
+            """,
+            (
+                "operational",
+                "operational",
+                max_operational,
+                "technical",
+                "technical",
+                max_technical,
+            ),
+        )
 
     try:
-        write_transaction(_op)
+        write_transaction(_op, timing_label="activity_log_prune")
     except Exception as e:
         _ACTIVITY_LOGGER.error("[ActivityLog] Prune failed: %s", e)
 
@@ -3668,6 +3776,55 @@ def get_open_live_session_id(tiktok_username: str):
         conn.close()
 
 
+def _load_live_session_start_state(conn, cur, user_clean: str, resume_key: str, resume_last_key: str):
+    """Read resume metadata and active sessions with one Turso HTTP batch."""
+    batch = getattr(conn, "batch", None)
+    if callable(batch):
+        results = batch(
+            [
+                (
+                    "SELECT key, value FROM bot_settings WHERE key IN (?, ?)",
+                    (resume_key, resume_last_key),
+                ),
+                (
+                    """
+                    SELECT tiktok_username, end_time
+                    FROM live_sessions
+                    WHERE session_id = CAST(
+                        (SELECT value FROM bot_settings WHERE key = ?) AS INTEGER
+                    )
+                    LIMIT 1
+                    """,
+                    (resume_key,),
+                ),
+                (
+                    """
+                    SELECT session_id, last_seen_at FROM live_sessions
+                    WHERE tiktok_username = ? AND end_time IS NULL
+                    ORDER BY session_id DESC
+                    """,
+                    (user_clean,),
+                ),
+            ]
+        )
+        resume_settings = {
+            str(key): value for key, value in results[0].rows
+        }
+        resume_session_row = results[1].rows[0] if results[1].rows else None
+        active_rows = results[2].rows
+        return resume_settings, resume_session_row, active_rows
+
+    # SQLite and older DB-API fallback: retain the established query path.
+    resume_settings = {
+        str(key): value
+        for key, value in cur.execute(
+            "SELECT key, value FROM bot_settings WHERE key IN (?, ?)",
+            (resume_key, resume_last_key),
+        ).fetchall()
+    }
+    return resume_settings, None, None
+
+
 def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
     wib = pytz.timezone('Asia/Jakarta')
     now_dt = datetime.now(wib)
@@ -3678,17 +3835,14 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
 
     def _start(conn):
         cur = conn.cursor()
+        pending_writes = []
 
-        # 1) Coba lanjutkan sesi yang di-suspend saat bot restart/deploy.
+        # 1) Resume a session suspended during bot restart/deploy.
         resume_key = f"resume_session_{user_clean}"
         resume_last_key = f"resume_last_seen_{user_clean}"
-        resume_settings = {
-            str(key): value
-            for key, value in cur.execute(
-                "SELECT key, value FROM bot_settings WHERE key IN (?, ?)",
-                (resume_key, resume_last_key),
-            ).fetchall()
-        }
+        resume_settings, resume_session_row, active_rows = _load_live_session_start_state(
+            conn, cur, user_clean, resume_key, resume_last_key
+        )
         resume_value = resume_settings.get(resume_key)
         resume_last_value = resume_settings.get(resume_last_key)
         if resume_value and str(resume_value).strip():
@@ -3709,50 +3863,62 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
             if resume_last_dt is not None:
                 gap = max(0, int((now_dt - resume_last_dt).total_seconds()))
             if resume_id and resume_last_dt is not None and gap <= LIVE_RESUME_GRACE_SECONDS:
-                old = cur.execute(
-                    "SELECT tiktok_username, end_time FROM live_sessions WHERE session_id = ?",
-                    (resume_id,),
-                ).fetchone()
+                old = resume_session_row
+                if resume_session_row is None and not callable(getattr(conn, "batch", None)):
+                    old = cur.execute(
+                        "SELECT tiktok_username, end_time FROM live_sessions WHERE session_id = ?",
+                        (resume_id,),
+                    ).fetchone()
                 if old and str(old[0] or "").lower() == user_clean and old[1]:
                     resume_host = str(current_host or "").strip()
                     if resume_host in ("Host", "-"):
                         resume_host = None
-                    cur.execute("""
-                        UPDATE live_sessions
-                        SET end_time = NULL,
-                            duration_seconds = 0,
-                            paused_seconds = COALESCE(paused_seconds, 0) + ?,
-                            scheduled_host = CASE WHEN ? IS NULL THEN scheduled_host ELSE ? END,
-                            last_seen_at = ?
-                        WHERE session_id = ?
-                    """, (gap, resume_host, resume_host, now_str, resume_id))
-                    cur.execute(
-                        "DELETE FROM bot_settings WHERE key IN (?, ?)",
-                        (resume_key, resume_last_key),
+                    pending_writes.extend(
+                        [
+                            (
+                                """
+                                UPDATE live_sessions
+                                SET end_time = NULL,
+                                    duration_seconds = 0,
+                                    paused_seconds = COALESCE(paused_seconds, 0) + ?,
+                                    scheduled_host = CASE WHEN ? IS NULL THEN scheduled_host ELSE ? END,
+                                    last_seen_at = ?
+                                WHERE session_id = ?
+                                """,
+                                (gap, resume_host, resume_host, now_str, resume_id),
+                            ),
+                            (
+                                "DELETE FROM bot_settings WHERE key IN (?, ?)",
+                                (resume_key, resume_last_key),
+                            ),
+                        ]
                     )
+                    _execute_atomic_batch(conn, pending_writes)
                     print(
                         f"[LiveSession] Resumed session {resume_id} for @{user_clean} "
                         f"after {gap}s restart gap (paused time excluded)."
                     )
                     return resume_id
-            # Resume window expired / data tidak valid: jangan buka sesi lama.
-            cur.execute(
-                "DELETE FROM bot_settings WHERE key IN (?, ?)",
-                (resume_key, resume_last_key),
+            # Expired/invalid resume metadata is removed in the same transaction
+            # as whichever active-session update or new-session insert follows.
+            pending_writes.append(
+                (
+                    "DELETE FROM bot_settings WHERE key IN (?, ?)",
+                    (resume_key, resume_last_key),
+                )
             )
 
-        active_rows = cur.execute("""
-            SELECT session_id, last_seen_at FROM live_sessions 
-            WHERE tiktok_username = ? AND end_time IS NULL
-            ORDER BY session_id DESC
-        """, (user_clean,)).fetchall()
+        if active_rows is None:
+            active_rows = cur.execute("""
+                SELECT session_id, last_seen_at FROM live_sessions
+                WHERE tiktok_username = ? AND end_time IS NULL
+                ORDER BY session_id DESC
+            """, (user_clean,)).fetchall()
 
         if active_rows:
             active_id, last_seen_value = active_rows[0]
-            # A session left open by a missed disconnect (e.g. websocket error
-            # instead of DisconnectEvent) must not be resumed hours later: that
-            # inflates live duration. If heartbeats stopped long ago, close it at
-            # its last confirmation time and start a fresh session below.
+            # A session left open by a missed disconnect must not be resumed
+            # hours later: close it at its last confirmed heartbeat.
             stale_end = None
             try:
                 last_seen = str(last_seen_value or "")[:19]
@@ -3763,15 +3929,20 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
             except Exception:
                 stale_end = None
             if stale_end:
-                cur.execute("""
-                    UPDATE live_sessions
-                    SET end_time = ?, duration_seconds = CASE
-                        WHEN start_time IS NULL THEN 0
-                        ELSE MAX(0, CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0))
-                    END,
-                    last_seen_at = ?
-                    WHERE session_id = ? AND end_time IS NULL
-                """, (stale_end, stale_end, stale_end, active_id))
+                pending_writes.append(
+                    (
+                        """
+                        UPDATE live_sessions
+                        SET end_time = ?, duration_seconds = CASE
+                            WHEN start_time IS NULL THEN 0
+                            ELSE MAX(0, CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0))
+                        END,
+                        last_seen_at = ?
+                        WHERE session_id = ? AND end_time IS NULL
+                        """,
+                        (stale_end, stale_end, stale_end, active_id),
+                    )
+                )
                 print(
                     f"[LiveSession] Closed stale open session {active_id} for @{user_clean} "
                     f"at last heartbeat {stale_end} (no activity > {LIVE_SESSION_STALE_SECONDS // 60}m)."
@@ -3780,37 +3951,54 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
             # Only one live session may be open per account. Close stale
             # duplicates left behind by crashes/older versions.
             for stale_id, _last_seen in active_rows[1:]:
-                cur.execute("""
-                    UPDATE live_sessions
-                    SET end_time = ?, duration_seconds = CASE
-                        WHEN start_time IS NULL THEN 0
-                        ELSE CASE
-                            WHEN CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0) < 0 THEN 0
-                            ELSE CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0)
-                        END
-                    END,
-                    last_seen_at = COALESCE(last_seen_at, ?)
-                    WHERE session_id = ?
-                """, (now_str, now_str, now_str, now_str, stale_id))
+                pending_writes.append(
+                    (
+                        """
+                        UPDATE live_sessions
+                        SET end_time = ?, duration_seconds = CASE
+                            WHEN start_time IS NULL THEN 0
+                            ELSE CASE
+                                WHEN CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0) < 0 THEN 0
+                                ELSE CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0)
+                            END
+                        END,
+                        last_seen_at = COALESCE(last_seen_at, ?)
+                        WHERE session_id = ?
+                        """,
+                        (now_str, now_str, now_str, now_str, stale_id),
+                    )
+                )
             if active_rows:
                 active_id = active_rows[0][0]
-                cur.execute(
-                    "UPDATE live_sessions SET last_seen_at = ? WHERE session_id = ?",
-                    (now_str, active_id),
+                pending_writes.append(
+                    (
+                        """
+                        UPDATE live_sessions
+                        SET last_seen_at = ?,
+                            scheduled_host = CASE WHEN ? THEN ? ELSE scheduled_host END
+                        WHERE session_id = ?
+                        """,
+                        (now_str, bool(explicit_host), current_host, active_id),
+                    )
                 )
-                if explicit_host:
-                    cur.execute("UPDATE live_sessions SET scheduled_host = ? WHERE session_id = ?", (current_host, active_id))
+                _execute_atomic_batch(conn, pending_writes)
                 return active_id
 
-        # A live that has already ended must NOT be reopened: a new connect
-        # after the disconnect/offline grace period always starts a new session
-        # (with the host detected for that new live).
-        cur.execute("""
-            INSERT INTO live_sessions (tiktok_username, start_time, scheduled_host, last_seen_at) 
-            VALUES (?, ?, ?, ?)
-        """, (user_clean, now_str, current_host, now_str))
-        return cur.lastrowid
+        # A connect after the prior live ended always creates a fresh session.
+        pending_writes.append(
+            (
+                """
+                INSERT INTO live_sessions (tiktok_username, start_time, scheduled_host, last_seen_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (user_clean, now_str, current_host, now_str),
+            )
+        )
+        results = _execute_atomic_batch(conn, pending_writes)
+        return results[-1].lastrowid
+
     return write_transaction(_start, timing_label="live_session_start")
+
 def end_live_session(session_id: int, end_time: str = None):
     """Close a live session. ``end_time`` lets callers record the actual
     disconnect moment instead of the moment the grace timer fired."""
@@ -3869,7 +4057,7 @@ def end_live_session(session_id: int, end_time: str = None):
             SET end_time = ?, duration_seconds = ?, last_seen_at = COALESCE(last_seen_at, ?)
             WHERE session_id = ?
         """, (effective_end_str, duration_sec, effective_end_str, session_id))
-    return write_transaction(_end)
+    return write_transaction(_end, timing_label="live_session_end")
 def _get_table_column_info(cur, table: str) -> list:
     """Ambil detail kolom tabel: nama, tipe, NOT NULL, default, primary key."""
     try:
@@ -5274,7 +5462,7 @@ def create_pending_verification(discord_id, tiktok_user: str, method: str = 'bio
     # Turso can roll back an idle stream ("SQLITE_BUSY ... idle for too long")
     # during a CPU stall. Retry on a fresh connection instead of failing the
     # whole verification with a generic error.
-    write_transaction(_store)
+    write_transaction(_store, timing_label="verification_create")
     return code
 
 def get_pending_verification(discord_id) -> dict:
@@ -5389,7 +5577,7 @@ def cancel_pending_verification(discord_id):
     def _delete(conn):
         conn.execute("DELETE FROM pending_verifications WHERE discord_id = ?", (did,))
     try:
-        write_transaction(_delete)
+        write_transaction(_delete, timing_label="verification_cancel")
     except Exception as e:
         if is_transient_db_error(e):
             # Best-effort: a pending row will expire on its own.
