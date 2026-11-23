@@ -121,8 +121,14 @@ def handle_heartbeat():
     if auth_error is not None:
         return auth_error
 
-    data = request.get_json() or {}
-    username = str(data.get("username") or "").lower().lstrip("@")
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"status": "error", "message": "JSON object payload required"}), 400
+
+    username_value = data.get("username")
+    if not isinstance(username_value, str):
+        return jsonify({"status": "error", "message": "username must be a string"}), 400
+    username = username_value.strip().lower().lstrip("@")
     print(f"[API] Received heartbeat from worker for @{username or 'unknown'}")
     if not username:
         return jsonify({"status": "error", "message": "Missing username"}), 400
@@ -143,13 +149,20 @@ def trigger_announcement():
     if auth_error is not None:
         return auth_error
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"status": "error", "message": "JSON object payload required"}), 400
 
     username = data.get("username")
     is_live = data.get("is_live")
 
-    if not username or is_live is None:
-        return jsonify({"status": "error", "message": "Missing username or is_live status"}), 400
+    if not isinstance(username, str) or not username.strip():
+        return jsonify({"status": "error", "message": "username must be a non-empty string"}), 400
+    if not isinstance(is_live, bool):
+        return jsonify({"status": "error", "message": "is_live must be a boolean"}), 400
+    username = username.strip().lstrip("@").lower()
+    if not username:
+        return jsonify({"status": "error", "message": "username must be a non-empty string"}), 400
 
     if async_announcement_handler:
         async_announcement_handler(username, is_live)
