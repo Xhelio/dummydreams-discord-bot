@@ -1,4 +1,6 @@
 import asyncio
+
+import discord
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -101,8 +103,6 @@ def test_safe_defer_accepts_interaction_already_acknowledged(monkeypatch):
     )
 
     assert asyncio.run(main._safe_defer(interaction, "verify")) is True
-
-import discord
 
 
 def test_safe_defer_treats_interaction_responded_as_success(monkeypatch):
