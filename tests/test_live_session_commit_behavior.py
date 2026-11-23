@@ -1,4 +1,5 @@
 import sqlite3
+import time
 from datetime import datetime, timedelta
 
 import pytz
@@ -471,3 +472,33 @@ def test_start_live_session_batches_expired_resume_cleanup_with_insert(
         conn.close()
     assert settings_count == 0
     assert sessions == [(1, last_seen_str), (2, None)]
+
+
+def test_start_live_session_reports_read_and_write_batch_timings(
+    tmp_path, monkeypatch, capsys
+):
+    path = tmp_path / "timed-live-session.sqlite3"
+    _create_session_schema(path)
+    monkeypatch.setattr(db, "get_db_connection", _connection_factory(path))
+    monkeypatch.setattr(
+        db, "get_current_host_for_account", lambda *args, **kwargs: "Host A"
+    )
+
+    def slow_state_read(*_args):
+        time.sleep(0.11)
+        return {}, None, []
+
+    original_batch = db._execute_atomic_batch
+
+    def slow_write_batch(conn, statements):
+        time.sleep(0.11)
+        return original_batch(conn, statements)
+
+    monkeypatch.setattr(db, "_load_live_session_start_state", slow_state_read)
+    monkeypatch.setattr(db, "_execute_atomic_batch", slow_write_batch)
+
+    assert db.start_live_session("sample_user") == 1
+
+    output = capsys.readouterr().out
+    assert "operation=live_session_start stage=state_read_batch" in output
+    assert "operation=live_session_start stage=write_batch" in output
