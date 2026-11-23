@@ -928,68 +928,20 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
     """
     user_key = username.lower().lstrip("@")
     try:
-        async with NOTIFICATION_LOCK:
-            if not bot.is_ready():
-                await bot.wait_until_ready()
+        live_embed = None
+        if is_live:
+            # Resolve public room metadata before taking the announcement lock:
+            # TikTok can be slow or block scraping, but must not stall other hosts.
+            from social_preview import (
+                TikTokLivePreview,
+                build_tiktok_live_embed,
+                fetch_tiktok_live_preview,
+            )
 
-            sessions = await asyncio.to_thread(get_active_live_announcements_for_account, user_key)
-
-            # --- OFFLINE: remove all stored announcement messages ---
-            if not is_live:
-                for session in sessions:
-                    try:
-                        channel = await _resolve_announcement_channel(session)
-                        old_msg, missing = await _fetch_announcement_message(
-                            channel, session.get("message_id")
-                        )
-                        if old_msg:
-                            try:
-                                await old_msg.delete()
-                                print(f"[Discord] Deleted live announcement for @{user_key} in channel {session.get('channel_id')}.")
-                            except Exception as e:
-                                print(f"[Discord] Failed to delete announcement message for @{user_key} in {session.get('channel_id')}: {e}")
-                        elif missing:
-                            print(f"[Discord] Announcement message already missing for @{user_key} in {session.get('channel_id')}; clearing session.")
-                        else:
-                            print(f"[Discord] Could not verify announcement message for @{user_key} in {session.get('channel_id')} (transient fetch error); clearing session record but leaving message untouched to avoid duplicates.")
-                    except Exception as e:
-                        print(f"[Discord] Error while cleaning announcement for @{user_key} in {session.get('channel_id')}: {e}")
-                    finally:
-                        await asyncio.to_thread(delete_active_live_announcement, user_key, session.get("channel_id"))
-                if sessions:
-                    print(f"[Discord] Announcement sessions cleared for @{user_key}.")
-                else:
-                    print(f"[Discord] No stored announcement sessions to clear for @{user_key}.")
-                return
-
-            if not is_feature_enabled("announcements"):
-                return
-
-            configured_channels = await asyncio.to_thread(get_announcement_channel_ids)
-            if not configured_channels:
-                print("[Discord] Notification failed: no announcement channel configured.")
-                return
-            # Dedupe while preserving order to avoid duplicate sends on misconfig.
-            seen_channels = set()
-            deduped_channels = []
-            for cid in configured_channels:
-                try:
-                    key = int(cid)
-                except (TypeError, ValueError):
-                    key = cid
-                if key in seen_channels:
-                    continue
-                seen_channels.add(key)
-                deduped_channels.append(cid)
-            configured_channels = deduped_channels
-
-            sched_host, account_name = await get_schedule_info_async(user_key)
-            final_host_name = host_name or sched_host or account_name or "Host"
-            live_url = f"https://www.tiktok.com/@{user_key}/live"
             live_content = (
                 f"🔴 **{final_host_name} just live!**\n"
                 f"Currently streaming on **{account_name}** (@{user_key})\n\n"
-                f"Watch here:\n{live_url}"
+                "Open the LIVE preview above to watch."
             )
 
             # Remove sessions for channels that are no longer configured.
@@ -1020,9 +972,10 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
                 if session:
                     old_msg, missing = await _fetch_announcement_message(channel, session.get("message_id"))
                     if old_msg:
-                        if old_msg.content != live_content:
+                        old_embed = old_msg.embeds[0].to_dict() if old_msg.embeds else None
+                        if old_msg.content != live_content or old_embed != live_embed.to_dict():
                             try:
-                                await old_msg.edit(content=live_content)
+                                await old_msg.edit(content=live_content, embed=live_embed)
                                 print(f"[Discord] Updated live announcement for @{user_key} in {channel_id}.")
                             except Exception as e:
                                 print(f"[Discord] Failed to edit announcement for @{user_key}: {e}")
@@ -1035,7 +988,7 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
                     print(f"[Discord] Stored announcement message missing for @{user_key} in {channel_id}; sending a replacement.")
 
                 try:
-                    new_msg = await channel.send(live_content)
+                    new_msg = await channel.send(live_content, embed=live_embed)
                 except Exception as e:
                     print(f"[Discord] Failed to send announcement for @{user_key} in {channel_id}: {e}")
                     continue
