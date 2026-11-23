@@ -2924,6 +2924,33 @@ def _register_persistent_views() -> None:
 
 @bot.event
 async def on_message(message):
+    # Social preview is deliberately isolated from command/chatbot handling.
+    if not getattr(message.author, "bot", False):
+        try:
+            from social_preview import build_tiktok_embed, extract_tiktok_urls, fetch_tiktok_preview
+
+            tiktok_urls = extract_tiktok_urls(message.content)
+            if tiktok_urls:
+                preview = await fetch_tiktok_preview(tiktok_urls[0])
+                if preview is not None:
+                    # Avoid showing Discord's generic link card as well when the
+                    # bot already has permission to suppress embeds in this channel.
+                    guild = getattr(message, "guild", None)
+                    me = getattr(guild, "me", None) if guild else None
+                    if me is not None:
+                        try:
+                            if message.channel.permissions_for(me).manage_messages:
+                                await message.edit(suppress=True)
+                        except discord.HTTPException:
+                            log.debug("[Social Preview] Could not suppress native link embed.")
+                    await message.reply(
+                        embed=build_tiktok_embed(preview),
+                        mention_author=False,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+        except Exception as e:
+            log.warning("[Social Preview] handler error: %s", e)
+
     # Chatbot: reply when mentioned / replied to (and in DMs), then still process commands.
     try:
         if await chatbot.should_respond(message, bot.user):
