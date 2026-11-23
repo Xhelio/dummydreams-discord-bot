@@ -73,6 +73,7 @@ def test_activity_log_prune_uses_one_delete_and_preserves_category_limits(
     assert technical_range == (212, 412)
 
 
+# Turso's batch API commits this prune atomically in one HTTP request.
 class _BatchRecordingConnection(_RecordingConnection):
     def __init__(self, path):
         super().__init__(path)
