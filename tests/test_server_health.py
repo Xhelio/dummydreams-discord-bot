@@ -130,3 +130,65 @@ def test_database_health_closes_connection_when_probe_fails(monkeypatch):
 
     assert db.check_database_health() is False
     assert connection.closed is True
+
+def test_stale_database_health_cache_refreshes_in_background(monkeypatch):
+    import threading
+    import time
+
+    monkeypatch.setattr(
+        db, "_DB_HEALTH_CACHE", {"ok": True, "at": time.time() - 11}
+    )
+    monkeypatch.setattr(db, "_DB_HEALTH_LOCK", threading.Lock())
+    monkeypatch.setattr(db, "_DB_HEALTH_REFRESHING", False)
+    scheduled = []
+    monkeypatch.setattr(
+        db,
+        "_schedule_database_health_refresh",
+        lambda: scheduled.append(db._refresh_database_health),
+    )
+
+    class BrokenConnection:
+        closed = False
+
+        def cursor(self):
+            return self
+
+        def execute(self, _sql):
+            raise RuntimeError("probe failed")
+
+        def close(self):
+            self.closed = True
+
+    connection = BrokenConnection()
+    monkeypatch.setattr(db, "get_db_connection", lambda: connection)
+
+    # Expired-but-recent cache is returned immediately; concurrent requests
+    # do not start another probe while the background refresh is scheduled.
+    assert db.check_database_health() is True
+    assert db.check_database_health() is True
+    assert len(scheduled) == 1
+
+    scheduled[0]()
+
+    assert db._DB_HEALTH_CACHE["ok"] is False
+    assert db._DB_HEALTH_CACHE["at"] > 0
+    assert db._DB_HEALTH_REFRESHING is False
+    assert connection.closed is True
+
+
+def test_stale_database_health_cache_fails_closed_after_max_age(monkeypatch):
+    import threading
+    import time
+
+    monkeypatch.setattr(
+        db, "_DB_HEALTH_CACHE", {"ok": True, "at": time.time() - 31}
+    )
+    monkeypatch.setattr(db, "_DB_HEALTH_LOCK", threading.Lock())
+    monkeypatch.setattr(db, "_DB_HEALTH_REFRESHING", True)
+
+    def unexpected_refresh():
+        raise AssertionError("an active refresh must not be started twice")
+
+    monkeypatch.setattr(db, "_schedule_database_health_refresh", unexpected_refresh)
+
+    assert db.check_database_health() is False

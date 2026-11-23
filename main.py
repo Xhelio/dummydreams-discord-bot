@@ -70,6 +70,10 @@ from routes.settings import set_verification_refresh_handler, set_presence_refre
 import runtime_status
 import chatbot
 import log_setup
+from live_announcement_refresh import (
+    LIVE_ANNOUNCEMENT_REFRESH_INTERVAL_SECONDS,
+    get_live_announcement_refresh_targets,
+)
 
 DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN')
 ANNOUNCEMENT_CHANNEL_ID = int(os.environ.get('ANNOUNCEMENT_CHANNEL_ID', "0"))
@@ -928,6 +932,35 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
     """
     user_key = username.lower().lstrip("@")
     try:
+        live_embed = None
+        if is_live:
+            # Resolve public room metadata before taking the announcement lock:
+            # TikTok can be slow or block scraping, but must not stall other hosts.
+            from social_preview import (
+                TikTokLivePreview,
+                build_tiktok_live_embed,
+                fetch_tiktok_live_preview,
+            )
+
+            live_url = f"https://www.tiktok.com/@{user_key}/live"
+            try:
+                live_preview = await fetch_tiktok_live_preview(live_url)
+            except Exception as exc:
+                log.debug(
+                    "[Social Preview] LIVE metadata unavailable for @%s: %s",
+                    user_key,
+                    type(exc).__name__,
+                )
+                live_preview = None
+            if live_preview is None:
+                # The observer already confirmed this account is live. Keep a
+                # truthful status card even when TikTok hides its cover metadata.
+                live_preview = TikTokLivePreview(
+                    url=live_url,
+                    username=user_key,
+                )
+            live_embed = build_tiktok_live_embed(live_preview)
+
         async with NOTIFICATION_LOCK:
             if not bot.is_ready():
                 await bot.wait_until_ready()
@@ -985,11 +1018,10 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
 
             sched_host, account_name = await get_schedule_info_async(user_key)
             final_host_name = host_name or sched_host or account_name or "Host"
-            live_url = f"https://www.tiktok.com/@{user_key}/live"
             live_content = (
                 f"🔴 **{final_host_name} just live!**\n"
                 f"Currently streaming on **{account_name}** (@{user_key})\n\n"
-                f"Watch here:\n{live_url}"
+                "Open the LIVE preview above to watch."
             )
 
             # Remove sessions for channels that are no longer configured.
@@ -1020,9 +1052,10 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
                 if session:
                     old_msg, missing = await _fetch_announcement_message(channel, session.get("message_id"))
                     if old_msg:
-                        if old_msg.content != live_content:
+                        old_embed = old_msg.embeds[0].to_dict() if old_msg.embeds else None
+                        if old_msg.content != live_content or old_embed != live_embed.to_dict():
                             try:
-                                await old_msg.edit(content=live_content)
+                                await old_msg.edit(content=live_content, embed=live_embed)
                                 print(f"[Discord] Updated live announcement for @{user_key} in {channel_id}.")
                             except Exception as e:
                                 print(f"[Discord] Failed to edit announcement for @{user_key}: {e}")
@@ -1035,7 +1068,7 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
                     print(f"[Discord] Stored announcement message missing for @{user_key} in {channel_id}; sending a replacement.")
 
                 try:
-                    new_msg = await channel.send(live_content)
+                    new_msg = await channel.send(live_content, embed=live_embed)
                 except Exception as e:
                     print(f"[Discord] Failed to send announcement for @{user_key} in {channel_id}: {e}")
                     continue
@@ -1108,6 +1141,48 @@ async def reconcile_announcement_sessions(delay_seconds: int = 180):
                 print(f"[Discord] Reconcile skipped @{username}: live status unknown.")
     except Exception as e:
         print(f"[Discord] Announcement reconciliation failed: {e}")
+
+
+async def refresh_live_announcement_previews():
+    """Refresh active LIVE embeds without relying on another observer event."""
+    while True:
+        await asyncio.sleep(LIVE_ANNOUNCEMENT_REFRESH_INTERVAL_SECONDS)
+        try:
+            if not bot.is_ready() or not is_feature_enabled("announcements"):
+                continue
+
+            sessions = await asyncio.to_thread(get_all_active_live_announcements)
+            targets = get_live_announcement_refresh_targets(
+                sessions, get_current_live_hosts()
+            )
+            if not targets:
+                continue
+
+            refresh_semaphore = asyncio.Semaphore(2)
+
+            async def refresh_one(username):
+                async with refresh_semaphore:
+                    try:
+                        await process_live_announcement(username, True)
+                    except Exception as exc:
+                        log.warning(
+                            "[Live Announcement Refresh] @%s failed: %s: %s",
+                            username,
+                            type(exc).__name__,
+                            exc,
+                        )
+
+            # Bound concurrent metadata fetches; the announcement lock serializes edits.
+            await asyncio.gather(*(refresh_one(username) for username in targets))
+            log.debug(
+                "[Live Announcement Refresh] checked %d active account(s).",
+                len(targets),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("[Live Announcement Refresh] background cycle failed.")
+
 
 # --- Leaderboard, tier reset, verification panel tasks ---
 
@@ -2924,6 +2999,52 @@ def _register_persistent_views() -> None:
 
 @bot.event
 async def on_message(message):
+    # Social preview is deliberately isolated from command/chatbot handling.
+    if not getattr(message.author, "bot", False):
+        try:
+            from social_preview import (
+                build_tiktok_embed,
+                build_tiktok_live_embed,
+                extract_tiktok_live_urls,
+                extract_tiktok_urls,
+                fetch_tiktok_live_preview,
+                fetch_tiktok_preview,
+            )
+
+            live_urls = extract_tiktok_live_urls(message.content)
+            preview_embed = None
+            if live_urls:
+                # LIVE links must never fall back to generic profile metadata:
+                # that can show an avatar and falsely imply a room preview.
+                live_preview = await fetch_tiktok_live_preview(live_urls[0])
+                if live_preview is not None:
+                    preview_embed = build_tiktok_live_embed(live_preview)
+            else:
+                tiktok_urls = extract_tiktok_urls(message.content)
+                if tiktok_urls:
+                    preview = await fetch_tiktok_preview(tiktok_urls[0])
+                    if preview is not None:
+                        preview_embed = build_tiktok_embed(preview)
+
+            if preview_embed is not None:
+                # Avoid showing Discord's generic link card as well when the
+                # bot already has permission to suppress embeds in this channel.
+                guild = getattr(message, "guild", None)
+                me = getattr(guild, "me", None) if guild else None
+                if me is not None:
+                    try:
+                        if message.channel.permissions_for(me).manage_messages:
+                            await message.edit(suppress=True)
+                    except discord.HTTPException:
+                        log.debug("[Social Preview] Could not suppress native link embed.")
+                await message.reply(
+                    embed=preview_embed,
+                    mention_author=False,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+        except Exception as e:
+            log.warning("[Social Preview] handler error: %s", e)
+
     # Chatbot: reply when mentioned / replied to (and in DMs), then still process commands.
     try:
         if await chatbot.should_respond(message, bot.user):
@@ -3001,6 +3122,7 @@ async def on_ready():
         except Exception as e:
             print(f"[Discord] Slash command sync failed: {e}")
         asyncio.create_task(reconcile_announcement_sessions())
+        asyncio.create_task(refresh_live_announcement_previews())
         asyncio.create_task(leaderboard_loop())
         asyncio.create_task(tier_reset_loop())
 

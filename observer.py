@@ -1,5 +1,8 @@
 import asyncio
+from importlib import metadata
 import os
+import ssl
+import sys
 import time
 from datetime import datetime, timedelta
 import pytz
@@ -2115,6 +2118,33 @@ def _report_observer_task_exit(username: str, task: asyncio.Task) -> None:
         pass
 
 
+def _transport_runtime_fingerprint() -> str:
+    """Return non-secret runtime/dependency versions for SSL transport diagnostics."""
+    packages = (
+        "TikTokLive",
+        "websockets",
+        "websockets-proxy",
+        "httpx",
+        "httpcore",
+        "python-socks",
+    )
+    versions = []
+    for package in packages:
+        try:
+            version = metadata.version(package)
+        except metadata.PackageNotFoundError:
+            version = "missing"
+        except Exception:
+            version = "unknown"
+        versions.append(f"{package}={version}")
+
+    return (
+        f"python={sys.version.split()[0]} "
+        f"openssl={ssl.OPENSSL_VERSION} "
+        + " ".join(versions)
+    )
+
+
 async def run_all_observers(announcement_callback, role_callback, comment_callback=None):
     """Supervise one observer task per active host, refreshing from the DB.
 
@@ -2123,6 +2153,7 @@ async def run_all_observers(announcement_callback, role_callback, comment_callba
     """
     tasks = {}
     print("[Observer System] Starting supervised observers for target hosts in DB.")
+    print(f"[Observer System] Transport runtime: {_transport_runtime_fingerprint()}")
     try:
         log_activity_event("system", "Observer supervisor started.", "")
     except Exception:

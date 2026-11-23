@@ -59,6 +59,9 @@ import pytz
 
 _DB_HEALTH_CACHE = {"ok": True, "at": 0.0}
 _DB_HEALTH_LOCK = threading.Lock()
+_DB_HEALTH_TTL = 10.0
+_DB_HEALTH_MAX_STALE = 30.0
+_DB_HEALTH_REFRESHING = False
 _ACTIVITY_LOGGER = logging.getLogger("bot.activity")
 
 # Short-lived cache for bot_settings. Hot paths (gift/comment handlers) read
@@ -422,31 +425,72 @@ def get_database_backend() -> str:
     return "SQLite lokal"
 
 
+def _probe_database_health() -> bool:
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        row = cur.fetchone()
+        return bool(row and row[0] == 1)
+    except Exception as e:
+        print(f"[HealthCheck Error] {e}")
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _refresh_database_health() -> None:
+    global _DB_HEALTH_REFRESHING
+    try:
+        ok = _probe_database_health()
+        with _DB_HEALTH_LOCK:
+            _DB_HEALTH_CACHE["ok"] = ok
+            _DB_HEALTH_CACHE["at"] = time.time()
+    finally:
+        with _DB_HEALTH_LOCK:
+            _DB_HEALTH_REFRESHING = False
+
+
+def _schedule_database_health_refresh() -> None:
+    threading.Thread(
+        target=_refresh_database_health,
+        name="database-health-refresh",
+        daemon=True,
+    ).start()
+
+
 def check_database_health() -> bool:
-    # Single-flight the cache refresh: simultaneous health requests should
-    # share one remote probe instead of stampeding Turso on cache expiry.
+    # The first probe remains synchronous so startup never reports a healthy
+    # database before it has been checked. Later expired entries use stale-
+    # while-revalidate: monitors get the last result immediately while one
+    # daemon worker refreshes it. A hard age limit prevents an indefinitely
+    # stuck probe from keeping a stale healthy result forever.
+    global _DB_HEALTH_REFRESHING
     with _DB_HEALTH_LOCK:
         now = time.time()
-        if now - _DB_HEALTH_CACHE["at"] < 10:
+        cache_age = now - _DB_HEALTH_CACHE["at"]
+        if cache_age < _DB_HEALTH_TTL:
             return bool(_DB_HEALTH_CACHE["ok"])
 
-        conn = None
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute("SELECT 1")
-            row = cur.fetchone()
-            ok = bool(row and row[0] == 1)
-        except Exception as e:
-            print(f"[HealthCheck Error] {e}")
-            ok = False
-        finally:
-            if conn is not None:
+        if _DB_HEALTH_CACHE["at"] > 0:
+            if not _DB_HEALTH_REFRESHING:
+                _DB_HEALTH_REFRESHING = True
                 try:
-                    conn.close()
-                except Exception:
-                    pass
+                    _schedule_database_health_refresh()
+                except Exception as e:
+                    _DB_HEALTH_REFRESHING = False
+                    print(f"[HealthCheck Error] failed to start refresh worker: {e}")
+            if cache_age <= _DB_HEALTH_MAX_STALE:
+                return bool(_DB_HEALTH_CACHE["ok"])
+            return False
 
+        # Cold start: do not return the initial placeholder as a real result.
+        ok = _probe_database_health()
         _DB_HEALTH_CACHE["ok"] = ok
         _DB_HEALTH_CACHE["at"] = time.time()
         return ok
@@ -2060,6 +2104,8 @@ def _ensure_analytics_indexes(conn):
          "ON gift_logs(substr(log_date, 1, 10))"),
         ("live_sessions", "CREATE INDEX IF NOT EXISTS idx_live_sessions_analytics_date "
          "ON live_sessions(substr(start_time, 1, 10))"),
+        ("live_sessions", "CREATE INDEX IF NOT EXISTS idx_live_sessions_open_account "
+         "ON live_sessions(tiktok_username, session_id DESC) WHERE end_time IS NULL"),
     )
     for label, statement in statements:
         index_started = time.perf_counter()
@@ -3657,7 +3703,10 @@ def update_live_session_host(session_id: int, host_name: str, allow_closed: bool
 
 _TOUCH_LIVE_CACHE = {}
 _TOUCH_LIVE_LOCK = threading.Lock()
-_TOUCH_LIVE_MIN_INTERVAL = 60.0
+# Resume grace is 10 minutes and stale-session closure is 30 minutes. A 90s
+# heartbeat interval reduces low-value remote writes while keeping the last-seen
+# timestamp comfortably inside both recovery windows.
+_TOUCH_LIVE_MIN_INTERVAL = 90.0
 
 
 def touch_live_session(session_id: int, when: str = None):
@@ -3666,8 +3715,9 @@ def touch_live_session(session_id: int, when: str = None):
         return
 
     # Heartbeats arrive on every gift and comment. ``last_seen_at`` only matters
-    # for the restart grace period, so update Turso at most once a minute per
-    # session instead of writing on every live-chat message.
+    # for restart recovery and stale-session detection, so throttle remote writes
+    # to one per 90 seconds per session instead of writing on every live-chat message.
+    throttle_timestamp = None
     if not when:
         now_ts = time.time()
         with _TOUCH_LIVE_LOCK:
@@ -3675,7 +3725,10 @@ def touch_live_session(session_id: int, when: str = None):
                 return
             if len(_TOUCH_LIVE_CACHE) > 500:
                 _TOUCH_LIVE_CACHE.clear()
-            _TOUCH_LIVE_CACHE[session_id] = now_ts
+            # Reserve this heartbeat while its write is in flight. If the write
+            # fails, remove only our reservation so the next event can retry.
+            throttle_timestamp = now_ts
+            _TOUCH_LIVE_CACHE[session_id] = throttle_timestamp
         wib = pytz.timezone('Asia/Jakarta')
         when = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
 
@@ -3690,6 +3743,10 @@ def touch_live_session(session_id: int, when: str = None):
     try:
         write_transaction(_store, timing_label="live_session_touch")
     except Exception as e:
+        if throttle_timestamp is not None:
+            with _TOUCH_LIVE_LOCK:
+                if _TOUCH_LIVE_CACHE.get(session_id) == throttle_timestamp:
+                    _TOUCH_LIVE_CACHE.pop(session_id, None)
         print(f"[DB] Failed to touch live session {session_id}: {type(e).__name__}: {e}")
 
 
@@ -3837,12 +3894,28 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
         cur = conn.cursor()
         pending_writes = []
 
+        def _log_session_stage(stage: str, started_at: float) -> None:
+            elapsed = time.perf_counter() - started_at
+            if elapsed >= 0.1:
+                print(
+                    f"[DB Timing] operation=live_session_start "
+                    f"stage={stage} elapsed={elapsed:.3f}s"
+                )
+
+        def _execute_pending_writes():
+            started_at = time.perf_counter()
+            results = _execute_atomic_batch(conn, pending_writes)
+            _log_session_stage("write_batch", started_at)
+            return results
+
         # 1) Resume a session suspended during bot restart/deploy.
         resume_key = f"resume_session_{user_clean}"
         resume_last_key = f"resume_last_seen_{user_clean}"
+        read_started_at = time.perf_counter()
         resume_settings, resume_session_row, active_rows = _load_live_session_start_state(
             conn, cur, user_clean, resume_key, resume_last_key
         )
+        _log_session_stage("state_read_batch", read_started_at)
         resume_value = resume_settings.get(resume_key)
         resume_last_value = resume_settings.get(resume_last_key)
         if resume_value and str(resume_value).strip():
@@ -3893,7 +3966,7 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                             ),
                         ]
                     )
-                    _execute_atomic_batch(conn, pending_writes)
+                    _execute_pending_writes()
                     print(
                         f"[LiveSession] Resumed session {resume_id} for @{user_clean} "
                         f"after {gap}s restart gap (paused time excluded)."
@@ -3909,11 +3982,13 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
             )
 
         if active_rows is None:
+            active_read_started_at = time.perf_counter()
             active_rows = cur.execute("""
                 SELECT session_id, last_seen_at FROM live_sessions
                 WHERE tiktok_username = ? AND end_time IS NULL
                 ORDER BY session_id DESC
             """, (user_clean,)).fetchall()
+            _log_session_stage("active_session_fallback_read", active_read_started_at)
 
         if active_rows:
             active_id, last_seen_value = active_rows[0]
@@ -3981,7 +4056,7 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                         (now_str, bool(explicit_host), current_host, active_id),
                     )
                 )
-                _execute_atomic_batch(conn, pending_writes)
+                _execute_pending_writes()
                 return active_id
 
         # A connect after the prior live ended always creates a fresh session.
@@ -3994,7 +4069,7 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                 (user_clean, now_str, current_host, now_str),
             )
         )
-        results = _execute_atomic_batch(conn, pending_writes)
+        results = _execute_pending_writes()
         return results[-1].lastrowid
 
     return write_transaction(_start, timing_label="live_session_start")
@@ -4956,6 +5031,8 @@ def _write_setting_rows(rows) -> int:
     values_sql = ", ".join("(?, ?)" for _ in items)
     params = tuple(value for item in items for value in item)
 
+    pending_count = _SETTING_WRITE_QUEUE.qsize()
+
     def _op(conn):
         _execute_atomic_statement(
             conn,
@@ -4965,7 +5042,8 @@ def _write_setting_rows(rows) -> int:
             params,
         )
 
-    write_transaction(_op, timing_label="setting_write_batch")
+    timing_label = f"setting_write_batch_rows_{len(items)}_pending_{pending_count}"
+    write_transaction(_op, timing_label=timing_label)
     return len(items)
 
 
