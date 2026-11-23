@@ -26,7 +26,7 @@ class FakeConnection:
     def execute(self, query, params=()):
         self.executed.append((query, params))
         if query.lstrip().upper().startswith("SELECT"):
-            if "COALESCE(is_priority,1)" in query:
+            if "SELECT tiktok_username" in query:
                 return FakeResult(row=self.selected_row)
             return FakeResult(rows=self.rows)
         return FakeResult()
@@ -107,7 +107,7 @@ def test_add_tier_accepts_numeric_role_and_clamps_negative_coins(monkeypatch):
 
     assert response.status_code == 302
     assert calls == [("permanent", "12345", 0)]
-    assert "Tier%20added" in response.headers["Location"]
+    assert "Tier+added" in response.headers["Location"]
 
 
 def test_add_tier_rejects_non_numeric_role_id(monkeypatch):
@@ -121,7 +121,7 @@ def test_add_tier_rejects_non_numeric_role_id(monkeypatch):
 
     assert response.status_code == 302
     assert calls == []
-    assert "Invalid%20role%20ID" in response.headers["Location"]
+    assert "Invalid+role+ID" in response.headers["Location"]
 
 
 def test_remove_tier_delegates_to_database_helper(monkeypatch):
