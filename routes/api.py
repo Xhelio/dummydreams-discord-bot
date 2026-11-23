@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify
 import os
 import json
+import logging
 import hmac
 import hashlib
 import time
@@ -29,6 +30,8 @@ from runtime_status import (
 )
 
 api_bp = Blueprint('api', __name__, url_prefix='/api')
+logger = logging.getLogger(__name__)
+MAX_EULER_WEBHOOK_BATCH_SIZE = 100
 async_announcement_handler = None
 
 def set_announcement_handler(handler):
@@ -112,8 +115,9 @@ def get_bot_config():
             return jsonify({"status": "error", "message": "Account not found"}), 404
 
         return jsonify(config_data), 200
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+    except Exception:
+        logger.exception("Failed to read API configuration")
+        return jsonify({"status": "error", "message": "Unable to read configuration"}), 500
 
 @api_bp.route('/heartbeat', methods=['POST'])
 def handle_heartbeat():
@@ -483,6 +487,13 @@ def euler_live_webhook():
             events = [payload]
     else:
         events = []
+
+    if len(events) > MAX_EULER_WEBHOOK_BATCH_SIZE:
+        return jsonify({
+            "ok": False,
+            "error": "Webhook batch exceeds maximum event count",
+            "max_events": MAX_EULER_WEBHOOK_BATCH_SIZE,
+        }), 413
 
     results = []
     for ev in events:
