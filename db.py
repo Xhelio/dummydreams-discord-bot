@@ -3717,6 +3717,7 @@ def touch_live_session(session_id: int, when: str = None):
     # Heartbeats arrive on every gift and comment. ``last_seen_at`` only matters
     # for restart recovery and stale-session detection, so throttle remote writes
     # to one per 90 seconds per session instead of writing on every live-chat message.
+    throttle_timestamp = None
     if not when:
         now_ts = time.time()
         with _TOUCH_LIVE_LOCK:
@@ -3724,7 +3725,10 @@ def touch_live_session(session_id: int, when: str = None):
                 return
             if len(_TOUCH_LIVE_CACHE) > 500:
                 _TOUCH_LIVE_CACHE.clear()
-            _TOUCH_LIVE_CACHE[session_id] = now_ts
+            # Reserve this heartbeat while its write is in flight. If the write
+            # fails, remove only our reservation so the next event can retry.
+            throttle_timestamp = now_ts
+            _TOUCH_LIVE_CACHE[session_id] = throttle_timestamp
         wib = pytz.timezone('Asia/Jakarta')
         when = datetime.now(wib).strftime('%Y-%m-%d %H:%M:%S')
 
@@ -3739,6 +3743,10 @@ def touch_live_session(session_id: int, when: str = None):
     try:
         write_transaction(_store, timing_label="live_session_touch")
     except Exception as e:
+        if throttle_timestamp is not None:
+            with _TOUCH_LIVE_LOCK:
+                if _TOUCH_LIVE_CACHE.get(session_id) == throttle_timestamp:
+                    _TOUCH_LIVE_CACHE.pop(session_id, None)
         print(f"[DB] Failed to touch live session {session_id}: {type(e).__name__}: {e}")
 
 
