@@ -403,6 +403,13 @@ AUTO_REFRESH_JS = r"""
                         if (nearBottom) currentTerminal.scrollTop = currentTerminal.scrollHeight;
                     }
                 });
+                // Keep asynchronously fetched LIVE thumbnail previews in sync
+                // without replacing forms, tables, or the whole page.
+                const currentPreviews = document.querySelectorAll('.live-thumbnail-grid');
+                const newPreviews = doc.querySelectorAll('.live-thumbnail-grid');
+                currentPreviews.forEach((preview, index) => {
+                    if (newPreviews[index]) preview.innerHTML = newPreviews[index].innerHTML;
+                });
             })
             .catch(err => console.log('Realtime sync error:', err));
     }, 15000);
