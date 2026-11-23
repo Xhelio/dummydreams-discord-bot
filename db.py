@@ -185,7 +185,7 @@ def _schedule_setting_refresh(key: str):
 # SQLITE_BUSY ("stream was idle for too long"). Serialise writes in this process
 # and retry the transient failures with a fresh connection.
 _DB_WRITE_LOCK = threading.Lock()
-# Approximate number of writers currently queued for the process-wide lock.
+# Approximate number of writers waiting after an immediate lock acquisition fails.
 _DB_WRITE_WAITERS = 0
 _DB_WRITE_WAITERS_LOCK = threading.Lock()
 _DB_MODULE_DIAGNOSTIC_LOCK = threading.Lock()
@@ -276,14 +276,17 @@ def write_transaction(
     for attempt in range(1, attempts + 1):
         attempt_started = time.perf_counter()
         lock_started = time.perf_counter()
-        with _DB_WRITE_WAITERS_LOCK:
-            _DB_WRITE_WAITERS += 1
-            queue_depth = _DB_WRITE_WAITERS
-        try:
-            acquired = _DB_WRITE_LOCK.acquire(timeout=30.0)
-        finally:
+        acquired = _DB_WRITE_LOCK.acquire(blocking=False)
+        queue_depth = 0
+        if not acquired:
             with _DB_WRITE_WAITERS_LOCK:
-                _DB_WRITE_WAITERS = max(0, _DB_WRITE_WAITERS - 1)
+                _DB_WRITE_WAITERS += 1
+                queue_depth = _DB_WRITE_WAITERS
+            try:
+                acquired = _DB_WRITE_LOCK.acquire(timeout=30.0)
+            finally:
+                with _DB_WRITE_WAITERS_LOCK:
+                    _DB_WRITE_WAITERS = max(0, _DB_WRITE_WAITERS - 1)
         lock_wait = time.perf_counter() - lock_started
         _log_stage("lock_wait", lock_wait, attempt, queue_depth=queue_depth)
         if not acquired:
