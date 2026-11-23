@@ -3909,7 +3909,7 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                             ),
                         ]
                     )
-                    _execute_atomic_batch(conn, pending_writes)
+                    _execute_pending_writes()
                     print(
                         f"[LiveSession] Resumed session {resume_id} for @{user_clean} "
                         f"after {gap}s restart gap (paused time excluded)."
@@ -3999,7 +3999,7 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                         (now_str, bool(explicit_host), current_host, active_id),
                     )
                 )
-                _execute_atomic_batch(conn, pending_writes)
+                _execute_pending_writes()
                 return active_id
 
         # A connect after the prior live ended always creates a fresh session.
