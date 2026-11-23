@@ -1,4 +1,6 @@
 import asyncio
+
+import discord
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -101,3 +103,37 @@ def test_safe_defer_accepts_interaction_already_acknowledged(monkeypatch):
     )
 
     assert asyncio.run(main._safe_defer(interaction, "verify")) is True
+
+
+def test_safe_defer_treats_interaction_responded_as_success(monkeypatch):
+    monkeypatch.setattr(main, "_bind_interaction_context", lambda interaction: None)
+
+    async def already_responded(**kwargs):
+        raise discord.InteractionResponded(None)
+
+    interaction = SimpleNamespace(
+        response=SimpleNamespace(is_done=lambda: False, defer=already_responded),
+        user=FakeUser(),
+        data={},
+    )
+
+    assert asyncio.run(main._safe_defer(interaction, "verify")) is True
+
+
+def test_safe_defer_returns_false_and_logs_unexpected_failure(monkeypatch):
+    warnings = []
+    monkeypatch.setattr(main, "_bind_interaction_context", lambda interaction: None)
+    monkeypatch.setattr(main.log, "warning", lambda *args: warnings.append(args))
+
+    async def failed_defer(**kwargs):
+        raise RuntimeError("simulated transport failure")
+
+    interaction = SimpleNamespace(
+        response=SimpleNamespace(is_done=lambda: False, defer=failed_defer),
+        user=FakeUser(),
+        data={},
+    )
+
+    assert asyncio.run(main._safe_defer(interaction, "verify")) is False
+    assert len(warnings) == 1
+    assert "simulated transport failure" in str(warnings[0][-1])
