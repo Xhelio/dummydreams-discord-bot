@@ -3657,7 +3657,10 @@ def update_live_session_host(session_id: int, host_name: str, allow_closed: bool
 
 _TOUCH_LIVE_CACHE = {}
 _TOUCH_LIVE_LOCK = threading.Lock()
-_TOUCH_LIVE_MIN_INTERVAL = 60.0
+# Resume grace is 10 minutes and stale-session closure is 30 minutes. A 90s
+# heartbeat interval reduces low-value remote writes while keeping the last-seen
+# timestamp comfortably inside both recovery windows.
+_TOUCH_LIVE_MIN_INTERVAL = 90.0
 
 
 def touch_live_session(session_id: int, when: str = None):
@@ -3666,8 +3669,8 @@ def touch_live_session(session_id: int, when: str = None):
         return
 
     # Heartbeats arrive on every gift and comment. ``last_seen_at`` only matters
-    # for the restart grace period, so update Turso at most once a minute per
-    # session instead of writing on every live-chat message.
+    # for restart recovery and stale-session detection, so throttle remote writes
+    # to one per 90 seconds per session instead of writing on every live-chat message.
     if not when:
         now_ts = time.time()
         with _TOUCH_LIVE_LOCK:

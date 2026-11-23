@@ -502,3 +502,81 @@ def test_start_live_session_reports_read_and_write_batch_timings(
     output = capsys.readouterr().out
     assert "operation=live_session_start stage=state_read_batch" in output
     assert "operation=live_session_start stage=write_batch" in output
+
+
+def test_touch_live_session_throttles_writes_to_ninety_seconds(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "touch-live-session.sqlite3"
+    _create_session_schema(path)
+    setup = sqlite3.connect(path)
+    try:
+        setup.execute(
+            "INSERT INTO live_sessions (tiktok_username, start_time) VALUES (?, ?)",
+            ("sample_user", "2026-11-23 10:00:00"),
+        )
+        setup.commit()
+    finally:
+        setup.close()
+
+    now = [1000.0]
+    calls = []
+
+    def fake_write_transaction(operation, timing_label=None):
+        connection = sqlite3.connect(path)
+        try:
+            operation(connection)
+            connection.commit()
+        finally:
+            connection.close()
+        calls.append(timing_label)
+
+    monkeypatch.setattr(db, "write_transaction", fake_write_transaction)
+    monkeypatch.setattr(db.time, "time", lambda: now[0])
+    monkeypatch.setattr(db, "_TOUCH_LIVE_CACHE", {})
+    monkeypatch.setattr(db, "_TOUCH_LIVE_MIN_INTERVAL", 90.0)
+
+    db.touch_live_session(1)
+    now[0] += 89
+    db.touch_live_session(1)
+    assert calls == ["live_session_touch"]
+
+    now[0] += 1
+    db.touch_live_session(1)
+    assert calls == ["live_session_touch", "live_session_touch"]
+
+
+def test_touch_live_session_explicit_timestamp_bypasses_throttle(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "touch-live-session-explicit.sqlite3"
+    _create_session_schema(path)
+    setup = sqlite3.connect(path)
+    try:
+        setup.execute(
+            "INSERT INTO live_sessions (tiktok_username, start_time) VALUES (?, ?)",
+            ("sample_user", "2026-11-23 10:00:00"),
+        )
+        setup.commit()
+    finally:
+        setup.close()
+
+    calls = []
+
+    def fake_write_transaction(operation, timing_label=None):
+        connection = sqlite3.connect(path)
+        try:
+            operation(connection)
+            connection.commit()
+        finally:
+            connection.close()
+        calls.append(timing_label)
+
+    monkeypatch.setattr(db, "write_transaction", fake_write_transaction)
+    monkeypatch.setattr(db, "_TOUCH_LIVE_CACHE", {})
+    monkeypatch.setattr(db, "_TOUCH_LIVE_MIN_INTERVAL", 90.0)
+
+    db.touch_live_session(1, when="2026-11-23 10:01:00")
+    db.touch_live_session(1, when="2026-11-23 10:02:00")
+
+    assert calls == ["live_session_touch", "live_session_touch"]
