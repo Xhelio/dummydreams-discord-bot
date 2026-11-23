@@ -129,6 +129,7 @@ def test_start_live_session_closes_stale_session_and_creates_new_one(
     assert new_session[0] is None
 
 
+# Batch-path integration tests exercise the same read sequence used by Turso.
 class _BatchConnection:
     """SQLite-backed stand-in for Turso's one-request batch API."""
 
