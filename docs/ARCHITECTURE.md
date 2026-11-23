@@ -14,7 +14,7 @@ Measured from the repository's Python coverage artifacts on 2026-11-23:
 | `routes/admin.py` | 4,896 | 48 | 13.5% | Large route/template module; weak route coverage |
 | `db.py` | 5,795 | 164 | 38.1% | Multiple persistence domains behind one module |
 | `verification.py` | 157 | 4 | 88.0% | Improved by offline tests in QA-01 |
-| `routes/settings.py` |  (see source) | 16 | 50.9% | Improved by mocked route tests in QA-02 |
+| `routes/settings.py` | 751 | 16 | 50.9% | Improved by mocked route tests in QA-02 |
 
 Repository-wide line coverage was 28.29% after QA-01 and 28.98% in the QA-02 Python 3.13 PR artifact. These are line-coverage measurements, not proof of behavioral completeness.
 
