@@ -3,6 +3,22 @@ import asyncio
 import observer
 
 
+@pytest.mark.parametrize(
+    ("failures", "expected_seconds"),
+    [
+        (0, 30),
+        (1, 30),
+        (4, 30),
+        (5, 60),
+        (9, 60),
+        (10, 120),
+        (25, 120),
+    ],
+)
+def test_observer_client_initialization_retry_delay_is_bounded(failures, expected_seconds):
+    assert observer._observer_init_retry_delay(failures) == expected_seconds
+
+
 def _reset_priority_probe_state(monkeypatch):
     monkeypatch.setattr(
         observer,
