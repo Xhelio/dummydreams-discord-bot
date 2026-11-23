@@ -1,3 +1,4 @@
+import atexit
 import os
 import json
 import logging
@@ -185,6 +186,10 @@ def _schedule_setting_refresh(key: str):
 # SQLITE_BUSY ("stream was idle for too long"). Serialise writes in this process
 # and retry the transient failures with a fresh connection.
 _DB_WRITE_LOCK = threading.Lock()
+# Turso's serverless driver keeps a stream baton on the connection. Reuse one
+# write-only connection under _DB_WRITE_LOCK to avoid a remote close request
+# after every committed transaction. SQLite keeps fresh thread-affine handles.
+_DB_WRITE_CONNECTION = None
 # Approximate number of writers waiting after an immediate lock acquisition fails.
 _DB_WRITE_WAITERS = 0
 _DB_WRITE_WAITERS_LOCK = threading.Lock()
@@ -233,6 +238,11 @@ _TRANSIENT_DB_TOKENS = (
 
 def is_transient_db_error(exc) -> bool:
     text = f"{type(exc).__name__}: {exc}".lower()
+    # The Turso serverless protocol uses HTTP 404 for an expired/unknown
+    # stream baton. The driver resets the baton and the rejected request has
+    # not executed, so opening a fresh stream and retrying is safe.
+    if type(exc).__name__ == "ProtocolError" and "http status 404" in text:
+        return True
     return any(token in text for token in _TRANSIENT_DB_TOKENS)
 
 
@@ -244,6 +254,43 @@ def _execute_atomic_statement(conn, sql: str, params=()):
     return conn.execute(sql, params)
 
 
+def _get_write_connection():
+    """Return the serialized write connection and whether it is reusable."""
+    global _DB_WRITE_CONNECTION
+    if HAS_LIBSQL and TURSO_URL:
+        if _DB_WRITE_CONNECTION is None:
+            _DB_WRITE_CONNECTION = get_db_connection()
+        return _DB_WRITE_CONNECTION, True
+    return get_db_connection(), False
+
+
+def _discard_persistent_write_connection(conn) -> None:
+    """Forget a failed cached connection; the caller closes it in finally."""
+    global _DB_WRITE_CONNECTION
+    if _DB_WRITE_CONNECTION is conn:
+        _DB_WRITE_CONNECTION = None
+
+
+def _close_persistent_write_connection() -> None:
+    """Close the process-local Turso write stream during orderly shutdown."""
+    global _DB_WRITE_CONNECTION
+    if not _DB_WRITE_LOCK.acquire(timeout=5.0):
+        return
+    try:
+        conn = _DB_WRITE_CONNECTION
+        _DB_WRITE_CONNECTION = None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    finally:
+        _DB_WRITE_LOCK.release()
+
+
+atexit.register(_close_persistent_write_connection)
+
+
 def write_transaction(
     operation,
     attempts: int = 4,
@@ -252,9 +299,10 @@ def write_transaction(
 ):
     """Run one complete write transaction under the process-wide lock.
 
-    Connection creation, callback execution, commit, rollback, and close are
-    all covered by the retry boundary. The optional timing label records slow
-    lock/connection/operation/commit stages for selected hot paths.
+    Turso uses one process-local write connection because the driver closes a
+    remote stream with an extra HTTP request. The global lock serializes every
+    use; failed transactions discard the cached connection. SQLite still gets
+    a fresh connection per call to preserve thread affinity.
     """
     global _DB_WRITE_WAITERS
     try:
@@ -295,6 +343,7 @@ def write_transaction(
             )
         lock_acquired_at = time.perf_counter()
         conn = None
+        persistent_connection = False
         lock_released = False
 
         def _release_write_lock():
@@ -308,7 +357,7 @@ def write_transaction(
 
         try:
             connect_started = time.perf_counter()
-            conn = get_db_connection()
+            conn, persistent_connection = _get_write_connection()
             _log_stage("connect", time.perf_counter() - connect_started, attempt)
 
             operation_started = time.perf_counter()
@@ -318,8 +367,8 @@ def write_transaction(
             commit_started = time.perf_counter()
             conn.commit()
             _log_stage("commit", time.perf_counter() - commit_started, attempt)
-            # The transaction is durable now. Do not make other writers wait
-            # for the driver's HTTP stream-close cleanup request.
+            # The transaction is durable now. Keep the serialized Turso
+            # stream open for the next write; SQLite handles are closed below.
             _release_write_lock()
             return result
         except Exception as exc:
@@ -331,18 +380,23 @@ def write_transaction(
                     rollback_succeeded = True
                 except Exception:
                     pass
+            if persistent_connection:
+                # Never reuse a connection after an error, even when rollback
+                # succeeds; discard it and let the retry open a fresh stream.
+                _discard_persistent_write_connection(conn)
+                persistent_connection = False
             # A confirmed rollback also ends the critical section. If rollback
             # failed, keep the lock until close() can tear down the stream.
             if rollback_succeeded:
                 _release_write_lock()
         finally:
-            close_started = time.perf_counter()
-            if conn is not None:
+            if conn is not None and not persistent_connection:
+                close_started = time.perf_counter()
                 try:
                     conn.close()
                 except Exception:
                     pass
-            _log_stage("close", time.perf_counter() - close_started, attempt)
+                _log_stage("close", time.perf_counter() - close_started, attempt)
             _release_write_lock()
             _log_stage("transaction_total", time.perf_counter() - attempt_started, attempt)
 
