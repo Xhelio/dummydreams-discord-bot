@@ -90,7 +90,7 @@ def test_run_scenario_uses_allowlisted_command_and_secret_free_environment(monke
     assert response.get_json()["passed"] is True
     assert captured["argv"][-2:] == ["--scenario", "all"]
     assert captured["argv"][-3].endswith("qa_simulator.py")
-    assert captured["shell"] if "shell" in captured else True
+    assert "shell" not in captured
     assert captured["env"] == {
         "BOT_ENV": "test",
         "PYTHONPATH": str(qa.PROJECT_ROOT),
