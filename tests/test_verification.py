@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -79,8 +80,7 @@ def test_extract_bio_from_html(html, expected):
     assert verification._extract_bio_from_html(html) == expected
 
 
-@pytest.mark.asyncio
-async def test_async_fetch_tiktok_bio_returns_scraped_bio(monkeypatch):
+def test_async_fetch_tiktok_bio_returns_scraped_bio(monkeypatch):
     client = _mock_http(
         monkeypatch,
         response=FakeResponse(text='{"signature":"  hello  "}'),
@@ -93,37 +93,33 @@ async def test_async_fetch_tiktok_bio_returns_scraped_bio(monkeypatch):
     assert client.request[1] == verification.MOBILE_HEADERS
 
 
-@pytest.mark.asyncio
-async def test_async_fetch_tiktok_bio_uses_tiktoklive_after_non_200(monkeypatch):
+def test_async_fetch_tiktok_bio_uses_tiktoklive_after_non_200(monkeypatch):
     _mock_http(monkeypatch, response=FakeResponse(status_code=503))
     _mock_tiktoklive_fallback(
         monkeypatch,
         {"data": {"user": {"signature": "fallback bio"}}},
     )
 
-    assert await verification.async_fetch_tiktok_bio("@Creator") == "fallback bio"
+    assert asyncio.run(verification.async_fetch_tiktok_bio("@Creator")) == "fallback bio"
 
 
-@pytest.mark.asyncio
-async def test_async_fetch_tiktok_bio_uses_tiktoklive_after_http_exception(monkeypatch):
+def test_async_fetch_tiktok_bio_uses_tiktoklive_after_http_exception(monkeypatch):
     _mock_http(monkeypatch, error=RuntimeError("network unavailable"))
     _mock_tiktoklive_fallback(
         monkeypatch,
         {"data": {"user": {"bioDescription": "fallback description"}}},
     )
 
-    assert await verification.async_fetch_tiktok_bio("Creator") == "fallback description"
+    assert asyncio.run(verification.async_fetch_tiktok_bio("Creator")) == "fallback description"
 
 
-@pytest.mark.asyncio
-async def test_async_fetch_tiktok_bio_returns_empty_when_all_sources_fail(monkeypatch):
+def test_async_fetch_tiktok_bio_returns_empty_when_all_sources_fail(monkeypatch):
     _mock_http(monkeypatch, response=FakeResponse(status_code=403))
     _mock_tiktoklive_fallback(monkeypatch, error=RuntimeError("fallback unavailable"))
 
-    assert await verification.async_fetch_tiktok_bio("@Creator") == ""
+    assert asyncio.run(verification.async_fetch_tiktok_bio("@Creator")) == ""
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("bio", "expected_code", "expected"),
     [
@@ -132,28 +128,26 @@ async def test_async_fetch_tiktok_bio_returns_empty_when_all_sources_fail(monkey
         ("", "ABC-123", (False, "(Bio not found or profile is private)")),
     ],
 )
-async def test_async_verify_tiktok_bio(monkeypatch, bio, expected_code, expected):
+def test_async_verify_tiktok_bio(monkeypatch, bio, expected_code, expected):
     async def fake_fetch(username):
         assert username == "@Creator"
         return bio
 
     monkeypatch.setattr(verification, "async_fetch_tiktok_bio", fake_fetch)
 
-    assert await verification.async_verify_tiktok_bio("@Creator", expected_code) == expected
+    assert asyncio.run(verification.async_verify_tiktok_bio("@Creator", expected_code)) == expected
 
 
-@pytest.mark.asyncio
-async def test_async_fetch_display_name_prefers_nickname(monkeypatch):
+def test_async_fetch_display_name_prefers_nickname(monkeypatch):
     client = _mock_http(
         monkeypatch,
         response=FakeResponse(text='{"nickname":"  Creator Name  ","uniqueId":"creator"}'),
     )
 
-    assert await verification.async_fetch_tiktok_display_name("@Creator") == "Creator Name"
+    assert asyncio.run(verification.async_fetch_tiktok_display_name("@Creator")) == "Creator Name"
     assert client.request[0].startswith("https://www.tiktok.com/@creator?")
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("html", "expected"),
     [
@@ -161,40 +155,37 @@ async def test_async_fetch_display_name_prefers_nickname(monkeypatch):
         ("<TITLE>Creator Name | tiktok</TITLE>", "Creator Name"),
     ],
 )
-async def test_async_fetch_display_name_uses_title_fallback(monkeypatch, html, expected):
+def test_async_fetch_display_name_uses_title_fallback(monkeypatch, html, expected):
     _mock_http(monkeypatch, response=FakeResponse(text=html))
 
-    assert await verification.async_fetch_tiktok_display_name("Creator") == expected
+    assert asyncio.run(verification.async_fetch_tiktok_display_name("Creator")) == expected
 
 
-@pytest.mark.asyncio
-async def test_async_fetch_display_name_uses_tiktoklive_fallback(monkeypatch):
+def test_async_fetch_display_name_uses_tiktoklive_fallback(monkeypatch):
     _mock_http(monkeypatch, response=FakeResponse(text="<html>profile blocked</html>"))
     _mock_tiktoklive_fallback(
         monkeypatch,
         {"data": {"user": {"nickname": "Fallback Name"}}},
     )
 
-    assert await verification.async_fetch_tiktok_display_name("@Creator") == "Fallback Name"
+    assert asyncio.run(verification.async_fetch_tiktok_display_name("@Creator")) == "Fallback Name"
 
 
-@pytest.mark.asyncio
-async def test_async_fetch_display_name_returns_normalized_username_when_unavailable(monkeypatch):
+def test_async_fetch_display_name_returns_normalized_username_when_unavailable(monkeypatch):
     _mock_http(monkeypatch, response=FakeResponse(status_code=404))
     _mock_tiktoklive_fallback(monkeypatch, data={"data": {"user": {}}})
 
-    assert await verification.async_fetch_tiktok_display_name("@Creator") == "creator"
+    assert asyncio.run(verification.async_fetch_tiktok_display_name("@Creator")) == "creator"
 
 
-@pytest.mark.asyncio
-async def test_async_fetch_display_name_uses_unique_id_from_tiktoklive(monkeypatch):
+def test_async_fetch_display_name_uses_unique_id_from_tiktoklive(monkeypatch):
     _mock_http(monkeypatch, response=FakeResponse(text="<html>blocked</html>"))
     _mock_tiktoklive_fallback(
         monkeypatch,
         {"data": {"user": {"uniqueId": "fallback-id"}}},
     )
 
-    assert await verification.async_fetch_tiktok_display_name("Creator") == "fallback-id"
+    assert asyncio.run(verification.async_fetch_tiktok_display_name("Creator")) == "fallback-id"
 
 
 def test_fetch_display_name_sync_wrapper(monkeypatch):
