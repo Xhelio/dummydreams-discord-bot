@@ -162,6 +162,10 @@ def _handle_unexpected_error(error):
 @app.before_request
 def _protect_admin_routes():
     path = request.path or ""
+    if path == "/admin/qa" or path.startswith("/admin/qa/"):
+        # The QA blueprint enforces its own dedicated staging-only credentials.
+        # Do not let shared admin credentials (possibly production-shared) grant access.
+        return None
     if not (path == "/admin" or path.startswith("/admin/")):
         return None
 
