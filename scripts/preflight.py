@@ -59,29 +59,37 @@ def main() -> int:
     if turso_url:
         check(turso_url.startswith("libsql://") or turso_url.startswith("https://"), "TURSO_DATABASE_URL has a valid scheme")
         check(bool(turso_token), "TURSO_AUTH_TOKEN is set")
+        driver_available = False
         try:
-            import libsql_experimental  # noqa: F401
+            import turso_serverless  # noqa: F401
 
-            print(f"[{OK}]   libsql_experimental importable")
+            driver_available = True
+            print(f"[{OK}]   turso_serverless importable")
         except Exception as exc:
-            print(f"[{FAIL}]   libsql_experimental import failed: {exc}")
-            problems.append("libsql_experimental not importable (bot would fall back to local SQLite)")
-        try:
-            from db import get_db_connection
+            print(f"[{FAIL}]   turso_serverless import failed: {exc}")
+            problems.append("turso_serverless not importable (application database driver unavailable)")
 
-            conn = get_db_connection()
+        if driver_available and turso_token:
             try:
-                conn.execute("SELECT 1")
-                tables = conn.execute(
-                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-                ).fetchone()[0]
-            finally:
-                conn.close()
-            print(f"[{OK}]   database reachable ({tables} tables)")
-            check(tables >= 13, "expected schema present (>=13 tables)", blocking=False)
-        except Exception as exc:
-            print(f"[{FAIL}]   database connection failed: {exc}")
-            problems.append("database not reachable")
+                import db
+
+                if not db.HAS_LIBSQL:
+                    raise RuntimeError("db.py did not initialize the Turso driver")
+                conn = db.get_db_connection()
+                try:
+                    conn.execute("SELECT 1")
+                    tables = conn.execute(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                    ).fetchone()[0]
+                finally:
+                    conn.close()
+                print(f"[{OK}]   database reachable ({tables} tables)")
+                check(tables >= 13, "expected schema present (>=13 tables)", blocking=False)
+            except Exception as exc:
+                print(f"[{FAIL}]   database connection failed: {exc}")
+                problems.append("database not reachable")
+        else:
+            print(f"[WARN]   database connectivity check skipped (driver or token unavailable)")
     else:
         db_path = env("LOCAL_DB_PATH") or "database.db"
         print(f"[{WARN}]   TURSO_DATABASE_URL not set -> local SQLite fallback: {db_path}")
