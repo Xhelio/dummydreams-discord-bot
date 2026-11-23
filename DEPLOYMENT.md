@@ -99,8 +99,10 @@ prints the environment and database host so you can confirm.
 
 ## 3. Render deployment (blueprint)
 
-`render.yaml` in the repo root defines both services. Push it to `main`,
-then in Render: **New + → Blueprint → select this repo → Apply**.
+`render.yaml` in the repo root defines both services. The `staging` branch
+is the pre-production deployment target; `main` remains the stable target.
+Apply the reviewed Blueprint plan in Render after confirming the existing
+service mappings and environment-variable requirements.
 
 What the blueprint creates:
 
@@ -123,8 +125,8 @@ Important:
   fails, add `cmake`/`build-essential` to the build command or pin a
   version with a prebuilt wheel.
 - Auto-deploy is on: pushing to `staging` updates only the test service;
-  pushing/merging to `main` updates only stable. Keep staging isolated and
-  promote only a validated candidate to `main`.
+  pushing/merging to `main` updates only stable. Develop and validate changes
+  on `staging`, then promote the validated staging commit to `main`.
 
 Health check:
 
@@ -272,7 +274,8 @@ both share `database.db`.
 5. In the test server, run the same admin commands to validate changes.
 
 Because the token, database, and server are separate, changes made while
-testing cannot affect the stable deployment.
+testing cannot affect the stable deployment. Keep `staging` as the shared
+integration branch; do not reuse the `test/*` topic-branch namespace for it.
 
 ---
 
