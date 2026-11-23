@@ -145,6 +145,16 @@ def _extract_comment_username(event) -> str:
     return ""
 
 
+def _observer_init_retry_delay(failures: int) -> int:
+    """Return bounded retry delay for repeated TikTok client initialization failures."""
+    count = max(1, int(failures or 0))
+    if count >= 10:
+        return 120
+    if count >= 5:
+        return 60
+    return 30
+
+
 def _exception_chain_types(exc: BaseException, limit: int = 5) -> str:
     """Describe exception types across chained causes without exposing payloads."""
     types = []
@@ -1155,10 +1165,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             raise
         except Exception as init_error:
             consecutive_failures = min(consecutive_failures + 1, 10)
-            init_wait_seconds = (
-                30 if consecutive_failures < 5
-                else (60 if consecutive_failures < 10 else 120)
-            )
+            init_wait_seconds = _observer_init_retry_delay(consecutive_failures)
             init_error_detail = (
                 f"{type(init_error).__name__}: {init_error} "
                 f"[phase=client_initialization]"
