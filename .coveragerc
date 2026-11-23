@@ -1,0 +1,9 @@
+[run]
+omit =
+    tests/*
+    _test_features.py
+    artifacts/*
+
+[report]
+show_missing = True
+skip_covered = False
