@@ -1,4 +1,5 @@
 import threading
+from types import SimpleNamespace
 
 import db
 
@@ -7,7 +8,7 @@ def _reset_health_state(monkeypatch, *, ok=True, at=100.0, refreshing=False):
     monkeypatch.setattr(db, "_DB_HEALTH_CACHE", {"ok": ok, "at": at})
     monkeypatch.setattr(db, "_DB_HEALTH_LOCK", threading.Lock())
     monkeypatch.setattr(db, "_DB_HEALTH_REFRESHING", refreshing)
-    monkeypatch.setattr(db.time, "time", lambda: 105.0)
+    monkeypatch.setattr(db, "time", SimpleNamespace(time=lambda: 105.0))
 
 
 def test_database_health_returns_fresh_cached_result(monkeypatch):
