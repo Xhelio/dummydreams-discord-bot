@@ -27,7 +27,7 @@ class _FakeConnection:
         self.close_count += 1
 
 
-class ProtocolError(Exception):
+class OperationalError(Exception):
     pass
 
 
@@ -73,7 +73,7 @@ def test_expired_turso_stream_404_discards_connection_and_retries(monkeypatch):
         nonlocal calls
         calls += 1
         if calls == 1:
-            raise ProtocolError("HTTP status 404")
+            raise OperationalError("HTTP status 404")
         return "recovered"
 
     result = db.write_transaction(operation, attempts=2, base_delay=0)
