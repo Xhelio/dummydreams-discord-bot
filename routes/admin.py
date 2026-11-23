@@ -89,6 +89,13 @@ def _fetch_live_thumbnail_background(username):
             "error": type(exc).__name__,
         }
     finally:
+        # A request can finish after the observer has already marked the
+        # account offline. Do not resurrect an old preview in that case.
+        try:
+            if username not in get_live_snapshot():
+                state = {"thumbnail_url": None, "status": "offline", "checked_at": time.time()}
+        except Exception:
+            pass
         with _LIVE_THUMBNAIL_LOCK:
             _LIVE_THUMBNAIL_CACHE[username] = state
             _LIVE_THUMBNAIL_INFLIGHT.discard(username)
