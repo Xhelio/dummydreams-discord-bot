@@ -1,3 +1,5 @@
+import pytest
+
 import db
 
 
@@ -35,6 +37,10 @@ def test_write_transaction_emits_slow_stage_timings(monkeypatch, capsys):
     assert "operation=test_gift stage=operation" in output
     assert "operation=test_gift stage=commit" in output
     assert "operation=test_gift stage=transaction_total" in output
+    assert "operation=test_gift stage=lock_hold" in output
+    assert "operation=test_gift stage=lock_wait" in output
+    assert "queue_depth=1" in output
+    assert db._DB_WRITE_WAITERS == 0
 
 
 def test_write_transaction_without_timing_label_remains_quiet(monkeypatch, capsys):
@@ -53,3 +59,21 @@ def test_db_init_stage_timing_reports_elapsed(monkeypatch, capsys):
 
     assert ended == 2.75
     assert "[DB Init Timing] stage=schema elapsed=0.750s" in capsys.readouterr().out
+
+
+class _BusyLock:
+    def acquire(self, timeout=None):
+        return False
+
+    def release(self):
+        raise AssertionError("release must not be called when acquire fails")
+
+
+def test_write_transaction_clears_waiter_count_after_lock_timeout(monkeypatch):
+    monkeypatch.setattr(db, "_DB_WRITE_LOCK", _BusyLock())
+    monkeypatch.setattr(db, "_DB_WRITE_WAITERS", 0)
+
+    with pytest.raises(TimeoutError, match="Database write lock busy"):
+        db.write_transaction(lambda _conn: None, timing_label="test_timeout")
+
+    assert db._DB_WRITE_WAITERS == 0
