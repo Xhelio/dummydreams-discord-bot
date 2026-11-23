@@ -43,6 +43,8 @@ _CACHE_TTL_SECONDS = 300
 _CACHE_MAX_ITEMS = 256
 _URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
 _CACHE: dict[str, tuple[float, "TikTokPreview | None"]] = {}
+_LIVE_CACHE_TTL_SECONDS = 60
+_LIVE_CACHE: dict[str, tuple[float, "TikTokLivePreview | None"]] = {}
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,39 @@ class TikTokPreview:
     author_name: str | None = None
     author_url: str | None = None
     thumbnail_url: str | None = None
+
+
+@dataclass(frozen=True)
+class TikTokLivePreview:
+    url: str
+    username: str
+    display_name: str | None = None
+    title: str | None = None
+    viewer_count: int | None = None
+    thumbnail_url: str | None = None
+
+
+class _LiveStateParser(HTMLParser):
+    """Extract only TikTok's public SIGI_STATE JSON script."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._in_state = False
+        self.state_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag.lower() != "script":
+            return
+        values = {str(key).lower(): value or "" for key, value in attrs}
+        self._in_state = values.get("id") == "SIGI_STATE"
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "script":
+            self._in_state = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_state:
+            self.state_parts.append(data)
 
 
 class _MetaParser(HTMLParser):
@@ -245,6 +280,167 @@ async def fetch_tiktok_preview(url: str) -> TikTokPreview | None:
         _CACHE.pop(oldest_key, None)
     _CACHE[normalized] = (time.monotonic() + _CACHE_TTL_SECONDS, preview)
     return preview
+
+
+def extract_tiktok_live_urls(content: str) -> list[str]:
+    """Extract canonical TikTok LIVE URLs; short links are intentionally excluded."""
+    found: list[str] = []
+    seen: set[str] = set()
+    for match in _URL_RE.findall(content or ""):
+        normalized = normalize_tiktok_url(match)
+        if not normalized:
+            continue
+        path = urlsplit(normalized).path
+        if not re.fullmatch(r"/@[A-Za-z0-9._-]+/live/?", path, re.IGNORECASE):
+            continue
+        if normalized not in seen:
+            seen.add(normalized)
+            found.append(normalized)
+    return found
+
+
+def _parse_live_page_metadata(body: str, page_url: str) -> TikTokLivePreview | None:
+    """Parse a public TikTok LIVE room; only explicit status=2 is considered live."""
+    parser = _LiveStateParser()
+    parser.feed(body)
+    if not parser.state_parts:
+        return None
+    try:
+        state = json.loads("".join(parser.state_parts))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(state, dict):
+        return None
+
+    live_section = state.get("LiveRoom")
+    if not isinstance(live_section, dict):
+        return None
+    user_info = live_section.get("liveRoomUserInfo")
+    if not isinstance(user_info, dict):
+        return None
+    user = user_info.get("user")
+    room = user_info.get("liveRoom") or live_section.get("liveRoom")
+    if not isinstance(user, dict) or not isinstance(room, dict):
+        return None
+
+    try:
+        status = int(room.get("status"))
+    except (TypeError, ValueError):
+        return None
+    if status != 2:
+        return None
+
+    path_match = re.match(r"/@([^/]+)/live", urlsplit(page_url).path, re.IGNORECASE)
+    username = str(user.get("uniqueId") or (path_match.group(1) if path_match else "")).strip()
+    if not username:
+        return None
+
+    cover = room.get("coverUrl") or room.get("squareCoverImg") or room.get("cover")
+    if isinstance(cover, dict):
+        cover = cover.get("url_list") or cover.get("urlList") or cover.get("url")
+    if isinstance(cover, (list, tuple)):
+        cover = next((item for item in cover if isinstance(item, str) and item), None)
+    thumbnail = _safe_thumbnail_url(str(cover) if cover else None, page_url)
+
+    stats = room.get("liveRoomStats")
+    if not isinstance(stats, dict):
+        stats = {}
+    viewer_value = stats.get("userCount", stats.get("user_count", stats.get("totalUser")))
+    try:
+        viewer_count = max(0, int(viewer_value)) if viewer_value is not None else None
+    except (TypeError, ValueError):
+        viewer_count = None
+
+    display_name = str(user.get("nickname") or user.get("displayName") or "").strip() or None
+    title = str(room.get("title") or "").strip() or None
+    return TikTokLivePreview(
+        url=page_url,
+        username=username,
+        display_name=display_name,
+        title=title,
+        viewer_count=viewer_count,
+        thumbnail_url=thumbnail,
+    )
+
+
+async def fetch_tiktok_live_preview(url: str) -> TikTokLivePreview | None:
+    """Fetch bounded public LIVE page metadata; never infers LIVE from profile/avatar data."""
+    normalized = normalize_tiktok_url(url)
+    if not normalized or not re.fullmatch(
+        r"/@[A-Za-z0-9._-]+/live/?", urlsplit(normalized).path, re.IGNORECASE
+    ):
+        return None
+
+    now = time.monotonic()
+    cached = _LIVE_CACHE.get(normalized)
+    if cached and cached[0] > now:
+        return cached[1]
+    if cached:
+        _LIVE_CACHE.pop(normalized, None)
+
+    timeout = aiohttp.ClientTimeout(total=9, connect=3, sock_read=5)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; DummyDreamsPreview/1.0)",
+        "Accept": "text/html,application/json;q=0.9,*/*;q=0.5",
+    }
+    preview: TikTokLivePreview | None = None
+    try:
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            current_url = normalized
+            for _ in range(_MAX_REDIRECTS + 1):
+                if not _is_allowed_page_url(current_url):
+                    return None
+                async with session.get(current_url, allow_redirects=False) as response:
+                    if response.status in {301, 302, 303, 307, 308}:
+                        location = response.headers.get("Location")
+                        if not location:
+                            break
+                        current_url = urljoin(current_url, location)
+                        continue
+                    if response.status != 200:
+                        break
+                    content_type = response.headers.get("Content-Type", "").lower()
+                    if "html" not in content_type:
+                        break
+                    raw = await _read_limited(response)
+                    if raw is None:
+                        break
+                    final_url = str(response.url)
+                    if not _is_allowed_page_url(final_url):
+                        break
+                    preview = _parse_live_page_metadata(
+                        raw.decode("utf-8", errors="replace"), final_url
+                    )
+                    break
+    except (aiohttp.ClientError, asyncio.TimeoutError, UnicodeError) as exc:
+        log.debug("TikTok LIVE preview unavailable for %s: %s", normalized, type(exc).__name__)
+    except Exception:
+        log.exception("Unexpected TikTok LIVE preview failure for %s", normalized)
+
+    if len(_LIVE_CACHE) >= _CACHE_MAX_ITEMS:
+        oldest_key = min(_LIVE_CACHE, key=lambda key: _LIVE_CACHE[key][0])
+        _LIVE_CACHE.pop(oldest_key, None)
+    _LIVE_CACHE[normalized] = (time.monotonic() + _LIVE_CACHE_TTL_SECONDS, preview)
+    return preview
+
+
+def build_tiktok_live_embed(preview: TikTokLivePreview) -> discord.Embed:
+    """Build a static LIVE status card with a room cover when TikTok exposes one."""
+    title = (preview.title or f"@{preview.username} sedang LIVE")[:256]
+    details = ["🔴 **SEDANG LIVE**"]
+    if preview.viewer_count is not None:
+        details.append(f"👀 {preview.viewer_count:,} penonton")
+    embed = discord.Embed(
+        title=title,
+        url=preview.url,
+        description="\n".join(details),
+        color=discord.Color.red(),
+    )
+    embed.set_author(name=(preview.display_name or preview.username)[:256])
+    if preview.thumbnail_url:
+        embed.set_image(url=preview.thumbnail_url)
+    embed.set_footer(text="TikTok LIVE • Public room preview")
+    return embed
 
 
 def build_tiktok_embed(preview: TikTokPreview) -> discord.Embed:
