@@ -241,7 +241,7 @@ def is_transient_db_error(exc) -> bool:
     # The Turso serverless protocol uses HTTP 404 for an expired/unknown
     # stream baton. The driver resets the baton and the rejected request has
     # not executed, so opening a fresh stream and retrying is safe.
-    if type(exc).__name__ == "ProtocolError" and "http status 404" in text:
+    if HAS_LIBSQL and TURSO_URL and "http status 404" in text:
         return True
     return any(token in text for token in _TRANSIENT_DB_TOKENS)
 
