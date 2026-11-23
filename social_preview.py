@@ -43,7 +43,7 @@ _CACHE_TTL_SECONDS = 300
 _CACHE_MAX_ITEMS = 256
 _URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
 _CACHE: dict[str, tuple[float, "TikTokPreview | None"]] = {}
-_LIVE_CACHE_TTL_SECONDS = 60
+_LIVE_CACHE_TTL_SECONDS = 45
 _LIVE_CACHE: dict[str, tuple[float, "TikTokLivePreview | None"]] = {}
 
 
