@@ -57,7 +57,9 @@ ROLES: tuple[AgentRole, ...] = (
 
 
 def select_roles(names: Iterable[str] | None = None) -> list[AgentRole]:
-    requested = list(names or [role.key for role in ROLES])
+    requested = list(names) if names is not None else [role.key for role in ROLES]
+    if not requested:
+        raise ValueError("Select at least one agent.")
     known = {role.key: role for role in ROLES}
     unknown = sorted(set(requested) - set(known))
     if unknown:
