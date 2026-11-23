@@ -2933,6 +2933,16 @@ async def on_message(message):
             if tiktok_urls:
                 preview = await fetch_tiktok_preview(tiktok_urls[0])
                 if preview is not None:
+                    # Avoid showing Discord's generic link card as well when the
+                    # bot already has permission to suppress embeds in this channel.
+                    guild = getattr(message, "guild", None)
+                    me = getattr(guild, "me", None) if guild else None
+                    if me is not None:
+                        try:
+                            if message.channel.permissions_for(me).manage_messages:
+                                await message.edit(suppress=True)
+                        except discord.HTTPException:
+                            log.debug("[Social Preview] Could not suppress native link embed.")
                     await message.reply(
                         embed=build_tiktok_embed(preview),
                         mention_author=False,
