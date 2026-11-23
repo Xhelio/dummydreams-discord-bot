@@ -439,32 +439,50 @@ async def fetch_tiktok_live_preview(url: str) -> TikTokLivePreview | None:
         "Accept": "text/html,application/json;q=0.9,*/*;q=0.5",
     }
     preview: TikTokLivePreview | None = None
+    page_reason = "not_attempted"
+    api_reason = "not_attempted"
+    username_match = re.match(
+        r"/@([^/]+)/live", urlsplit(normalized).path, re.IGNORECASE
+    )
+    username = username_match.group(1) if username_match else "unknown"
     try:
         async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
             current_url = normalized
             for _ in range(_MAX_REDIRECTS + 1):
                 if not _is_allowed_page_url(current_url):
-                    return None
+                    page_reason = "redirect_rejected"
+                    break
                 async with session.get(current_url, allow_redirects=False) as response:
                     if response.status in {301, 302, 303, 307, 308}:
                         location = response.headers.get("Location")
                         if not location:
+                            page_reason = "redirect_without_location"
                             break
                         current_url = urljoin(current_url, location)
+                        page_reason = "redirect_limit_or_pending"
                         continue
                     if response.status != 200:
+                        page_reason = f"http_{response.status}"
                         break
                     content_type = response.headers.get("Content-Type", "").lower()
                     if "html" not in content_type:
+                        page_reason = "non_html_response"
                         break
                     raw = await _read_limited(response)
                     if raw is None:
+                        page_reason = "response_too_large"
                         break
                     final_url = str(response.url)
                     if not _is_allowed_page_url(final_url):
+                        page_reason = "final_url_rejected"
                         break
                     preview = _parse_live_page_metadata(
                         raw.decode("utf-8", errors="replace"), final_url
+                    )
+                    page_reason = (
+                        "cover_found" if preview and preview.thumbnail_url
+                        else "live_room_without_trusted_cover" if preview
+                        else "live_room_not_found_or_not_live"
                     )
                     break
 
@@ -472,14 +490,10 @@ async def fetch_tiktok_live_preview(url: str) -> TikTokLivePreview | None:
             # profile avatars. Use it when the page state is blocked, incomplete,
             # or has no room cover; never use user.avatar as a thumbnail.
             if preview is None or not preview.thumbnail_url:
-                username_match = re.match(
-                    r"/@([^/]+)/live", urlsplit(normalized).path, re.IGNORECASE
-                )
-                username = username_match.group(1) if username_match else ""
                 api_url = "https://www.tiktok.com/api-live/user/room/?" + urlencode(
                     {"uniqueId": username, "sourceType": "54"}
                 )
-                if username and _is_allowed_page_url(api_url):
+                if username != "unknown" and _is_allowed_page_url(api_url):
                     async with session.get(
                         api_url,
                         allow_redirects=False,
@@ -487,26 +501,44 @@ async def fetch_tiktok_live_preview(url: str) -> TikTokLivePreview | None:
                     ) as api_response:
                         if api_response.status == 200:
                             raw = await _read_limited(api_response)
-                            if raw is not None:
+                            if raw is None:
+                                api_reason = "response_too_large"
+                            else:
                                 try:
                                     payload = json.loads(raw.decode("utf-8", errors="replace"))
                                 except (TypeError, ValueError):
                                     payload = None
+                                    api_reason = "invalid_json"
                                 api_preview = _parse_live_room_payload(payload, normalized)
+                                if api_preview is None:
+                                    if api_reason == "not_attempted":
+                                        api_reason = "room_not_live_or_unrecognized_payload"
+                                elif api_preview.thumbnail_url:
+                                    api_reason = "cover_found"
+                                else:
+                                    api_reason = "live_room_without_trusted_cover"
                                 if api_preview and (
                                     preview is None or api_preview.thumbnail_url
                                 ):
                                     preview = api_preview
                         else:
-                            log.debug(
-                                "TikTok LIVE room-info fallback returned HTTP %s for @%s",
-                                api_response.status,
-                                username,
-                            )
+                            api_reason = f"http_{api_response.status}"
+                else:
+                    api_reason = "username_unavailable"
+
     except (aiohttp.ClientError, asyncio.TimeoutError, UnicodeError) as exc:
-        log.debug("TikTok LIVE preview unavailable for %s: %s", normalized, type(exc).__name__)
-    except Exception:
-        log.exception("Unexpected TikTok LIVE preview failure for %s", normalized)
+        page_reason = f"request_error_{type(exc).__name__}"
+    except Exception as exc:
+        page_reason = f"unexpected_error_{type(exc).__name__}"
+        log.exception("Unexpected TikTok LIVE preview failure for @%s", username)
+
+    if preview is None or not preview.thumbnail_url:
+        log.info(
+            "TikTok LIVE thumbnail unavailable for @%s (page=%s, room_api=%s)",
+            username,
+            page_reason,
+            api_reason,
+        )
 
     if len(_LIVE_CACHE) >= _CACHE_MAX_ITEMS:
         oldest_key = min(_LIVE_CACHE, key=lambda key: _LIVE_CACHE[key][0])
