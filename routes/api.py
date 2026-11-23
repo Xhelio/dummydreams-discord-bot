@@ -126,6 +126,8 @@ def handle_heartbeat():
         return jsonify({"status": "error", "message": "JSON object payload required"}), 400
 
     username_value = data.get("username")
+    if username_value is None:
+        return jsonify({"status": "error", "message": "Missing username"}), 400
     if not isinstance(username_value, str):
         return jsonify({"status": "error", "message": "username must be a string"}), 400
     username = username_value.strip().lower().lstrip("@")
