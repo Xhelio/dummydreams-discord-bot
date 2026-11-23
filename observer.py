@@ -1146,7 +1146,57 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         attempts_total += 1
         attempts_since_success += 1
         # See probe_room_live: TLS/CA setup must not run on the event loop.
-        client = await asyncio.to_thread(TikTokLiveClient, unique_id=username_clean)
+        # Client construction can fail before the websocket-cycle try/except below;
+        # contain that failure here so one transient init error does not terminate
+        # this account's observer task and defer recovery to the supervisor.
+        try:
+            client = await asyncio.to_thread(TikTokLiveClient, unique_id=username_clean)
+        except asyncio.CancelledError:
+            raise
+        except Exception as init_error:
+            consecutive_failures = min(consecutive_failures + 1, 10)
+            init_wait_seconds = (
+                30 if consecutive_failures < 5
+                else (60 if consecutive_failures < 10 else 120)
+            )
+            init_error_detail = (
+                f"{type(init_error).__name__}: {init_error} "
+                f"[phase=client_initialization]"
+            )
+            runtime_status.update_observer_diag(
+                username_clean,
+                status="client_init_error",
+                consecutive_failures=consecutive_failures,
+                attempts_total=attempts_total,
+                attempts_since_success=attempts_since_success,
+                wait_seconds=init_wait_seconds,
+                last_error=init_error_detail[:300],
+                rate_limited=False,
+                retry_at=None,
+                limit_progress=_limit_progress(
+                    "client_init_error", consecutive_failures, rl_strikes_val, False
+                ),
+            )
+            print(
+                f"[{username_clean}] TikTok client initialization failed "
+                f"(failures={consecutive_failures}); retrying in "
+                f"{init_wait_seconds}s: {init_error_detail}"
+            )
+            try:
+                log_activity_event(
+                    "error",
+                    f"[Debug @{username_clean}] TikTok client initialization failed "
+                    f"(failures={consecutive_failures}); retrying in "
+                    f"{init_wait_seconds}s: {init_error_detail}",
+                    username_clean,
+                )
+            except Exception:
+                pass
+            for _ in range(init_wait_seconds):
+                if _consume_reconnect_request(username_clean):
+                    break
+                await asyncio.sleep(1)
+            continue
         connected_this_cycle = False
         reconnect_state = {"triggered": False}
         with _ACTIVE_CLIENTS_LOCK:
