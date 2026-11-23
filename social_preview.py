@@ -433,7 +433,7 @@ def build_tiktok_live_embed(preview: TikTokLivePreview) -> discord.Embed:
     embed = discord.Embed(
         title=title,
         url=preview.url,
-        description="\\n".join(details),
+        description="\n".join(details),
         color=discord.Color.red(),
     )
     embed.set_author(name=(preview.display_name or preview.username)[:256])
