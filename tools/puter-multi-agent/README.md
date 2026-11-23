@@ -13,7 +13,7 @@ This is a local, browser-based, seven-role repository analysis orchestrator powe
 ## Deliberate safety boundaries
 - Read-only folder permission; no file writes, shell, subprocesses, Git operations, network access to the repository, deployment, or production credentials.
 - Excludes .git, dependency/virtualenv/cache/build folders, .env files, secrets/credentials/tokens/private keys, database files, logs, and unsupported file types.
-- Only files up to 100 KB are indexed/read; at most 500 eligible files are indexed.
+- Only files up to 100 KB are indexed/read; at most 500 eligible files and 10 MB total are indexed. Text search has a shared 20 MB read budget per folder selection.
 - Repository contents that agents read are sent to Puter AI. Do not select workspaces containing secrets, personal data, or confidential material unless you have reviewed and accepted the provider's data handling terms.
 - The user-pays model is not a guarantee of unlimited free usage. Account policy, availability, and possible usage charges/limits apply.
 - This tool is an analysis orchestrator, not a full autonomous coding agent.
