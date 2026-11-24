@@ -339,7 +339,7 @@ def test_euler_webhook_rejects_oversized_chunked_body_without_content_length():
             data=oversized_body,
             content_type="application/octet-stream",
             environ_overrides={
-                "CONTENT_LENGTH": "",
+                "CONTENT_LENGTH": None,
                 "wsgi.input_terminated": True,
             },
         )
