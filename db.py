@@ -2086,6 +2086,7 @@ def reset_live_state(clear_logs: bool = True):
         conn.execute("DELETE FROM active_live_announcements")
         conn.execute("DELETE FROM live_sessions")
         conn.execute("DELETE FROM bot_settings WHERE key LIKE 'current_host_%'")
+        conn.execute("DELETE FROM bot_settings WHERE key LIKE 'last_live_intro_%'")
         conn.commit()
     finally:
         conn.close()
