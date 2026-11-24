@@ -54,6 +54,17 @@ def _limit_euler_webhook_body():
             "error": "Webhook request body exceeds maximum size",
             "max_bytes": MAX_EULER_WEBHOOK_BODY_BYTES,
         }), 413
+
+    # Force a bounded read before authentication or route logic can return
+    # early. This also enforces the limit when Content-Length is unavailable.
+    try:
+        request.get_data(cache=True)
+    except RequestEntityTooLarge:
+        return jsonify({
+            "ok": False,
+            "error": "Webhook request body exceeds maximum size",
+            "max_bytes": MAX_EULER_WEBHOOK_BODY_BYTES,
+        }), 413
     return None
 
 
