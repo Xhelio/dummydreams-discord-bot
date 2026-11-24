@@ -4,7 +4,9 @@ This extension adds explicit provider routing to the read-only Python orchestrat
 - **Ollama local** handles the default five routine specialist roles.
 - **Puter cloud** handles Architect and QA/Security by default.
 - Each provider has an independent concurrency cap (both default to 1).
-- Routing can be inspected with `--dry-run` before any network request.
+- A hard cap of **two Puter calls per run** is enforced by default; the run fails closed if routing exceeds it. Use `--max-cloud-calls 0` for local-only safety.
+- Task prompts are capped at 12,000 characters by default to reduce accidental oversized submissions.
+- Routing and budgets can be inspected with `--dry-run` before any network request.
 
 ## Safety boundary
 This remains analysis-only. It does not read repository files, write patches, execute shell commands, create Git branches/PRs, access staging/production, or deploy. Model output is untrusted advice. Do not send secrets, private user data, database records, or sensitive production logs.
@@ -38,7 +40,7 @@ py tools/puter-agent-orchestrator/hybrid_orchestrator.py --task "Audit staging h
 Then test only two agents:
 
 ```powershell
-py tools/puter-agent-orchestrator/hybrid_orchestrator.py --task "Review staging health-check risks; do not assume repository details." --agents core,qa --provider hybrid --cloud-agents qa --cloud-concurrency 1 --local-concurrency 1
+py tools/puter-agent-orchestrator/hybrid_orchestrator.py --task "Review staging health-check risks; do not assume repository details." --agents core,qa --provider hybrid --cloud-agents qa --cloud-concurrency 1 --local-concurrency 1 --max-cloud-calls 1
 ```
 
 Run all seven only after the smoke test succeeds:
@@ -47,7 +49,7 @@ Run all seven only after the smoke test succeeds:
 py tools/puter-agent-orchestrator/hybrid_orchestrator.py --task "Review the current architecture and list prioritized risks." --provider hybrid --output reports/hybrid-review.json
 ```
 
-Use `--provider ollama` for fully local operation or `--provider puter` for cloud-only operation. Configure `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, and `PUTER_MODEL` as needed.
+Use `--provider ollama` for fully local operation or `--provider puter` for cloud-only operation. Configure `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, and `PUTER_MODEL` as needed. `--max-cloud-calls` is a hard per-run request cap (default 2); the runner refuses to send cloud requests above the cap. `--max-task-chars` defaults to 12,000.
 
 ## Validation gates
 1. Run the existing offline unit tests and the new hybrid routing tests.
