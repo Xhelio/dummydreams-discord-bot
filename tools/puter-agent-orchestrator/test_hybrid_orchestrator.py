@@ -1,6 +1,6 @@
 import unittest
 
-from hybrid_orchestrator import route_roles
+from hybrid_orchestrator import route_roles, validate_cloud_budget
 from orchestrator import ROLES, select_roles
 
 
@@ -24,6 +24,28 @@ class HybridRoutingTests(unittest.TestCase):
     def test_invalid_provider_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "provider must be"):
             route_roles(ROLES, "unknown")
+
+    def test_cloud_budget_accepts_exact_limit(self):
+        assignments = route_roles(ROLES, "hybrid")
+        validate_cloud_budget(assignments, 2)
+
+    def test_cloud_budget_rejects_excess_requests(self):
+        assignments = route_roles(ROLES, "hybrid")
+        with self.assertRaisesRegex(ValueError, "Cloud budget exceeded"):
+            validate_cloud_budget(assignments, 1)
+
+    def test_zero_cloud_budget_rejects_cloud_routing(self):
+        assignments = route_roles(ROLES, "hybrid")
+        with self.assertRaisesRegex(ValueError, "Cloud budget exceeded"):
+            validate_cloud_budget(assignments, 0)
+
+    def test_zero_cloud_budget_allows_local_only(self):
+        assignments = route_roles(ROLES, "ollama")
+        validate_cloud_budget(assignments, 0)
+
+    def test_negative_cloud_budget_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "zero or greater"):
+            validate_cloud_budget([], -1)
 
 
 if __name__ == "__main__":
