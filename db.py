@@ -3548,13 +3548,25 @@ def detect_host_match_from_welcome_message(text: str, *, block: bool = True):
     Returns:
         (host_name, matched_alias) jika ada alias cocok di database host_aliases,
         atau (None, None) jika tidak ada alias yang cocok.
+
+    Alias kanonik (HOST_ALIASES) selalu ikut dijadikan fallback. Jika cache
+    host_aliases berisi data lama/tidak lengkap (mis. alias 'yosa' hilang),
+    deteksi tetap bekerja memakai daftar bawaan.
     """
     if not text:
         return None, None
-    for kw, host_name in get_host_aliases(block=block):
+    seen = set()
+    # DB aliases diutamakan (admin bisa menambah/mengubah alias), lalu canonical
+    # bawaan sebagai fallback agar alias penting tidak pernah hilang.
+    ordered = list(get_host_aliases(block=block) or []) + list(HOST_ALIASES.items())
+    for kw, host_name in ordered:
+        key = str(kw or "").strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
         # Reuse the compiled token pattern across repeated LiveIntro events.
-        if _compile_host_alias_pattern(kw).search(text):
-            return host_name, kw
+        if _compile_host_alias_pattern(key).search(text):
+            return host_name, key
     return None, None
 
 
