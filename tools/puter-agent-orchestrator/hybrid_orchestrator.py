@@ -21,6 +21,21 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 DEFAULT_CLOUD_MODEL = os.getenv("PUTER_MODEL", "openai/gpt-5.3-codex")
 DEFAULT_LOCAL_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:1.5b")
 DEFAULT_CLOUD_ROLES = ("architect", "qa")
+DEFAULT_MAX_CLOUD_CALLS = 2
+DEFAULT_MAX_TASK_CHARS = 12000
+
+
+def validate_cloud_budget(assignments, max_cloud_calls: int):
+    """Fail closed when a run would exceed its explicit cloud-call budget."""
+    if max_cloud_calls < 0:
+        raise ValueError("max_cloud_calls must be zero or greater")
+    cloud_count = sum(provider == "puter" for _, provider in assignments)
+    if cloud_count > max_cloud_calls:
+        raise ValueError(
+            f"Cloud budget exceeded: {cloud_count} Puter calls requested, "
+            f"but --max-cloud-calls is {max_cloud_calls}. "
+            "Reduce --cloud-agents/--agents or raise the limit explicitly."
+        )
 
 
 def route_roles(roles, provider: str, cloud_roles=DEFAULT_CLOUD_ROLES):
@@ -114,16 +129,28 @@ def main(argv=None):
     parser.add_argument("--cloud-concurrency", type=int, default=1)
     parser.add_argument("--local-concurrency", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument("--max-cloud-calls", type=int, default=DEFAULT_MAX_CLOUD_CALLS,
+                        help="Hard cap on Puter requests per run (default: 2; 0 disables cloud).")
+    parser.add_argument("--max-task-chars", type=int, default=DEFAULT_MAX_TASK_CHARS,
+                        help="Reject oversized task prompts before sending them to providers.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--output")
     args = parser.parse_args(argv)
 
     if min(args.cloud_concurrency, args.local_concurrency, args.timeout) <= 0:
         parser.error("concurrency and timeout values must be greater than zero")
+    if args.max_cloud_calls < 0 or args.max_task_chars <= 0:
+        parser.error("--max-cloud-calls must be >= 0 and --max-task-chars must be > 0")
+    if len(args.task) > args.max_task_chars:
+        parser.error(
+            f"Task is {len(args.task)} characters; limit is {args.max_task_chars}. "
+            "Summarize it or explicitly raise --max-task-chars."
+        )
     try:
         roles = select_roles(name.strip() for name in args.agents.split(",") if name.strip())
         cloud_roles = tuple(name.strip() for name in args.cloud_agents.split(",") if name.strip())
         assignments = route_roles(roles, args.provider, cloud_roles)
+        validate_cloud_budget(assignments, args.max_cloud_calls)
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -136,7 +163,10 @@ def main(argv=None):
         print(json.dumps({
             "mode": "dry-run", "provider_mode": args.provider,
             "cloud_concurrency": args.cloud_concurrency,
-            "local_concurrency": args.local_concurrency, "routing": plan,
+            "local_concurrency": args.local_concurrency,
+            "max_cloud_calls": args.max_cloud_calls,
+            "max_task_chars": args.max_task_chars,
+            "routing": plan,
         }, indent=2))
         return 0
 
