@@ -329,3 +329,25 @@ def test_euler_webhook_alias_rejects_oversized_request_body():
         "max_bytes": api.MAX_EULER_WEBHOOK_BODY_BYTES,
     }
 
+def test_euler_webhook_rejects_oversized_chunked_body_without_content_length():
+    client = _client()
+    oversized_body = b"x" * (api.MAX_EULER_WEBHOOK_BODY_BYTES + 1)
+
+    for endpoint in ("/api/euler-webhook", "/api/webhooks/eulerstream"):
+        response = client.post(
+            endpoint,
+            data=oversized_body,
+            content_type="application/octet-stream",
+            environ_overrides={
+                "CONTENT_LENGTH": "",
+                "wsgi.input_terminated": True,
+            },
+        )
+
+        assert response.status_code == 413
+        assert response.get_json() == {
+            "ok": False,
+            "error": "Webhook request body exceeds maximum size",
+            "max_bytes": api.MAX_EULER_WEBHOOK_BODY_BYTES,
+        }
+
