@@ -418,6 +418,14 @@ def _handle_euler_live_event(username: str, is_live: bool, source_payload=None):
         clear_live(username)
     except Exception:
         pass
+    # Webhook offline is authoritative: drop the cached Live Intro text so the
+    # next live cannot be misattributed to this livestream's host (e.g. ZIZE
+    # lingering when the new live is actually YOSA).
+    try:
+        from observer import clear_cached_live_intro
+        clear_cached_live_intro(username)
+    except Exception:
+        pass
     try:
         update_observer_diag(
             username,
