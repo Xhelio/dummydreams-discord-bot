@@ -2082,7 +2082,7 @@ def monthly_archive():
     NAV_HTML_PLACEHOLDER
     <div class="card"><h2>Monthly snapshots</h2>{% if message %}<div class="notice-success">{{ message }}</div>{% endif %}
     <p class="muted">Archive snapshots retain monthly coins, gifts, viewers, LIVE sessions, duration, host/account performance, gift rankings and daily trend. Analytics is current-month filtered by default; raw gift/session history is not deleted.</p>
-    <form method="POST" class="form-grid" style="align-items:end"><label>Closed month<input type="month" name="month" max="{{ previous_month }}" required></label>
+    <form method="POST" class="form-grid" style="align-items:end"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><label>Closed month<input type="month" name="month" max="{{ previous_month }}" required></label>
     <button class="btn-save" type="submit">📦 Save / Refresh Archive</button></form></div>
     <div class="card"><h2>Available archives</h2>{% if archives %}<table class="archive-table"><thead><tr><th>Month</th><th>Coins</th><th>Gift items</th><th>Transactions</th><th>Viewers</th><th>Sessions</th><th>Duration</th><th>Created</th></tr></thead><tbody>
     {% for item in archives %}<tr><td><a href="/admin/monthly-archive?month={{ item.month }}">{{ item.month }}</a></td><td>{{ item.summary.coins }}</td><td>{{ item.summary.gifts }}</td><td>{{ item.summary.gift_rows }}</td><td>{{ item.summary.viewers }}</td><td>{{ item.sessions.sessions }}</td><td>{{ fmt_duration(item.sessions.duration) }}</td><td>{{ item.created_at }}</td></tr>{% endfor %}
