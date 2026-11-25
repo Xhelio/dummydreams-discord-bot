@@ -255,3 +255,74 @@ def test_fetch_tiktok_live_preview_coalesces_concurrent_requests(monkeypatch):
     assert results == [preview, preview]
     assert not social_preview._LIVE_INFLIGHT
 
+
+
+def test_live_thumbnail_api_uses_tiktoklive_web_defaults(monkeypatch):
+    import json
+
+    calls = []
+    payload = {
+        "statusCode": 0,
+        "data": {
+            "user": {"uniqueId": "creator", "nickname": "Creator"},
+            "liveRoom": {
+                "status": 2,
+                "title": "Live now",
+                "coverUrl": "https://p16-webcast.tiktokcdn.com/cover.jpeg",
+            },
+        },
+    }
+
+    class FakeContent:
+        def __init__(self, body):
+            self.body = body
+
+        async def read(self, _limit):
+            return self.body
+
+    class FakeResponse:
+        def __init__(self, status, url, body=b""):
+            self.status = status
+            self.url = url
+            self.headers = {"Content-Type": "application/json"}
+            self.content = FakeContent(body)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class FakeSession:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def get(self, url, **kwargs):
+            calls.append((url, kwargs))
+            if "/@creator/live" in url:
+                return FakeResponse(403, url)
+            return FakeResponse(200, url, json.dumps(payload).encode())
+
+    monkeypatch.setattr(social_preview.aiohttp, "ClientSession", FakeSession)
+    social_preview._LIVE_CACHE.clear()
+    preview = asyncio.run(
+        social_preview._fetch_tiktok_live_preview_uncached(
+            "https://www.tiktok.com/@creator/live"
+        )
+    )
+
+    assert preview is not None
+    assert preview.thumbnail_url == "https://p16-webcast.tiktokcdn.com/cover.jpeg"
+    api_url, options = calls[-1]
+    assert api_url == "https://www.tiktok.com/api-live/user/room/"
+    assert options["params"]["aid"] == 1988
+    assert options["params"]["uniqueId"] == "creator"
+    assert options["params"]["sourceType"] == "54"
+    assert options["headers"]["Referer"] == "https://www.tiktok.com/@creator/live"
+    assert options["cookies"]
