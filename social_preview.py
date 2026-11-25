@@ -336,12 +336,7 @@ def _parse_live_page_metadata(body: str, page_url: str) -> TikTokLivePreview | N
     if not username:
         return None
 
-    cover = room.get("coverUrl") or room.get("squareCoverImg") or room.get("cover")
-    if isinstance(cover, dict):
-        cover = cover.get("url_list") or cover.get("urlList") or cover.get("url")
-    if isinstance(cover, (list, tuple)):
-        cover = next((item for item in cover if isinstance(item, str) and item), None)
-    thumbnail = _safe_thumbnail_url(str(cover) if cover else None, page_url)
+    thumbnail = _extract_room_cover(room)
 
     stats = room.get("liveRoomStats")
     if not isinstance(stats, dict):
@@ -361,6 +356,72 @@ def _parse_live_page_metadata(body: str, page_url: str) -> TikTokLivePreview | N
         title=title,
         viewer_count=viewer_count,
         thumbnail_url=thumbnail,
+    )
+
+
+def _extract_room_cover(room: dict) -> str | None:
+    """Extract explicit room-cover fields only; never inspect profile/avatar fields."""
+    for key in (
+        "coverUrl", "cover_url", "cover", "coverImage", "cover_image",
+        "coverImg", "cover_img", "dynamicCover", "dynamic_cover",
+        "shareCover", "share_cover", "coverImageUrl", "cover_image_url",
+        "roomCover", "room_cover",
+    ):
+        value = room.get(key)
+        candidates = []
+        if isinstance(value, str):
+            candidates.append(value)
+        elif isinstance(value, dict):
+            for list_key in ("url_list", "urlList", "urls"):
+                urls = value.get(list_key)
+                if isinstance(urls, (list, tuple)):
+                    candidates.extend(item for item in urls if isinstance(item, str))
+            candidates.extend(item for item in (value.get("url"), value.get("uri")) if isinstance(item, str))
+        elif isinstance(value, (list, tuple)):
+            candidates.extend(item for item in value if isinstance(item, str))
+        for candidate in candidates:
+            safe = _safe_thumbnail_url(candidate, "https://www.tiktok.com/")
+            if safe:
+                return safe
+    return None
+
+
+def _parse_webcast_room_payload(payload: object, page_url: str) -> TikTokLivePreview | None:
+    """Parse TikTok's richer webcast room-info response for an explicit room cover."""
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+    room = data.get("room") if isinstance(data.get("room"), dict) else data
+    try:
+        if int(room.get("status")) != 2:
+            return None
+    except (TypeError, ValueError):
+        return None
+    cover = _extract_room_cover(room)
+    path_match = re.match(r"/@([^/]+)/live", urlsplit(page_url).path, re.IGNORECASE)
+    owner = room.get("owner") if isinstance(room.get("owner"), dict) else {}
+    username = str(owner.get("uniqueId") or "").strip() or (
+        path_match.group(1) if path_match else ""
+    )
+    if not username:
+        return None
+    stats = room.get("stats") if isinstance(room.get("stats"), dict) else room.get("liveRoomStats")
+    if not isinstance(stats, dict):
+        stats = {}
+    viewer_value = stats.get("userCount", stats.get("user_count", stats.get("totalUser")))
+    try:
+        viewer_count = max(0, int(viewer_value)) if viewer_value is not None else None
+    except (TypeError, ValueError):
+        viewer_count = None
+    return TikTokLivePreview(
+        url=page_url,
+        username=username,
+        display_name=str(owner.get("nickname") or "").strip() or None,
+        title=str(room.get("title") or "").strip() or None,
+        viewer_count=viewer_count,
+        thumbnail_url=cover,
     )
 
 
@@ -554,6 +615,53 @@ async def _fetch_tiktok_live_preview_uncached(normalized: str) -> TikTokLivePrev
                                     preview is None or api_preview.thumbnail_url
                                 ):
                                     preview = api_preview
+
+                                # api-live may confirm a live room while omitting
+                                # the room cover. Its user record provides roomId;
+                                # query the richer webcast room-info endpoint next.
+                                data = payload.get("data") if isinstance(payload, dict) else None
+                                user_data = data.get("user") if isinstance(data, dict) else None
+                                room_id = user_data.get("roomId") if isinstance(user_data, dict) else None
+                                if (
+                                    not (preview and preview.thumbnail_url)
+                                    and room_id is not None
+                                    and str(room_id).isdigit()
+                                ):
+                                    webcast_url = (
+                                        WebDefaults.tiktok_webcast_url.rstrip("/") + "/room/info/"
+                                    )
+                                    webcast_params = dict(WebDefaults.web_client_params)
+                                    webcast_params["room_id"] = str(room_id)
+                                    webcast_headers = dict(WebDefaults.web_client_headers)
+                                    webcast_headers["Referer"] = normalized
+                                    async with session.get(
+                                        webcast_url,
+                                        params=webcast_params,
+                                        allow_redirects=False,
+                                        headers=webcast_headers,
+                                        cookies=dict(WebDefaults.web_client_cookies),
+                                    ) as webcast_response:
+                                        if webcast_response.status == 200:
+                                            webcast_raw = await _read_limited(webcast_response)
+                                            if webcast_raw is not None:
+                                                try:
+                                                    webcast_payload = json.loads(
+                                                        webcast_raw.decode("utf-8", errors="replace")
+                                                    )
+                                                except (TypeError, ValueError):
+                                                    webcast_payload = None
+                                                webcast_preview = _parse_webcast_room_payload(
+                                                    webcast_payload, normalized
+                                                )
+                                                if webcast_preview and webcast_preview.thumbnail_url:
+                                                    preview = webcast_preview
+                                                    api_reason = "webcast_cover_found"
+                                                elif webcast_preview:
+                                                    api_reason = "webcast_room_without_trusted_cover"
+                                                else:
+                                                    api_reason = "webcast_room_unrecognized_payload"
+                                        else:
+                                            api_reason = f"webcast_http_{webcast_response.status}"
                         else:
                             api_reason = f"http_{api_response.status}"
                 else:
