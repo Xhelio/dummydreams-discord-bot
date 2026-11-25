@@ -51,6 +51,7 @@ from db import (
     get_announcement_channel_ids,
     get_active_live_announcements_for_account,
     get_role_tiers,
+    get_all_user_coin_totals,
     get_tier_settings,
     is_feature_enabled,
     tier_reset_due,
@@ -66,7 +67,11 @@ from server import keep_alive
 from observer import run_all_observers, get_current_live_hosts, is_any_host_live, probe_room_live, probe_priority_targets_once, _log_gift_timing
 from timed_executor import call_with_timing
 from verification import async_verify_tiktok_bio
-from routes.settings import set_verification_refresh_handler, set_presence_refresh_handler
+from routes.settings import (
+    set_verification_refresh_handler,
+    set_presence_refresh_handler,
+    set_tier_refresh_handler,
+)
 import runtime_status
 import chatbot
 import log_setup
@@ -771,22 +776,33 @@ async def _get_cached_role_tier_config(tiktok_user: str):
         return tier_cfg, tiers
 
 
-async def auto_assign_role(tiktok_user: str, total_coins: int):
-    """Assign reset and permanent tier roles based on the admin panel settings."""
+async def auto_assign_role(
+    tiktok_user: str,
+    total_coins: int,
+    discord_id: str = None,
+    announce: bool = True,
+):
+    """Assign reset and permanent tier roles based on the admin panel settings.
+
+    ``discord_id`` can be supplied by the bulk reconciler to avoid one DB
+    lookup per member. ``announce=False`` suppresses tier-up announcements
+    during a mass role sync.
+    """
     if not is_feature_enabled("role_tiers"):
         return
 
-    stage_started = time.perf_counter()
-    (discord_id, worker_elapsed) = await asyncio.to_thread(
-        call_with_timing, get_discord_id_from_tiktok, tiktok_user
-    )
-    total_elapsed = time.perf_counter() - stage_started
-    _log_gift_timing(tiktok_user, "role.db_mapping_worker", worker_elapsed, context="viewer")
-    _log_gift_timing(
-        tiktok_user, "role.db_mapping_dispatch",
-        max(0.0, total_elapsed - worker_elapsed), context="viewer"
-    )
-    _log_role_stage_timing(tiktok_user, "role.db_mapping", stage_started)
+    if discord_id is None:
+        stage_started = time.perf_counter()
+        (discord_id, worker_elapsed) = await asyncio.to_thread(
+            call_with_timing, get_discord_id_from_tiktok, tiktok_user
+        )
+        total_elapsed = time.perf_counter() - stage_started
+        _log_gift_timing(tiktok_user, "role.db_mapping_worker", worker_elapsed, context="viewer")
+        _log_gift_timing(
+            tiktok_user, "role.db_mapping_dispatch",
+            max(0.0, total_elapsed - worker_elapsed), context="viewer"
+        )
+        _log_role_stage_timing(tiktok_user, "role.db_mapping", stage_started)
     if not discord_id:
         return
 
@@ -875,11 +891,71 @@ async def auto_assign_role(tiktok_user: str, total_coins: int):
             finally:
                 _log_role_stage_timing(tiktok_user, "role.discord_remove_roles", stage_started)
 
-        if added_tiers:
+        if added_tiers and announce:
             best_tier, best_role = max(added_tiers, key=lambda x: x[0]["min_coins"])
             stage_started = time.perf_counter()
             await _announce_tier_up(member, best_role, tiktok_user, total_coins, tier_cfg)
             _log_role_stage_timing(tiktok_user, "role.discord_announcement", stage_started)
+
+
+def invalidate_role_tier_config_cache():
+    """Force the next role check to read fresh tiers after an admin edit."""
+    _ROLE_TIER_CONFIG_CACHE.update(expires_at=0.0, tier_cfg=None, tiers={})
+
+
+_TIER_RECONCILE_LOCK = asyncio.Lock()
+
+
+async def reconcile_tier_roles(reason: str = "tier criteria updated") -> int:
+    """Add/remove coin tier roles for every verified member after a criteria edit.
+
+    Without this, a changed minimum only applied the next time each member sent
+    a gift. The admin expects Discord to update immediately.
+    """
+    invalidate_role_tier_config_cache()
+    if not is_feature_enabled("role_tiers") or not bot.is_ready():
+        return 0
+    try:
+        rows = await asyncio.to_thread(get_all_user_coin_totals)
+    except Exception as e:
+        print(f"[RoleTier] Could not load member coin totals: {e}")
+        return 0
+
+    synced = 0
+    async with _TIER_RECONCILE_LOCK:
+        # Re-read after waiting for a previous sync; criteria may have changed
+        # again while this task was queued.
+        invalidate_role_tier_config_cache()
+        for discord_id, tiktok_user, total_coins in rows:
+            try:
+                await auto_assign_role(
+                    tiktok_user,
+                    int(total_coins or 0),
+                    discord_id=discord_id,
+                    announce=False,
+                )
+                synced += 1
+            except Exception as e:
+                print(f"[RoleTier] Reconcile failed for @{tiktok_user}: {e}")
+    print(f"[RoleTier] Reconciled {synced} member(s) after {reason}.")
+    try:
+        await asyncio.to_thread(
+            log_activity_event,
+            "role_tier",
+            f"Tier criteria changed ({reason}); reconciled {synced} member(s).",
+            "",
+        )
+    except Exception:
+        pass
+    return synced
+
+
+def schedule_tier_role_reconcile():
+    """Flask route callback: run the bulk role sync on the Discord event loop."""
+    try:
+        asyncio.run_coroutine_threadsafe(reconcile_tier_roles(), bot.loop)
+    except Exception as e:
+        print(f"[RoleTier] Could not schedule role reconcile: {e}")
 
 async def _resolve_announcement_channel(announcement_session: dict = None):
     """Menentukan channel Discord tempat sesi pengumuman tersimpan (fallback ke env)."""
@@ -4490,6 +4566,7 @@ async def main():
     await asyncio.to_thread(suspend_open_live_sessions)
     set_verification_refresh_handler(schedule_verification_panel_refresh)
     set_presence_refresh_handler(schedule_presence_refresh)
+    set_tier_refresh_handler(schedule_tier_role_reconcile)
     keep_alive(handle_api_announcement)
 
     # Log a secret-free snapshot of the runtime configuration. This is the first

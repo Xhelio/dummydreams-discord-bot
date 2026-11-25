@@ -218,3 +218,59 @@ def test_toggle_host_priority_handles_missing_host(monkeypatch):
     assert conn.committed is False
     assert conn.closed is True
     assert events == []
+
+
+def test_update_tier_saves_coins_and_triggers_reconcile(monkeypatch):
+    updated = []
+    events = []
+    refreshed = []
+    monkeypatch.setattr(
+        settings, "update_role_tier", lambda tier_id, **kwargs: updated.append((tier_id, kwargs))
+    )
+    monkeypatch.setattr(settings, "log_activity_event", lambda *args: events.append(args))
+    monkeypatch.setattr(settings, "set_tier_refresh_handler", lambda handler: None)
+    monkeypatch.setattr(settings, "_tier_refresh_handler", lambda: refreshed.append(True))
+
+    response = _client().post(
+        "/admin/settings/tier/update/7",
+        data={"min_coins": "2500"},
+    )
+
+    assert response.status_code == 302
+    assert updated == [(7, {"min_coins": 2500})]
+    assert refreshed == [True]
+    assert events and "2500" in events[0][1]
+    assert "syncing" in response.headers["Location"]
+
+
+def test_update_tier_clamps_negative_coins(monkeypatch):
+    updated = []
+    monkeypatch.setattr(
+        settings, "update_role_tier", lambda tier_id, **kwargs: updated.append((tier_id, kwargs))
+    )
+    monkeypatch.setattr(settings, "log_activity_event", lambda *args: None)
+    monkeypatch.setattr(settings, "_tier_refresh_handler", None)
+
+    response = _client().post(
+        "/admin/settings/tier/update/9",
+        data={"min_coins": "-100"},
+    )
+
+    assert response.status_code == 302
+    assert updated == [(9, {"min_coins": 0})]
+
+
+def test_update_tier_rejects_non_numeric_coins(monkeypatch):
+    updated = []
+    monkeypatch.setattr(
+        settings, "update_role_tier", lambda tier_id, **kwargs: updated.append((tier_id, kwargs))
+    )
+
+    response = _client().post(
+        "/admin/settings/tier/update/9",
+        data={"min_coins": "not-a-number"},
+    )
+
+    assert response.status_code == 302
+    assert updated == []
+    assert "Invalid+minimum+coins" in response.headers["Location"]

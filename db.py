@@ -5276,6 +5276,59 @@ def add_role_tier(group_key: str, role_id: str, min_coins: int, tier_name: str =
         conn.close()
 
 
+def update_role_tier(tier_id: int, min_coins: int = None, role_id: str = None, tier_name: str = None):
+    """Update an existing tier's criteria without deleting/re-adding it."""
+    fields = []
+    params = []
+    if min_coins is not None:
+        fields.append("min_coins = ?")
+        params.append(max(0, int(min_coins)))
+    if role_id is not None:
+        fields.append("role_id = ?")
+        params.append(str(role_id))
+    if tier_name is not None:
+        fields.append("tier_name = ?")
+        params.append(str(tier_name))
+    if not fields:
+        return
+    params.append(int(tier_id))
+    conn = get_db_connection()
+    try:
+        conn.execute(
+            f"UPDATE role_tiers SET {', '.join(fields)} WHERE id = ?",
+            params,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_all_user_coin_totals() -> list:
+    """Return ``(discord_id, tiktok_user, total_coins)`` for every mapping.
+
+    Used when role tier criteria change so the bot can immediately add/remove
+    roles for all verified members, not only the next gift recipient.
+    """
+    conn = get_db_connection()
+    try:
+        rows = conn.execute("""
+            SELECT m.discord_id, m.tiktok_user,
+                   COALESCE(SUM(g.total_coins), 0) AS total_coins
+            FROM user_mappings m
+            LEFT JOIN tiktok_gifts g
+                   ON LOWER(g.tiktok_user) = LOWER(m.tiktok_user)
+            GROUP BY m.discord_id, m.tiktok_user
+            ORDER BY m.discord_id
+        """).fetchall()
+        return [
+            (str(r[0]), str(r[1] or ""), int(r[2] or 0))
+            for r in rows
+            if r[0] is not None and r[1]
+        ]
+    finally:
+        conn.close()
+
+
 def delete_role_tier(tier_id: int):
     conn = get_db_connection()
     try:

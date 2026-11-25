@@ -23,6 +23,7 @@ from db import (
     delete_host_alias,
     get_db_connection,
     add_role_tier,
+    update_role_tier,
     delete_role_tier,
     get_role_tiers,
     get_tier_settings,
@@ -37,6 +38,7 @@ settings_bp = Blueprint("settings", __name__, url_prefix="/admin")
 
 _verification_refresh_handler = None
 _presence_refresh_handler = None
+_tier_refresh_handler = None
 
 
 def set_verification_refresh_handler(handler):
@@ -47,6 +49,12 @@ def set_verification_refresh_handler(handler):
 def set_presence_refresh_handler(handler):
     global _presence_refresh_handler
     _presence_refresh_handler = handler
+
+
+def set_tier_refresh_handler(handler):
+    """Called after tier criteria change so Discord roles can be reconciled."""
+    global _tier_refresh_handler
+    _tier_refresh_handler = handler
 
 
 def _parse_id_list(raw: str) -> list:
@@ -313,7 +321,7 @@ def view_settings():
 
         <div class="card">
             <h2>🏅 Reset Tier List</h2>
-            <p class="muted">Roles in this list are granted by coin amount and revoked by the scheduled reset.</p>
+            <p class="muted">Roles in this list are granted by coin amount and revoked by the scheduled reset. Edit Minimum Coins and press Save — Discord roles are synced immediately.</p>
             <form action="/admin/settings/tier/add" method="POST" class="form-grid tier-form">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="group_key" value="reset">
@@ -328,7 +336,14 @@ def view_settings():
                     <tr>
                         <td><strong>{{ t.tier_name }}</strong></td>
                         <td><code>{{ t.role_id }}</code></td>
-                        <td><span class="badge" style="background:#ca8a04;">{{ t.min_coins }} c</span></td>
+                        <td>
+                            <form action="/admin/settings/tier/update/{{ t.id }}" method="POST" class="inline-form">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                <input type="number" name="min_coins" value="{{ t.min_coins }}" min="0" required
+                                       inputmode="numeric" style="width:110px;display:inline-block;">
+                                <button type="submit" class="btn-action" style="background:#15803d;">Save</button>
+                            </form>
+                        </td>
                         <td>
                             <form action="/admin/settings/tier/delete/{{ t.id }}" method="POST" class="inline-form" onsubmit="return confirm('Delete {{ t.tier_name }}?');">
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -345,7 +360,7 @@ def view_settings():
 
         <div class="card">
             <h2>♾️ All-the-Time Tier List</h2>
-            <p class="muted">These roles use the same coin rules but are never removed by a reset.</p>
+            <p class="muted">These roles use the same coin rules but are never removed by a reset. Edit Minimum Coins and press Save — Discord roles are synced immediately.</p>
             <form action="/admin/settings/tier/add" method="POST" class="form-grid tier-form">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="group_key" value="permanent">
@@ -360,7 +375,14 @@ def view_settings():
                     <tr>
                         <td><strong>{{ t.tier_name }}</strong></td>
                         <td><code>{{ t.role_id }}</code></td>
-                        <td><span class="badge" style="background:#15803d;">{{ t.min_coins }} c</span></td>
+                        <td>
+                            <form action="/admin/settings/tier/update/{{ t.id }}" method="POST" class="inline-form">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                <input type="number" name="min_coins" value="{{ t.min_coins }}" min="0" required
+                                       inputmode="numeric" style="width:110px;display:inline-block;">
+                                <button type="submit" class="btn-action" style="background:#15803d;">Save</button>
+                            </form>
+                        </td>
                         <td>
                             <form action="/admin/settings/tier/delete/{{ t.id }}" method="POST" class="inline-form" onsubmit="return confirm('Delete {{ t.tier_name }}?');">
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -638,6 +660,33 @@ def add_tier():
         add_role_tier(group_key, role_id, min_coins)
         return redirect("/admin/settings?msg=" + _url_q("Tier added.") + "&msg_type=success")
     return redirect("/admin/settings?msg=" + _url_q("Invalid role ID.") + "&msg_type=warning")
+
+
+@settings_bp.route("/settings/tier/update/<int:tier_id>", methods=["POST"])
+def update_tier(tier_id):
+    try:
+        min_coins = max(0, int(request.form.get("min_coins", "0")))
+    except (TypeError, ValueError):
+        return redirect(
+            "/admin/settings?msg=" + _url_q("Invalid minimum coins.") + "&msg_type=warning"
+        )
+    update_role_tier(tier_id, min_coins=min_coins)
+    log_activity_event(
+        "role_tier",
+        f"Tier {tier_id} minimum coins changed to {min_coins}; reconciling Discord roles.",
+        "",
+    )
+    # Reconcile immediately: add roles to members who now qualify and remove
+    # roles from members who no longer do. Runs on the bot event loop.
+    if _tier_refresh_handler:
+        try:
+            _tier_refresh_handler()
+        except Exception as e:
+            print(f"[Settings] Tier role refresh failed: {e}")
+    return redirect(
+        "/admin/settings?msg=" + _url_q("Tier coins updated; Discord roles are syncing.")
+        + "&msg_type=success"
+    )
 
 
 @settings_bp.route("/settings/tier/delete/<int:tier_id>", methods=["POST"])
