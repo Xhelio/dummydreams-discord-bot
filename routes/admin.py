@@ -45,8 +45,6 @@ from db import (
     get_analytics_host_options,
     get_analytics_account_options,
     get_analytics_date_bounds,
-    save_monthly_analytics_archive,
-    get_monthly_analytics_archives,
     get_timeline_data,
     get_timeline_sessions_for_date,
     get_timeline_daily_summary,
@@ -1969,6 +1967,53 @@ def _parse_iso_date(value, fallback):
         return fallback
 
 
+def _monthly_archive_schema():
+    conn = get_db_connection()
+    try:
+        conn.execute("""CREATE TABLE IF NOT EXISTS monthly_analytics_archives (
+            month_key TEXT PRIMARY KEY, start_date TEXT NOT NULL, end_date TEXT NOT NULL,
+            payload_json TEXT NOT NULL, created_at TEXT NOT NULL)""")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _save_monthly_analytics_archive(month_key, start_date, end_date, payload):
+    _monthly_archive_schema()
+    conn = get_db_connection()
+    try:
+        now = datetime.now(pytz.timezone('Asia/Jakarta')).isoformat()
+        serialized = __import__('json').dumps(payload or {}, ensure_ascii=False, separators=(',', ':'))
+        conn.execute("""INSERT INTO monthly_analytics_archives
+            (month_key, start_date, end_date, payload_json, created_at) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(month_key) DO UPDATE SET start_date=excluded.start_date,
+            end_date=excluded.end_date, payload_json=excluded.payload_json, created_at=excluded.created_at""",
+            (month_key, start_date, end_date, serialized, now))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _get_monthly_analytics_archives():
+    _monthly_archive_schema()
+    conn = get_db_connection()
+    try:
+        rows = conn.execute("SELECT month_key, start_date, end_date, payload_json, created_at FROM monthly_analytics_archives ORDER BY month_key DESC").fetchall()
+        json_mod = __import__('json')
+        result = []
+        for row in rows:
+            try:
+                payload = json_mod.loads(row[3] or '{}')
+            except Exception:
+                payload = {}
+            result.append({'month': row[0], 'start_date': row[1], 'end_date': row[2],
+                'payload': payload, 'summary': payload.get('summary', {}),
+                'sessions': payload.get('sessions', {}), 'created_at': row[4]})
+        return result
+    finally:
+        conn.close()
+
+
 @admin_bp.route('/monthly-archive', methods=['GET', 'POST'])
 def monthly_archive():
     wib = pytz.timezone('Asia/Jakarta')
@@ -1997,7 +2042,7 @@ def monthly_archive():
             'by_host': {str(k): list(v) for k, v in (breakdown.get('by_host') or {}).items()},
             'by_account': {str(k): list(v) for k, v in (breakdown.get('by_account') or {}).items()},
         }
-        save_monthly_analytics_archive(report['month'], start_str, end_str, report)
+        _save_monthly_analytics_archive(report['month'], start_str, end_str, report)
         return report
 
     # Snapshot the previous calendar month once per month when this admin page is accessed.
@@ -2019,7 +2064,7 @@ def monthly_archive():
         except Exception as exc:
             message = f'Archive failed: {exc}'
 
-    archives = get_monthly_analytics_archives()
+    archives = _get_monthly_analytics_archives()
     selected_month = (request.args.get('month') or '').strip()
     selected = next((item for item in archives if item.get('month') == selected_month), None)
     if not selected and archives:
