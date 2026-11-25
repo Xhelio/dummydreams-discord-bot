@@ -1967,13 +1967,148 @@ def _parse_iso_date(value, fallback):
         return fallback
 
 
+def _monthly_archive_schema():
+    conn = get_db_connection()
+    try:
+        conn.execute("""CREATE TABLE IF NOT EXISTS monthly_analytics_archives (
+            month_key TEXT PRIMARY KEY, start_date TEXT NOT NULL, end_date TEXT NOT NULL,
+            payload_json TEXT NOT NULL, created_at TEXT NOT NULL)""")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _save_monthly_analytics_archive(month_key, start_date, end_date, payload):
+    _monthly_archive_schema()
+    conn = get_db_connection()
+    try:
+        now = datetime.now(pytz.timezone('Asia/Jakarta')).isoformat()
+        serialized = __import__('json').dumps(payload or {}, ensure_ascii=False, separators=(',', ':'))
+        conn.execute("""INSERT INTO monthly_analytics_archives
+            (month_key, start_date, end_date, payload_json, created_at) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(month_key) DO UPDATE SET start_date=excluded.start_date,
+            end_date=excluded.end_date, payload_json=excluded.payload_json, created_at=excluded.created_at""",
+            (month_key, start_date, end_date, serialized, now))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _get_monthly_analytics_archives():
+    _monthly_archive_schema()
+    conn = get_db_connection()
+    try:
+        rows = conn.execute("SELECT month_key, start_date, end_date, payload_json, created_at FROM monthly_analytics_archives ORDER BY month_key DESC").fetchall()
+        json_mod = __import__('json')
+        result = []
+        for row in rows:
+            try:
+                payload = json_mod.loads(row[3] or '{}')
+            except Exception:
+                payload = {}
+            result.append({'month': row[0], 'start_date': row[1], 'end_date': row[2],
+                'payload': payload, 'summary': payload.get('summary', {}),
+                'sessions': payload.get('sessions', {}), 'created_at': row[4]})
+        return result
+    finally:
+        conn.close()
+
+
+@admin_bp.route('/monthly-archive', methods=['GET', 'POST'])
+def monthly_archive():
+    wib = pytz.timezone('Asia/Jakarta')
+    today = datetime.now(wib).date()
+    first_this_month = today.replace(day=1)
+    previous_month_end = first_this_month - timedelta(days=1)
+
+    def archive_month(month_start):
+        month_end = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+        start_str, end_str = month_start.strftime('%Y-%m-%d'), month_end.strftime('%Y-%m-%d')
+        report = {
+            'month': month_start.strftime('%Y-%m'), 'start_date': start_str, 'end_date': end_str,
+            'summary': get_analytics_summary(start_str, end_str),
+            'sessions': get_analytics_sessions(start_str, end_str),
+            'session_breakdown': get_analytics_session_breakdown(start_str, end_str),
+            'gift_by_host': get_analytics_gift_by_host(start_str, end_str),
+            'gift_by_account': get_analytics_gift_by_account(start_str, end_str),
+            'top_gifts': get_analytics_top_gift_items(start_str, end_str, limit=20),
+            'viewer_ranking': get_analytics_viewer_ranking(start_str, end_str, limit=50),
+            'timeseries': get_analytics_timeseries(start_str, end_str, 'day'),
+        }
+        for key in ('gift_by_host', 'gift_by_account', 'top_gifts', 'viewer_ranking'):
+            report[key] = [list(row) for row in (report[key] or [])]
+        breakdown = report.get('session_breakdown') or {}
+        report['session_breakdown'] = {
+            'by_host': {str(k): list(v) for k, v in (breakdown.get('by_host') or {}).items()},
+            'by_account': {str(k): list(v) for k, v in (breakdown.get('by_account') or {}).items()},
+        }
+        _save_monthly_analytics_archive(report['month'], start_str, end_str, report)
+        return report
+
+    # Snapshot the previous calendar month once per month when this admin page is accessed.
+    previous_month_start = previous_month_end.replace(day=1)
+    try:
+        archive_month(previous_month_start)
+    except Exception as exc:
+        print(f"[MonthlyArchive] auto archive failed: {type(exc).__name__}: {exc}")
+
+    message = ''
+    if request.method == 'POST':
+        month_value = (request.form.get('month') or '').strip()
+        try:
+            month_start = datetime.strptime(month_value, '%Y-%m').date().replace(day=1)
+            if month_start >= first_this_month:
+                raise ValueError('Only closed months can be archived.')
+            archive_month(month_start)
+            message = f'Archive {month_value} saved or refreshed successfully.'
+        except Exception as exc:
+            message = f'Archive failed: {exc}'
+
+    archives = _get_monthly_analytics_archives()
+    selected_month = (request.args.get('month') or '').strip()
+    selected = next((item for item in archives if item.get('month') == selected_month), None)
+    if not selected and archives:
+        selected = archives[0]
+    payload = selected.get('payload') if selected else {}
+    html = """
+    <!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Monthly Archive</title><style>BASE_CSS_PLACEHOLDER
+    .archive-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+    .archive-stat{background:#0b1220;border:1px solid var(--border);border-radius:10px;padding:14px}
+    .archive-stat strong{display:block;font-size:1.25rem;margin-top:5px}
+    .archive-table{width:100%;border-collapse:collapse}.archive-table th,.archive-table td{padding:8px;border-bottom:1px solid var(--border);text-align:left}
+    </style><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#0284c7"></head><body>
+    <div class="header"><h1>🗃️ Monthly Archive</h1><p class="page-subtitle">Closed-month reports · WIB</p></div>
+    NAV_HTML_PLACEHOLDER
+    <div class="card"><h2>Monthly snapshots</h2>{% if message %}<div class="notice-success">{{ message }}</div>{% endif %}
+    <p class="muted">Archive snapshots retain monthly coins, gifts, viewers, LIVE sessions, duration, host/account performance, gift rankings and daily trend. Analytics is current-month filtered by default; raw gift/session history is not deleted.</p>
+    <form method="POST" class="form-grid" style="align-items:end"><label>Closed month<input type="month" name="month" max="{{ previous_month }}" required></label>
+    <button class="btn-save" type="submit">📦 Save / Refresh Archive</button></form></div>
+    <div class="card"><h2>Available archives</h2>{% if archives %}<table class="archive-table"><thead><tr><th>Month</th><th>Coins</th><th>Gift items</th><th>Transactions</th><th>Viewers</th><th>Sessions</th><th>Duration</th><th>Created</th></tr></thead><tbody>
+    {% for item in archives %}<tr><td><a href="/admin/monthly-archive?month={{ item.month }}">{{ item.month }}</a></td><td>{{ item.summary.coins }}</td><td>{{ item.summary.gifts }}</td><td>{{ item.summary.gift_rows }}</td><td>{{ item.summary.viewers }}</td><td>{{ item.sessions.sessions }}</td><td>{{ fmt_duration(item.sessions.duration) }}</td><td>{{ item.created_at }}</td></tr>{% endfor %}
+    </tbody></table>{% else %}<p>No archives saved yet.</p>{% endif %}</div>
+    {% if payload %}<div class="card"><h2>📊 {{ payload.month }} report</h2><div class="archive-grid">
+    <div class="archive-stat">Coins<strong>{{ payload.summary.coins }} c</strong></div><div class="archive-stat">Gift items<strong>{{ payload.summary.gifts }}</strong></div>
+    <div class="archive-stat">Gift transactions<strong>{{ payload.summary.gift_rows }}</strong></div><div class="archive-stat">Unique viewers<strong>{{ payload.summary.viewers }}</strong></div>
+    <div class="archive-stat">Hosts<strong>{{ payload.summary.hosts }}</strong></div><div class="archive-stat">Accounts<strong>{{ payload.summary.accounts }}</strong></div>
+    <div class="archive-stat">LIVE sessions<strong>{{ payload.sessions.sessions }}</strong></div><div class="archive-stat">LIVE duration<strong>{{ fmt_duration(payload.sessions.duration) }}</strong></div></div>
+    <h3>Top hosts</h3><table class="archive-table"><thead><tr><th>Host</th><th>Coins</th><th>Gifts</th><th>Viewers</th><th>Accounts</th></tr></thead><tbody>{% for row in payload.gift_by_host[:10] %}<tr><td>{{ row[1] or row[0] }}</td><td>{{ row[2] }}</td><td>{{ row[3] }}</td><td>{{ row[4] }}</td><td>{{ row[5] }}</td></tr>{% endfor %}</tbody></table>
+    <h3>Top accounts</h3><table class="archive-table"><thead><tr><th>Account</th><th>Coins</th><th>Gifts</th><th>Viewers</th><th>Hosts</th></tr></thead><tbody>{% for row in payload.gift_by_account[:10] %}<tr><td>{{ row[1] or row[0] }}</td><td>{{ row[2] }}</td><td>{{ row[3] }}</td><td>{{ row[4] }}</td><td>{{ row[5] }}</td></tr>{% endfor %}</tbody></table>
+    <h3>Top gift items</h3><table class="archive-table"><thead><tr><th>Gift</th><th>Unit coins</th><th>Items</th><th>Total coins</th><th>Transactions</th><th>Top sender</th></tr></thead><tbody>{% for row in payload.top_gifts[:10] %}<tr><td>{{ row[0] }}</td><td>{{ row[1] }}</td><td>{{ row[2] }}</td><td>{{ row[3] }}</td><td>{{ row[4] }}</td><td>{{ row[5] or '-' }}</td></tr>{% endfor %}</tbody></table>
+    <h3>Top viewers</h3><table class="archive-table"><thead><tr><th>Viewer</th><th>Coins</th><th>Gift items</th><th>Hosts</th><th>Last gift</th></tr></thead><tbody>{% for row in payload.viewer_ranking[:10] %}<tr><td>{{ row[1] or row[0] }}</td><td>{{ row[2] }}</td><td>{{ row[3] }}</td><td>{{ row[4] }}</td><td>{{ row[5] }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}
+    </body></html>
+    """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML)
+    return render_template_string(html, archives=archives, payload=payload, selected=selected,
+        message=message, previous_month=previous_month_end.strftime('%Y-%m'), fmt_duration=_fmt_duration)
+
+
 @admin_bp.route('/analytics', methods=['GET'])
 def view_analytics():
     wib = pytz.timezone('Asia/Jakarta')
     today = datetime.now(wib).date()
 
     preset_values = {p[0] for p in ANALYTICS_PRESETS}
-    preset = (request.args.get('preset') or '7d').strip()
+    preset = (request.args.get('preset') or 'this_month').strip()
     if preset not in preset_values:
         preset = '7d'
 
@@ -2357,7 +2492,7 @@ def view_analytics():
                 <p class="page-subtitle" style="margin-top:4px;"><strong style="color:#7dd3fc;">{{ analysis_subject_type }}:</strong> {{ analysis_subject }} <span class="info-i" data-tip="These charts and tables only include the selected {{ analysis_subject_type|lower }}.">!</span></p>
                 {% endif %}
             </div>
-            <a class="nav-btn" href="/admin/analytics?preset=7d">🔄 Reset Filter</a>
+            <a class="nav-btn" href="/admin/analytics?preset=this_month">🔄 Reset Filter</a>
         </div>
         NAV_HTML_PLACEHOLDER
 
