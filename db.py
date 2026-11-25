@@ -515,12 +515,6 @@ def _load_valid_target_accounts():
 
 VALID_TARGET_ACCOUNTS = _load_valid_target_accounts()
 
-# Explicitly retired official handles. Keep their DB rows for historical joins,
-# but stop observing them once the replacement official handle is present.
-LEGACY_OFFICIAL_HOST_ALIASES = {
-    "dummydreamsentertaiment": "dummy.dreams",
-}
-
 def get_channel_display_name(tiktok_username: str) -> str:
     """Mengembalikan nama channel resmi dari akun target TikTok."""
     u_clean = tiktok_username.lower().lstrip("@")
@@ -616,26 +610,6 @@ def sync_valid_hosts(conn=None, reactivate: bool = False):
                     "VALUES (?, ?, 1)",
                     (uname, dname),
                 )
-        # Retire only known obsolete official handles after their canonical
-        # replacement exists. Preserve rows (and historical references) instead
-        # of deleting them; custom hosts are never affected.
-        for legacy_username, canonical_username in LEGACY_OFFICIAL_HOST_ALIASES.items():
-            canonical = conn.execute(
-                "SELECT 1 FROM hosts WHERE LOWER(tiktok_username) = ? LIMIT 1",
-                (canonical_username,),
-            ).fetchone()
-            if canonical:
-                retired = conn.execute(
-                    "UPDATE hosts SET is_active = 0 "
-                    "WHERE LOWER(tiktok_username) = ? AND COALESCE(is_active, 1) != 0",
-                    (legacy_username,),
-                )
-                if getattr(retired, "rowcount", 0):
-                    print(
-                        f"[Hosts Sync] Retired legacy official target "
-                        f"@{legacy_username}; canonical=@{canonical_username}"
-                    )
-
         conn.commit()
     except Exception as e:
         print(f"[Hosts Sync Error] {e}")
