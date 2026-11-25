@@ -307,6 +307,28 @@ def _cache_live_intro_text(username: str, text: str):
         print(f"[{username}] Failed to persist last Live Intro text: {e}")
 
 
+def clear_cached_live_intro(username: str):
+    """Hapus cache teks Live Intro (memori + DB) untuk satu akun.
+
+    Teks intro dari live SEBELUMNYA tidak boleh dipakai sebagai fallback pada
+    live berikutnya. Tanpa ini, host lama (mis. ZIZE) terus terdeteksi walau
+    live sekarang dibuka host baru (mis. YOSA), karena websocket sering gagal
+    connect sehingga fallback cache dipakai.
+    """
+    username = (username or "").lower().lstrip("@")
+    if not username:
+        return
+    _LAST_INTRO_TEXT.pop(username, None)
+    _LAST_INTRO_ANALYZED.pop(username, None)
+    try:
+        # queue_setting langsung memperbarui cache baca, jadi get_setting()
+        # berikutnya sudah melihat nilai kosong tanpa menunggu writer Turso.
+        queue_setting(f"last_live_intro_{username}", "")
+        queue_setting(f"last_live_intro_at_{username}", "0")
+    except Exception as e:
+        print(f"[{username}] Failed to clear cached Live Intro text: {e}")
+
+
 def _get_cached_live_intro_text(username: str) -> str:
     username = (username or "").lower().lstrip("@")
     if not username:
@@ -1003,6 +1025,9 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             nonlocal is_connected, current_session_id, probed_live
             runtime_status.clear_live(username_clean)
             probed_live = False
+            # Live has ended: drop the intro text so the next live cannot reuse
+            # this livestream's host via the cached fallback.
+            clear_cached_live_intro(username_clean)
             unresolved_host = (current_host in (None, "", "Host", "-"))
             if unresolved_host:
                 print(f"[{username_clean}] Host debt: live ended with unresolved host (session {session_to_close}).")
@@ -1082,9 +1107,9 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
     async def resolve_grace_reconnect() -> bool:
         """Batalkan grace timer dan catat jeda offline sebagai paused time.
 
-        Jeda saat live pending/terputus tidak boleh dihitung sebagai durasi
-        live. Saat live tersambung lagi dalam grace period, selisih waktu
-        disconnect -> reconnect ditambahkan ke paused_seconds sesi.
+        paused_seconds disimpan sebagai informasi, tetapi durasi dilaporkan
+        dengan policy wall-clock (sama seperti TikTok Live Studio), sehingga
+        jeda reconnect tidak mengurangi durasi akhir.
         """
         nonlocal disconnect_timer_task
         if not (disconnect_timer_task and not disconnect_timer_task.done()):
@@ -1106,7 +1131,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     # DB write: keep it off the Discord event loop.
                     await asyncio.to_thread(add_live_session_paused_seconds, session_id, gap)
                     print(
-                        f"[{username_clean}] Grace gap {gap}s excluded from live duration "
+                        f"[{username_clean}] Grace gap {gap}s recorded in paused_seconds "
                         f"(session {session_id})."
                     )
             except Exception as e:
@@ -1332,8 +1357,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                         pass
                     # Use neutral placeholder until a real host is detected from LiveIntroEvent.
                     current_host = "Host"
-                    _LAST_INTRO_ANALYZED.pop(username_clean, None)
-                    _LAST_INTRO_TEXT.pop(username_clean, None)
+                    clear_cached_live_intro(username_clean)
                 elif _has_fresh_host_detection(current_host, host_detected_this_connection):
                     # LiveIntro may beat ConnectEvent during startup/reconnect.
                     # Its fresh result is authoritative; never restore an older host.
@@ -1364,8 +1388,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     )
                     # New live session: a repeated LiveIntro text must be analysed
                     # again, otherwise host detection stays "Host" all live.
-                    _LAST_INTRO_ANALYZED.pop(username_clean, None)
-                    _LAST_INTRO_TEXT.pop(username_clean, None)
+                    clear_cached_live_intro(username_clean)
                 elif force_reconfirm_host and current_host not in (None, "", "Host", "-"):
                     try:
                         await asyncio.to_thread(update_live_session_host, current_session_id, current_host)
@@ -2190,8 +2213,7 @@ def request_tiktok_reconnect(username: str = None, reconfirm_host: bool = True):
     for target in targets:
         if target:
             _clear_rate_limit_state(target)
-            _LAST_INTRO_ANALYZED.pop(target, None)
-            _LAST_INTRO_TEXT.pop(target, None)
+            clear_cached_live_intro(target)
     if reconfirm_host:
         with _HOST_RECONFIRM_REQUESTED_LOCK:
             for target in targets:

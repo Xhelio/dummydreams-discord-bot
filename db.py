@@ -2034,9 +2034,10 @@ def suspend_open_live_sessions() -> int:
                     start_dt = wib.localize(
                         datetime.strptime(str(start_time)[:19], '%Y-%m-%d %H:%M:%S')
                     )
-                    duration_sec = max(
-                        0, int((seen_dt - start_dt).total_seconds()) - int(paused_seconds or 0)
-                    )
+                    # Wall-clock policy: match TikTok Live Studio. Restart /
+                    # reconnect gaps are still recorded in paused_seconds for
+                    # information, but never shorten the reported duration.
+                    duration_sec = max(0, int((seen_dt - start_dt).total_seconds()))
                 except Exception:
                     duration_sec = 0
             cur.execute("""
@@ -2086,6 +2087,7 @@ def reset_live_state(clear_logs: bool = True):
         conn.execute("DELETE FROM active_live_announcements")
         conn.execute("DELETE FROM live_sessions")
         conn.execute("DELETE FROM bot_settings WHERE key LIKE 'current_host_%'")
+        conn.execute("DELETE FROM bot_settings WHERE key LIKE 'last_live_intro_%'")
         conn.commit()
     finally:
         conn.close()
@@ -3550,13 +3552,25 @@ def detect_host_match_from_welcome_message(text: str, *, block: bool = True):
     Returns:
         (host_name, matched_alias) jika ada alias cocok di database host_aliases,
         atau (None, None) jika tidak ada alias yang cocok.
+
+    Alias kanonik (HOST_ALIASES) selalu ikut dijadikan fallback. Jika cache
+    host_aliases berisi data lama/tidak lengkap (mis. alias 'yosa' hilang),
+    deteksi tetap bekerja memakai daftar bawaan.
     """
     if not text:
         return None, None
-    for kw, host_name in get_host_aliases(block=block):
+    seen = set()
+    # DB aliases diutamakan (admin bisa menambah/mengubah alias), lalu canonical
+    # bawaan sebagai fallback agar alias penting tidak pernah hilang.
+    ordered = list(get_host_aliases(block=block) or []) + list(HOST_ALIASES.items())
+    for kw, host_name in ordered:
+        key = str(kw or "").strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
         # Reuse the compiled token pattern across repeated LiveIntro events.
-        if _compile_host_alias_pattern(kw).search(text):
-            return host_name, kw
+        if _compile_host_alias_pattern(key).search(text):
+            return host_name, key
     return None, None
 
 
@@ -3885,10 +3899,27 @@ def _load_live_session_start_state(conn, cur, user_clean: str, resume_key: str, 
     return resume_settings, None, None
 
 
-def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
+def start_live_session(tiktok_username: str, initial_host: str = None, started_at: str = None) -> int:
+    """Buka sesi live. ``started_at`` memakai event time webhook bila tersedia.
+
+    TikTok Live Studio menghitung durasi dari saat tombol Go Live ditekan.
+    Memakai waktu diterimanya webhook membuat durasi bot lebih pendek jika
+    webhook terlambat beberapa menit, jadi event time lebih diutamakan.
+    """
     wib = pytz.timezone('Asia/Jakarta')
     now_dt = datetime.now(wib)
     now_str = now_dt.strftime('%Y-%m-%d %H:%M:%S')
+    start_str = now_str
+    if started_at:
+        try:
+            event_dt = wib.localize(datetime.strptime(str(started_at)[:19], '%Y-%m-%d %H:%M:%S'))
+            delta = (now_dt - event_dt).total_seconds()
+            # Tolak timestamp di masa depan / terlalu lama (field payload yang
+            # bukan event time). Webhook delay wajar sampai beberapa jam.
+            if -60 <= delta <= 24 * 3600:
+                start_str = event_dt.strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            pass
     user_clean = tiktok_username.lower().lstrip("@")
     explicit_host = initial_host is not None
     current_host = initial_host if explicit_host else get_current_host_for_account(user_clean, fresh_only=True)
@@ -3972,7 +4003,7 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                     _execute_pending_writes()
                     print(
                         f"[LiveSession] Resumed session {resume_id} for @{user_clean} "
-                        f"after {gap}s restart gap (paused time excluded)."
+                        f"after {gap}s restart gap (wall-clock duration preserved)."
                     )
                     return resume_id
             # Expired/invalid resume metadata is removed in the same transaction
@@ -4013,7 +4044,7 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                         UPDATE live_sessions
                         SET end_time = ?, duration_seconds = CASE
                             WHEN start_time IS NULL THEN 0
-                            ELSE MAX(0, CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0))
+                            ELSE MAX(0, CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER))
                         END,
                         last_seen_at = ?
                         WHERE session_id = ? AND end_time IS NULL
@@ -4035,15 +4066,12 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                         UPDATE live_sessions
                         SET end_time = ?, duration_seconds = CASE
                             WHEN start_time IS NULL THEN 0
-                            ELSE CASE
-                                WHEN CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0) < 0 THEN 0
-                                ELSE CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0)
-                            END
+                            ELSE MAX(0, CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER))
                         END,
                         last_seen_at = COALESCE(last_seen_at, ?)
                         WHERE session_id = ?
                         """,
-                        (now_str, now_str, now_str, now_str, stale_id),
+                        (now_str, now_str, now_str, stale_id),
                     )
                 )
             if active_rows:
@@ -4069,7 +4097,7 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                 INSERT INTO live_sessions (tiktok_username, start_time, scheduled_host, last_seen_at)
                 VALUES (?, ?, ?, ?)
                 """,
-                (user_clean, now_str, current_host, now_str),
+                (user_clean, start_str, current_host, now_str),
             )
         )
         results = _execute_pending_writes()
@@ -4109,24 +4137,17 @@ def end_live_session(session_id: int, end_time: str = None):
         if row[1]:
             # Already closed (idempotent); never overwrite a recorded end.
             return
-        # A late webhook must not inflate duration: heartbeats keep last_seen_at
-        # fresh during a live, so an end far past it is an offline-report delay.
-        last_seen = str((row[3] if len(row) > 3 else None) or "")[:19]
-        if last_seen:
-            try:
-                seen_dt = wib.localize(datetime.strptime(last_seen, "%Y-%m-%d %H:%M:%S"))
-                if effective_end_dt > seen_dt + timedelta(minutes=2):
-                    effective_end_dt = seen_dt
-                    effective_end_str = effective_end_dt.strftime("%Y-%m-%d %H:%M:%S")
-            except Exception:
-                pass
-        paused_sec = max(0, int(row[2] or 0))
+        # Wall-clock policy: the end time is the real disconnect event time
+        # (webhook payload timestamp when available, otherwise disconnect
+        # detection time). Clamping it to the last heartbeat made the bot's
+        # duration shorter than TikTok Live Studio whenever chat/gift traffic
+        # stopped a few minutes before the stream ended.
         duration_sec = 0
         if row[0]:
             try:
                 start_dt_naive = datetime.strptime(str(row[0])[:19], '%Y-%m-%d %H:%M:%S')
                 start_dt = wib.localize(start_dt_naive)
-                duration_sec = max(0, int((effective_end_dt - start_dt).total_seconds()) - paused_sec)
+                duration_sec = max(0, int((effective_end_dt - start_dt).total_seconds()))
             except Exception:
                 duration_sec = 0
 
@@ -5254,6 +5275,59 @@ def add_role_tier(group_key: str, role_id: str, min_coins: int, tier_name: str =
             VALUES (?, ?, ?, ?, ?)
         """, (group_key, name, str(role_id), int(min_coins), count + 1))
         conn.commit()
+    finally:
+        conn.close()
+
+
+def update_role_tier(tier_id: int, min_coins: int = None, role_id: str = None, tier_name: str = None):
+    """Update an existing tier's criteria without deleting/re-adding it."""
+    fields = []
+    params = []
+    if min_coins is not None:
+        fields.append("min_coins = ?")
+        params.append(max(0, int(min_coins)))
+    if role_id is not None:
+        fields.append("role_id = ?")
+        params.append(str(role_id))
+    if tier_name is not None:
+        fields.append("tier_name = ?")
+        params.append(str(tier_name))
+    if not fields:
+        return
+    params.append(int(tier_id))
+    conn = get_db_connection()
+    try:
+        conn.execute(
+            f"UPDATE role_tiers SET {', '.join(fields)} WHERE id = ?",
+            params,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_all_user_coin_totals() -> list:
+    """Return ``(discord_id, tiktok_user, total_coins)`` for every mapping.
+
+    Used when role tier criteria change so the bot can immediately add/remove
+    roles for all verified members, not only the next gift recipient.
+    """
+    conn = get_db_connection()
+    try:
+        rows = conn.execute("""
+            SELECT m.discord_id, m.tiktok_user,
+                   COALESCE(SUM(g.total_coins), 0) AS total_coins
+            FROM user_mappings m
+            LEFT JOIN tiktok_gifts g
+                   ON LOWER(g.tiktok_user) = LOWER(m.tiktok_user)
+            GROUP BY m.discord_id, m.tiktok_user
+            ORDER BY m.discord_id
+        """).fetchall()
+        return [
+            (str(r[0]), str(r[1] or ""), int(r[2] or 0))
+            for r in rows
+            if r[0] is not None and r[1]
+        ]
     finally:
         conn.close()
 

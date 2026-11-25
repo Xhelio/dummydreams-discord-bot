@@ -209,7 +209,7 @@ def test_euler_webhook_processes_signed_offline_event(monkeypatch):
     cleared = []
     monkeypatch.setenv("EULER_WEBHOOK_SECRET", secret)
     monkeypatch.setattr(api, "get_open_live_session_id", lambda username: 42)
-    monkeypatch.setattr(api, "end_live_session", lambda session_id: ended.append(session_id))
+    monkeypatch.setattr(api, "end_live_session", lambda session_id, end_time=None: ended.append((session_id, end_time)))
     monkeypatch.setattr(api, "clear_live", lambda username: cleared.append(username))
     monkeypatch.setattr(api, "update_observer_diag", lambda *args, **kwargs: None)
     monkeypatch.setattr(api, "log_activity_event", lambda *args: None)
@@ -228,7 +228,8 @@ def test_euler_webhook_processes_signed_offline_event(monkeypatch):
     assert payload["handled"] == 1
     assert payload["results"][0]["username"] == "creator"
     assert payload["results"][0]["is_live"] is False
-    assert ended == [42]
+    assert len(ended) == 1 and ended[0][0] == 42
+    assert ended[0][1]  # end time forwarded (event time or receive fallback)
     assert cleared == ["creator"]
 
 
