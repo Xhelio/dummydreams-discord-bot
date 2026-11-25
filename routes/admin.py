@@ -1990,13 +1990,16 @@ def monthly_archive():
 
     # Every report is calculated on demand from the original gift_logs/live_sessions.
     # The inclusive date range is passed to the existing parameterized analytics queries.
+    payload_session_breakdown = get_analytics_session_breakdown(start_str, end_str).get('by_host', {})
+    host_live_time = {key: _fmt_duration(values[1]) for key, values in payload_session_breakdown.items()}
+
     payload = {
         'month': month_start.strftime('%Y-%m'),
         'start_date': start_str,
         'end_date': end_str,
         'summary': get_analytics_summary(start_str, end_str),
         'sessions': get_analytics_sessions(start_str, end_str),
-        'session_breakdown': get_analytics_session_breakdown(start_str, end_str),
+        'session_breakdown': {'by_host': payload_session_breakdown},
         'gift_by_host': get_analytics_gift_by_host(start_str, end_str),
         'gift_by_account': get_analytics_gift_by_account(start_str, end_str),
         'top_gifts': get_analytics_top_gift_items(start_str, end_str, limit=20),
@@ -2007,21 +2010,29 @@ def monthly_archive():
     html = """
     <!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Monthly Analytics</title><style>BASE_CSS_PLACEHOLDER
-    .archive-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
-    .archive-stat{background:#0b1220;border:1px solid var(--border);border-radius:10px;padding:14px}
-    .archive-stat strong{display:block;font-size:1.25rem;margin-top:5px}
-    .archive-table{width:100%;border-collapse:collapse}.archive-table th,.archive-table td{padding:8px;border-bottom:1px solid var(--border);text-align:left}
+    .archive-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,155px),1fr));gap:12px}
+    .archive-stat{background:linear-gradient(145deg,#111d32,#0b1220);border:1px solid var(--border);border-radius:12px;padding:15px;min-width:0}
+    .archive-stat strong{display:block;font-size:clamp(1.05rem,3vw,1.35rem);margin-top:7px;color:#e0f2fe;overflow-wrap:anywhere}
+    .archive-section{margin-top:22px;min-width:0}.archive-section h3{font-size:1rem;margin:0 0 10px;color:#e2e8f0}
+    .archive-table-wrap{width:100%;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;border:1px solid var(--border);border-radius:10px;overscroll-behavior-x:contain}
+    .archive-table{width:100%;min-width:680px;border-collapse:separate;border-spacing:0}
+    .archive-table th,.archive-table td{padding:11px 13px;border-bottom:1px solid var(--border);text-align:left;white-space:nowrap}
+    .archive-table th{background:#075985;color:#f0f9ff;font-size:.72rem;letter-spacing:.035em}
+    .archive-table tbody tr:nth-child(even){background:rgba(15,23,42,.42)}.archive-table tbody tr:hover{background:rgba(14,116,144,.13)}
+    .archive-table tbody tr:last-child td{border-bottom:0}.archive-scroll-hint{font-size:.75rem;color:#94a3b8;margin:0 0 7px}
+    .archive-period{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.archive-period label{flex:1 1 190px}.archive-period button{width:auto;min-width:150px}
+    @media(max-width:600px){.archive-stat{padding:12px}.archive-table{min-width:720px}.archive-table th,.archive-table td{padding:10px 12px}.archive-period button{width:100%}}
     </style><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#0284c7"></head><body>
     <div class="header"><h1>📊 Monthly Analytics</h1><p class="page-subtitle">Live report from original records · WIB</p></div>
     NAV_HTML_PLACEHOLDER
     <div class="card"><h2>Select month</h2>
     <p class="muted">Statistics are calculated directly from existing gift and LIVE records. No monthly snapshot or duplicate data is created.</p>
-    <form method="GET" class="form-grid" style="align-items:end">
+    <form method="GET" class="form-grid archive-period">
       <label>Month<input type="month" name="month" value="{{ selected_month }}" max="{{ current_month }}" required></label>
       <button class="btn-save" type="submit">View Monthly Report</button>
     </form>
     <p class="muted">Period: {{ payload.start_date }} – {{ payload.end_date }}</p></div>
-    <div class="card"><h2>📊 {{ payload.month }} report</h2><div class="archive-grid">
+    <div class="card"><h2>📊 Monthly performance · {{ payload.month }}</h2><p class="muted">All values below follow the selected month.</p><div class="archive-grid">
     <div class="archive-stat">Coins<strong>{{ payload.summary.coins }} c</strong></div>
     <div class="archive-stat">Gift items<strong>{{ payload.summary.gifts }}</strong></div>
     <div class="archive-stat">Gift transactions<strong>{{ payload.summary.gift_rows }}</strong></div>
@@ -2030,14 +2041,14 @@ def monthly_archive():
     <div class="archive-stat">Accounts<strong>{{ payload.summary.accounts }}</strong></div>
     <div class="archive-stat">LIVE sessions<strong>{{ payload.sessions.sessions }}</strong></div>
     <div class="archive-stat">LIVE duration<strong>{{ fmt_duration(payload.sessions.duration) }}</strong></div></div>
-    <h3>Top hosts</h3><table class="archive-table"><thead><tr><th>Host</th><th>Coins</th><th>Gifts</th><th>Viewers</th><th>Accounts</th></tr></thead><tbody>
-    {% for row in payload.gift_by_host[:10] %}<tr><td>{{ row[1] or row[0] }}</td><td>{{ row[2] }}</td><td>{{ row[3] }}</td><td>{{ row[4] }}</td><td>{{ row[5] }}</td></tr>{% else %}<tr><td colspan="5">No records for this month.</td></tr>{% endfor %}</tbody></table>
-    <h3>Top accounts</h3><table class="archive-table"><thead><tr><th>Account</th><th>Coins</th><th>Gifts</th><th>Viewers</th><th>Hosts</th></tr></thead><tbody>
-    {% for row in payload.gift_by_account[:10] %}<tr><td>{{ row[1] or row[0] }}</td><td>{{ row[2] }}</td><td>{{ row[3] }}</td><td>{{ row[4] }}</td><td>{{ row[5] }}</td></tr>{% else %}<tr><td colspan="5">No records for this month.</td></tr>{% endfor %}</tbody></table>
-    <h3>Top gift items</h3><table class="archive-table"><thead><tr><th>Gift</th><th>Unit coins</th><th>Items</th><th>Total coins</th><th>Transactions</th><th>Top sender</th></tr></thead><tbody>
-    {% for row in payload.top_gifts[:10] %}<tr><td>{{ row[0] }}</td><td>{{ row[1] }}</td><td>{{ row[2] }}</td><td>{{ row[3] }}</td><td>{{ row[4] }}</td><td>{{ row[5] or '-' }}</td></tr>{% else %}<tr><td colspan="6">No records for this month.</td></tr>{% endfor %}</tbody></table>
-    <h3>Top viewers</h3><table class="archive-table"><thead><tr><th>Viewer</th><th>Coins</th><th>Gift items</th><th>Hosts</th><th>Last gift</th></tr></thead><tbody>
-    {% for row in payload.viewer_ranking[:10] %}<tr><td>{{ row[1] or row[0] }}</td><td>{{ row[2] }}</td><td>{{ row[3] }}</td><td>{{ row[4] }}</td><td>{{ row[5] }}</td></tr>{% else %}<tr><td colspan="5">No records for this month.</td></tr>{% endfor %}</tbody></table>
+    <section class="archive-section"><h3>🏆 Top hosts</h3><p class="archive-scroll-hint">Swipe horizontally to view all columns on mobile.</p><div class="archive-table-wrap"><table class="archive-table"><thead><tr><th>Host</th><th>Total Coins</th><th>Gift Items</th><th>Unique Viewers</th><th>Accounts</th><th>Total LIVE Time</th></tr></thead><tbody>
+    {% for row in payload.gift_by_host[:10] %}<tr><td>{{ row[1] or row[0] }}</td><td>{{ "{:,}".format(row[2] or 0) }}</td><td>{{ "{:,}".format(row[3] or 0) }}</td><td>{{ "{:,}".format(row[4] or 0) }}</td><td>{{ "{:,}".format(row[5] or 0) }}</td><td>{{ host_live_time.get((row[0] or '').lower(), '—') }}</td></tr>{% else %}<tr><td colspan="6">No records for this month.</td></tr>{% endfor %}</tbody></table></div></section>
+    <section class="archive-section"><h3>👤 Top accounts</h3><p class="archive-scroll-hint">Swipe horizontally to view all columns on mobile.</p><div class="archive-table-wrap"><table class="archive-table"><thead><tr><th>Account</th><th>Coins</th><th>Gifts</th><th>Viewers</th><th>Hosts</th></tr></thead><tbody>
+    {% for row in payload.gift_by_account[:10] %}<tr><td>{{ row[1] or row[0] }}</td><td>{{ row[2] }}</td><td>{{ row[3] }}</td><td>{{ row[4] }}</td><td>{{ row[5] }}</td></tr>{% else %}<tr><td colspan="5">No records for this month.</td></tr>{% endfor %}</tbody></table></div></section>
+    <section class="archive-section"><h3>🎁 Top gift items</h3><p class="archive-scroll-hint">Swipe horizontally to view all columns on mobile.</p><div class="archive-table-wrap"><table class="archive-table"><thead><tr><th>Gift</th><th>Unit coins</th><th>Items</th><th>Total coins</th><th>Transactions</th><th>Top sender</th></tr></thead><tbody>
+    {% for row in payload.top_gifts[:10] %}<tr><td>{{ row[0] }}</td><td>{{ row[1] }}</td><td>{{ row[2] }}</td><td>{{ row[3] }}</td><td>{{ row[4] }}</td><td>{{ row[5] or '-' }}</td></tr>{% else %}<tr><td colspan="6">No records for this month.</td></tr>{% endfor %}</tbody></table></div></section>
+    <section class="archive-section"><h3>👥 Top viewers</h3><p class="archive-scroll-hint">Swipe horizontally to view all columns on mobile.</p><div class="archive-table-wrap"><table class="archive-table"><thead><tr><th>Viewer</th><th>Coins</th><th>Gift items</th><th>Hosts</th><th>Last gift</th></tr></thead><tbody>
+    {% for row in payload.viewer_ranking[:10] %}<tr><td>{{ row[1] or row[0] }}</td><td>{{ row[2] }}</td><td>{{ row[3] }}</td><td>{{ row[4] }}</td><td>{{ row[5] }}</td></tr>{% else %}<tr><td colspan="5">No records for this month.</td></tr>{% endfor %}</tbody></table></div></section>
     </div></body></html>
     """.replace("BASE_CSS_PLACEHOLDER", BASE_CSS).replace("NAV_HTML_PLACEHOLDER", NAV_HTML)
     return render_template_string(
