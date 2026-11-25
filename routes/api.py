@@ -4,6 +4,7 @@ import json
 import logging
 import hmac
 import hashlib
+import re
 import time
 import asyncio
 import pytz
@@ -307,6 +308,89 @@ def _infer_euler_live_state(payload):
     return None
 
 
+def _parse_webhook_datetime(value, wib):
+    """Parse epoch seconds/ms or common datetime strings into WIB datetime."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        num = float(value)
+        if num <= 0:
+            return None
+        # Normalise epoch microseconds / milliseconds to seconds.
+        if num >= 1e14:
+            num /= 1e6
+        elif num >= 1e11:
+            num /= 1e3
+        try:
+            return datetime.fromtimestamp(num, tz=pytz.UTC).astimezone(wib)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if re.fullmatch(r"\d{10,17}", text):
+            return _parse_webhook_datetime(int(text), wib)
+        candidates = [text]
+        if text.endswith("Z"):
+            candidates.append(text[:-1] + "+00:00")
+        for candidate in candidates:
+            try:
+                dt = datetime.fromisoformat(candidate)
+                if dt.tzinfo is None:
+                    dt = wib.localize(dt)
+                else:
+                    dt = dt.astimezone(wib)
+                return dt
+            except (ValueError, TypeError):
+                pass
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%d-%m-%Y %H:%M:%S"):
+            try:
+                return wib.localize(datetime.strptime(text, fmt))
+            except ValueError:
+                pass
+    return None
+
+
+def _extract_euler_event_time(payload):
+    """Ambil waktu kejadian asli dari payload webhook EulerStream.
+
+    Fallback ke waktu terima webhook membuat durasi bot lebih pendek saat
+    webhook terlambat. Field yang dikenali diperiksa di payload utama dan
+    container data/event/payload/alert yang lazim dipakai provider.
+    """
+    if not isinstance(payload, dict):
+        return ""
+    wib = pytz.timezone("Asia/Jakarta")
+    now = datetime.now(wib)
+    keys = (
+        "timestamp", "event_timestamp", "eventTimestamp", "event_time", "eventTime",
+        "occurred_at", "occurredAt", "created_at", "createdAt",
+        "create_time", "createTime", "ts", "time", "datetime",
+    )
+    containers = [payload]
+    queue = [payload]
+    while queue and len(containers) < 12:
+        current = queue.pop(0)
+        for key in ("data", "event", "payload", "alert", "live", "room"):
+            nested = current.get(key)
+            if isinstance(nested, dict) and nested not in containers:
+                containers.append(nested)
+                queue.append(nested)
+    for container in containers:
+        for key in keys:
+            if key not in container:
+                continue
+            dt = _parse_webhook_datetime(container.get(key), wib)
+            if dt is None:
+                continue
+            delta = (now - dt).total_seconds()
+            # Tolak timestamp yang jelas bukan waktu kejadian live.
+            if -120 <= delta <= 24 * 3600:
+                return dt.strftime("%Y-%m-%d %H:%M:%S")
+    return ""
+
+
 def _trigger_announcement_async(username: str, is_live: bool, host_name: str = None):
     handler = async_announcement_handler
     if not handler:
@@ -361,10 +445,14 @@ def _handle_euler_live_event(username: str, is_live: bool, source_payload=None):
         return {"ok": False, "error": "missing username"}
 
     now_wib = datetime.now(pytz.timezone("Asia/Jakarta")).strftime("%Y-%m-%d %H:%M:%S")
+    # Prefer the actual event timestamp from the webhook payload. Using the
+    # receive time made bot duration shorter than TikTok Live Studio whenever
+    # delivery was delayed (e.g. 5 minutes).
+    event_time = _extract_euler_event_time(source_payload) or now_wib
 
     if is_live:
         try:
-            session_id = start_live_session(username)
+            session_id = start_live_session(username, started_at=event_time)
         except Exception as e:
             return {"ok": False, "error": f"start_live_session failed: {e}"}
 
@@ -383,7 +471,7 @@ def _handle_euler_live_event(username: str, is_live: bool, source_payload=None):
                 status="webhook_live",
                 last_error=None,
                 webhook_live=True,
-                webhook_event_at=now_wib,
+                webhook_event_at=event_time,
             )
         except Exception:
             pass
@@ -410,7 +498,7 @@ def _handle_euler_live_event(username: str, is_live: bool, source_payload=None):
     try:
         session_id = get_open_live_session_id(username)
         if session_id:
-            end_live_session(session_id)
+            end_live_session(session_id, end_time=event_time)
     except Exception as e:
         return {"ok": False, "error": f"end_live_session failed: {e}"}
 
@@ -431,7 +519,7 @@ def _handle_euler_live_event(username: str, is_live: bool, source_payload=None):
             username,
             status="webhook_offline",
             webhook_live=False,
-            webhook_event_at=now_wib,
+            webhook_event_at=event_time,
         )
     except Exception:
         pass

@@ -1060,9 +1060,9 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
     async def resolve_grace_reconnect() -> bool:
         """Batalkan grace timer dan catat jeda offline sebagai paused time.
 
-        Jeda saat live pending/terputus tidak boleh dihitung sebagai durasi
-        live. Saat live tersambung lagi dalam grace period, selisih waktu
-        disconnect -> reconnect ditambahkan ke paused_seconds sesi.
+        paused_seconds disimpan sebagai informasi, tetapi durasi dilaporkan
+        dengan policy wall-clock (sama seperti TikTok Live Studio), sehingga
+        jeda reconnect tidak mengurangi durasi akhir.
         """
         nonlocal disconnect_timer_task
         if not (disconnect_timer_task and not disconnect_timer_task.done()):
@@ -1084,7 +1084,7 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
                     # DB write: keep it off the Discord event loop.
                     await asyncio.to_thread(add_live_session_paused_seconds, session_id, gap)
                     print(
-                        f"[{username_clean}] Grace gap {gap}s excluded from live duration "
+                        f"[{username_clean}] Grace gap {gap}s recorded in paused_seconds "
                         f"(session {session_id})."
                     )
             except Exception as e:

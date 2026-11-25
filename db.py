@@ -2034,9 +2034,10 @@ def suspend_open_live_sessions() -> int:
                     start_dt = wib.localize(
                         datetime.strptime(str(start_time)[:19], '%Y-%m-%d %H:%M:%S')
                     )
-                    duration_sec = max(
-                        0, int((seen_dt - start_dt).total_seconds()) - int(paused_seconds or 0)
-                    )
+                    # Wall-clock policy: match TikTok Live Studio. Restart /
+                    # reconnect gaps are still recorded in paused_seconds for
+                    # information, but never shorten the reported duration.
+                    duration_sec = max(0, int((seen_dt - start_dt).total_seconds()))
                 except Exception:
                     duration_sec = 0
             cur.execute("""
@@ -3895,10 +3896,27 @@ def _load_live_session_start_state(conn, cur, user_clean: str, resume_key: str, 
     return resume_settings, None, None
 
 
-def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
+def start_live_session(tiktok_username: str, initial_host: str = None, started_at: str = None) -> int:
+    """Buka sesi live. ``started_at`` memakai event time webhook bila tersedia.
+
+    TikTok Live Studio menghitung durasi dari saat tombol Go Live ditekan.
+    Memakai waktu diterimanya webhook membuat durasi bot lebih pendek jika
+    webhook terlambat beberapa menit, jadi event time lebih diutamakan.
+    """
     wib = pytz.timezone('Asia/Jakarta')
     now_dt = datetime.now(wib)
     now_str = now_dt.strftime('%Y-%m-%d %H:%M:%S')
+    start_str = now_str
+    if started_at:
+        try:
+            event_dt = wib.localize(datetime.strptime(str(started_at)[:19], '%Y-%m-%d %H:%M:%S'))
+            delta = (now_dt - event_dt).total_seconds()
+            # Tolak timestamp di masa depan / terlalu lama (field payload yang
+            # bukan event time). Webhook delay wajar sampai beberapa jam.
+            if -60 <= delta <= 24 * 3600:
+                start_str = event_dt.strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            pass
     user_clean = tiktok_username.lower().lstrip("@")
     explicit_host = initial_host is not None
     current_host = initial_host if explicit_host else get_current_host_for_account(user_clean, fresh_only=True)
@@ -3982,7 +4000,7 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                     _execute_pending_writes()
                     print(
                         f"[LiveSession] Resumed session {resume_id} for @{user_clean} "
-                        f"after {gap}s restart gap (paused time excluded)."
+                        f"after {gap}s restart gap (wall-clock duration preserved)."
                     )
                     return resume_id
             # Expired/invalid resume metadata is removed in the same transaction
@@ -4023,7 +4041,7 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                         UPDATE live_sessions
                         SET end_time = ?, duration_seconds = CASE
                             WHEN start_time IS NULL THEN 0
-                            ELSE MAX(0, CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0))
+                            ELSE MAX(0, CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER))
                         END,
                         last_seen_at = ?
                         WHERE session_id = ? AND end_time IS NULL
@@ -4045,15 +4063,12 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                         UPDATE live_sessions
                         SET end_time = ?, duration_seconds = CASE
                             WHEN start_time IS NULL THEN 0
-                            ELSE CASE
-                                WHEN CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0) < 0 THEN 0
-                                ELSE CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER) - COALESCE(paused_seconds, 0)
-                            END
+                            ELSE MAX(0, CAST((julianday(?) - julianday(start_time)) * 86400 AS INTEGER))
                         END,
                         last_seen_at = COALESCE(last_seen_at, ?)
                         WHERE session_id = ?
                         """,
-                        (now_str, now_str, now_str, now_str, stale_id),
+                        (now_str, now_str, now_str, stale_id),
                     )
                 )
             if active_rows:
@@ -4079,7 +4094,7 @@ def start_live_session(tiktok_username: str, initial_host: str = None) -> int:
                 INSERT INTO live_sessions (tiktok_username, start_time, scheduled_host, last_seen_at)
                 VALUES (?, ?, ?, ?)
                 """,
-                (user_clean, now_str, current_host, now_str),
+                (user_clean, start_str, current_host, now_str),
             )
         )
         results = _execute_pending_writes()
@@ -4119,24 +4134,17 @@ def end_live_session(session_id: int, end_time: str = None):
         if row[1]:
             # Already closed (idempotent); never overwrite a recorded end.
             return
-        # A late webhook must not inflate duration: heartbeats keep last_seen_at
-        # fresh during a live, so an end far past it is an offline-report delay.
-        last_seen = str((row[3] if len(row) > 3 else None) or "")[:19]
-        if last_seen:
-            try:
-                seen_dt = wib.localize(datetime.strptime(last_seen, "%Y-%m-%d %H:%M:%S"))
-                if effective_end_dt > seen_dt + timedelta(minutes=2):
-                    effective_end_dt = seen_dt
-                    effective_end_str = effective_end_dt.strftime("%Y-%m-%d %H:%M:%S")
-            except Exception:
-                pass
-        paused_sec = max(0, int(row[2] or 0))
+        # Wall-clock policy: the end time is the real disconnect event time
+        # (webhook payload timestamp when available, otherwise disconnect
+        # detection time). Clamping it to the last heartbeat made the bot's
+        # duration shorter than TikTok Live Studio whenever chat/gift traffic
+        # stopped a few minutes before the stream ended.
         duration_sec = 0
         if row[0]:
             try:
                 start_dt_naive = datetime.strptime(str(row[0])[:19], '%Y-%m-%d %H:%M:%S')
                 start_dt = wib.localize(start_dt_naive)
-                duration_sec = max(0, int((effective_end_dt - start_dt).total_seconds()) - paused_sec)
+                duration_sec = max(0, int((effective_end_dt - start_dt).total_seconds()))
             except Exception:
                 duration_sec = 0
 
