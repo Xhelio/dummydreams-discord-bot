@@ -514,14 +514,23 @@ async def _fetch_tiktok_live_preview_uncached(normalized: str) -> TikTokLivePrev
             # profile avatars. Use it when the page state is blocked, incomplete,
             # or has no room cover; never use user.avatar as a thumbnail.
             if preview is None or not preview.thumbnail_url:
-                api_url = "https://www.tiktok.com/api-live/user/room/?" + urlencode(
-                    {"uniqueId": username, "sourceType": "54"}
-                )
+                api_url = "https://www.tiktok.com/api-live/user/room/"
                 if username != "unknown" and _is_allowed_page_url(api_url):
+                    # Reuse TikTokLive's own web-client fingerprint and base
+                    # parameters. TikTok increasingly rejects bare requests
+                    # that contain only uniqueId/sourceType (statusCode 19881005).
+                    from TikTokLive.client.web.web_settings import WebDefaults
+
+                    api_params = dict(WebDefaults.web_client_params)
+                    api_params.update({"uniqueId": username, "sourceType": "54"})
+                    api_headers = dict(WebDefaults.web_client_headers)
+                    api_headers["Referer"] = normalized
                     async with session.get(
                         api_url,
+                        params=api_params,
                         allow_redirects=False,
-                        headers={"Referer": normalized},
+                        headers=api_headers,
+                        cookies=dict(WebDefaults.web_client_cookies),
                     ) as api_response:
                         if api_response.status == 200:
                             raw = await _read_limited(api_response)
