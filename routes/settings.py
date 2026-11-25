@@ -329,32 +329,32 @@ def view_settings():
                 <input type="number" name="min_coins" placeholder="Minimum coins" min="0" required>
                 <button type="submit">+ Add Reset Tier</button>
             </form>
-            <div class="table-scroll">
-                <table>
-                    <tr><th>Tier</th><th>Role ID</th><th>Minimum Coins</th><th>Action</th></tr>
-                    {% for t in tiers_reset %}
-                    <tr>
-                        <td><strong>{{ t.tier_name }}</strong></td>
-                        <td><code>{{ t.role_id }}</code></td>
-                        <td>
-                            <form action="/admin/settings/tier/update/{{ t.id }}" method="POST" class="inline-form">
-                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="tier-list">
+                {% for t in tiers_reset %}
+                <div class="tier-row">
+                    <div class="tier-meta">
+                        <strong class="tier-name">{{ t.tier_name }}</strong>
+                        <code class="tier-role">{{ t.role_id }}</code>
+                    </div>
+                    <div class="tier-actions">
+                        <form action="/admin/settings/tier/update/{{ t.id }}" method="POST" class="tier-coins-form">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <label class="tier-coins-field">
+                                <span>Minimum coins</span>
                                 <input type="number" name="min_coins" value="{{ t.min_coins }}" min="0" required
-                                       inputmode="numeric" style="width:110px;display:inline-block;">
-                                <button type="submit" class="btn-action" style="background:#15803d;">Save</button>
-                            </form>
-                        </td>
-                        <td>
-                            <form action="/admin/settings/tier/delete/{{ t.id }}" method="POST" class="inline-form" onsubmit="return confirm('Delete {{ t.tier_name }}?');">
-                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                                <button type="submit" class="btn-action btn-del">Delete</button>
-                            </form>
-                        </td>
-                    </tr>
-                    {% else %}
-                    <tr><td colspan="4" class="muted">No reset tiers yet.</td></tr>
-                    {% endfor %}
-                </table>
+                                       inputmode="numeric">
+                            </label>
+                            <button type="submit" class="btn-action" style="background:#15803d;">Save</button>
+                        </form>
+                        <form action="/admin/settings/tier/delete/{{ t.id }}" method="POST" class="tier-delete-form" onsubmit="return confirm('Delete {{ t.tier_name }}?');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <button type="submit" class="btn-action btn-del">Delete</button>
+                        </form>
+                    </div>
+                </div>
+                {% else %}
+                <div class="empty-state">No reset tiers yet.</div>
+                {% endfor %}
             </div>
         </div>
 
@@ -368,32 +368,32 @@ def view_settings():
                 <input type="number" name="min_coins" placeholder="Minimum coins" min="0" required>
                 <button type="submit">+ Add All-the-Time Tier</button>
             </form>
-            <div class="table-scroll">
-                <table>
-                    <tr><th>Tier</th><th>Role ID</th><th>Minimum Coins</th><th>Action</th></tr>
-                    {% for t in tiers_permanent %}
-                    <tr>
-                        <td><strong>{{ t.tier_name }}</strong></td>
-                        <td><code>{{ t.role_id }}</code></td>
-                        <td>
-                            <form action="/admin/settings/tier/update/{{ t.id }}" method="POST" class="inline-form">
-                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="tier-list">
+                {% for t in tiers_permanent %}
+                <div class="tier-row">
+                    <div class="tier-meta">
+                        <strong class="tier-name">{{ t.tier_name }}</strong>
+                        <code class="tier-role">{{ t.role_id }}</code>
+                    </div>
+                    <div class="tier-actions">
+                        <form action="/admin/settings/tier/update/{{ t.id }}" method="POST" class="tier-coins-form">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <label class="tier-coins-field">
+                                <span>Minimum coins</span>
                                 <input type="number" name="min_coins" value="{{ t.min_coins }}" min="0" required
-                                       inputmode="numeric" style="width:110px;display:inline-block;">
-                                <button type="submit" class="btn-action" style="background:#15803d;">Save</button>
-                            </form>
-                        </td>
-                        <td>
-                            <form action="/admin/settings/tier/delete/{{ t.id }}" method="POST" class="inline-form" onsubmit="return confirm('Delete {{ t.tier_name }}?');">
-                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                                <button type="submit" class="btn-action btn-del">Delete</button>
-                            </form>
-                        </td>
-                    </tr>
-                    {% else %}
-                    <tr><td colspan="4" class="muted">No all-the-time tiers yet.</td></tr>
-                    {% endfor %}
-                </table>
+                                       inputmode="numeric">
+                            </label>
+                            <button type="submit" class="btn-action" style="background:#15803d;">Save</button>
+                        </form>
+                        <form action="/admin/settings/tier/delete/{{ t.id }}" method="POST" class="tier-delete-form" onsubmit="return confirm('Delete {{ t.tier_name }}?');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <button type="submit" class="btn-action btn-del">Delete</button>
+                        </form>
+                    </div>
+                </div>
+                {% else %}
+                <div class="empty-state">No all-the-time tiers yet.</div>
+                {% endfor %}
             </div>
         </div>
 
