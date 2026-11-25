@@ -326,3 +326,48 @@ def test_live_thumbnail_api_uses_tiktoklive_web_defaults(monkeypatch):
     assert options["params"]["sourceType"] == "54"
     assert options["headers"]["Referer"] == "https://www.tiktok.com/@creator/live"
     assert options["cookies"]
+
+
+
+def test_parse_webcast_room_payload_extracts_nested_room_cover():
+    payload = {
+        "data": {
+            "room": {
+                "status": 2,
+                "title": "Webcast title",
+                "owner": {"nickname": "Creator"},
+                "cover": {
+                    "url_list": ["https://p16-common-sign.tiktokcdn-us.com/room-cover.webp"]
+                },
+                "stats": {"user_count": 321},
+            }
+        }
+    }
+    preview = social_preview._parse_webcast_room_payload(
+        payload, "https://www.tiktok.com/@creator/live"
+    )
+    assert preview is not None
+    assert preview.username == "creator"
+    assert preview.display_name == "Creator"
+    assert preview.title == "Webcast title"
+    assert preview.viewer_count == 321
+    assert preview.thumbnail_url == "https://p16-common-sign.tiktokcdn-us.com/room-cover.webp"
+
+
+def test_parse_webcast_room_payload_never_uses_owner_avatar_as_cover():
+    payload = {
+        "data": {
+            "room": {
+                "status": 2,
+                "owner": {
+                    "nickname": "Creator",
+                    "avatar": {"url_list": ["https://p16-common-sign.tiktokcdn-us.com/avatar.webp"]},
+                },
+            }
+        }
+    }
+    preview = social_preview._parse_webcast_room_payload(
+        payload, "https://www.tiktok.com/@creator/live"
+    )
+    assert preview is not None
+    assert preview.thumbnail_url is None
