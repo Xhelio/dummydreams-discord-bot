@@ -127,6 +127,17 @@ th.tt-sortable[data-tt-dir="asc"]::after { content: ' \25B2'; opacity: 0.95; }
 th.tt-sortable[data-tt-dir="desc"]::after { content: ' \25BC'; opacity: 0.95; }
 tr.tt-hidden { display: none !important; }
 .tier-form, .host-form, .alias-form { grid-template-columns: minmax(130px, 1fr) minmax(120px, 1fr) auto; align-items: end; }
+.tier-list { display: flex; flex-direction: column; gap: 10px; }
+.tier-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px; background: rgba(2, 6, 23, 0.35); border: 1px solid #334155; border-radius: 10px; }
+.tier-meta { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.tier-name { color: #e2e8f0; }
+.tier-role { color: #94a3b8; font-size: 0.76rem; overflow-wrap: anywhere; }
+.tier-actions { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
+.tier-coins-form { display: flex; align-items: flex-end; gap: 6px; margin: 0; }
+.tier-coins-field { display: flex; flex-direction: column; gap: 4px; }
+.tier-coins-field span { color: #94a3b8; font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
+.tier-coins-field input { width: 120px; }
+.tier-delete-form { margin: 0; }
 textarea { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: #0b1220; color: white; font-size: 0.87rem; resize: vertical; font-family: inherit; }
 .toolbar { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom: 12px; }
 .toolbar > * { flex: 0 0 auto; }
@@ -138,6 +149,11 @@ textarea { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px soli
   body { padding: 12px; }
   h1 { font-size: 1.05rem; }
   h2 { font-size: 0.95rem; margin-bottom: 8px; }
+  .tier-row { grid-template-columns: 1fr; align-items: stretch; }
+  .tier-actions { align-items: flex-end; }
+  .tier-coins-form { flex: 1 1 auto; }
+  .tier-coins-field { flex: 1 1 auto; min-width: 0; }
+  .tier-coins-field input { width: 100%; }
   h3 { font-size: 0.88rem; }
   .header { margin-bottom: 12px; padding-bottom: 8px; gap: 8px; }
   .nav-bar-container { position: static; flex-direction: column; align-items: stretch; gap: 8px; margin-bottom: 12px; padding: 0; background: transparent; backdrop-filter: none; }
@@ -163,6 +179,9 @@ textarea { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px soli
   .inline-fields { flex-wrap: wrap; }
   input, select, button, textarea { width: 100%; font-size: 0.85rem; padding: 7px 9px; }
   .btn-action { padding: 6px 8px; }
+  .tier-actions { flex-wrap: wrap; }
+  .tier-delete-form { width: 100%; }
+  .tier-delete-form button { width: 100%; }
   th, td { padding: 6px 8px; font-size: 0.78rem; white-space: nowrap; }
   th { font-size: 0.64rem; }
   table { min-width: 100%; }
