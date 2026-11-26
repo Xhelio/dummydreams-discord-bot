@@ -347,7 +347,54 @@ NAV_HTML = """
   } catch(e){}
 })();
 </script>
-"""
+<script>
+(function(){
+  function parseValue(text){
+    var s=(text||'').trim().replace(/\s+/g,' ');
+    if(!s) return {type:'empty',value:''};
+    var date=Date.parse(s);
+    if(/[0-9]{4}[-/][0-9]{1,2}[-/][0-9]{1,2}|[0-9]{1,2}:[0-9]{2}/.test(s)&&date) return {type:'date',value:date};
+    var n=s.replace(/[.,](?=\d{3}(\D|$))/g,'').replace(/[^0-9.-]/g,'');
+    if(n && /^-?\d+(\.\d+)?$/.test(n)) return {type:'number',value:Number(n)};
+    return {type:'text',value:s.toLocaleLowerCase()};
+  }
+  document.querySelectorAll('table').forEach(function(table){
+    var header=Array.from(table.rows).find(function(r){return r.querySelector('th');});
+    if(!header) return;
+    Array.from(header.cells).forEach(function(th,index){
+      if(th.tagName!=='TH') return;
+      th.classList.add('table-sortable');
+      th.setAttribute('tabindex','0');
+      th.setAttribute('role','button');
+      th.setAttribute('aria-label',(th.textContent.trim()||'Column')+'; click to sort');
+      th.title='Click to sort';
+      var direction=1;
+      function sort(){
+        var rows=Array.from(table.rows).filter(function(r){return r!==header && !r.querySelector('th');});
+        var first=rows.map(function(r){return parseValue(r.cells[index] ? r.cells[index].innerText : '');});
+        var nonEmpty=first.filter(function(v){return v.type!=='empty';});
+        var numeric=nonEmpty.length && nonEmpty.every(function(v){return v.type==='number';});
+        var dates=nonEmpty.length && nonEmpty.every(function(v){return v.type==='date';});
+        rows.sort(function(a,b){
+          var av=parseValue(a.cells[index]?a.cells[index].innerText:'');
+          var bv=parseValue(b.cells[index]?b.cells[index].innerText:'');
+          if(av.type==='empty') return 1; if(bv.type==='empty') return -1;
+          var aa= numeric||dates ? av.value : av.value;
+          var bb= numeric||dates ? bv.value : bv.value;
+          return (aa<bb?-1:aa>bb?1:0)*direction;
+        });
+        var parent=header.parentNode;
+        rows.forEach(function(row){parent.appendChild(row);});
+        direction*=-1;
+        Array.from(header.cells).forEach(function(c){c.removeAttribute('data-sort-direction');});
+        th.setAttribute('data-sort-direction',direction===-1?'asc':'desc');
+      }
+      th.addEventListener('click',sort);
+      th.addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();sort();}});
+    });
+  });
+})();
+</script>
 
 AUTO_REFRESH_JS = r"""
 <script>
