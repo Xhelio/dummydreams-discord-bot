@@ -13,6 +13,10 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; border-bottom: 1px solid var(--border); padding-bottom: 14px; flex-wrap: wrap; gap: 12px; }
 h1 { font-size: 1.45rem; color: #f8fafc; display: flex; align-items: center; gap: 8px; line-height: 1.2; }
 h2 { color: #7dd3fc; font-size: 1.08rem; margin-bottom: 12px; }
+.table-sortable { cursor: pointer; user-select: none; position: relative; }
+.table-sortable::after { content: '↕'; opacity: .45; margin-left: 5px; font-size: .8em; }
+.table-sortable[data-sort-direction='asc']::after { content: '↑'; opacity: .95; }
+.table-sortable[data-sort-direction='desc']::after { content: '↓'; opacity: .95; }
 h3 { color: #e2e8f0; font-size: 0.98rem; margin-bottom: 8px; }
 .page-subtitle { color: var(--muted); font-size: 0.9rem; margin-top: 4px; }
 .nav-bar-container { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; position: sticky; top: 0; z-index: 20; background: rgba(11,18,32,0.85); backdrop-filter: blur(6px); padding: 8px 0; }
