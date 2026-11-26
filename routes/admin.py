@@ -2054,6 +2054,7 @@ def monthly_archive():
     return render_template_string(
         html, payload=payload, selected_month=month_start.strftime('%Y-%m'),
         current_month=current_month.strftime('%Y-%m'), fmt_duration=_fmt_duration,
+        host_live_time=host_live_time,
     )
 
 
