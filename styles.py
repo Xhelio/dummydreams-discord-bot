@@ -387,7 +387,7 @@ NAV_HTML = """
           var bb= numeric||dates ? bv.value : bv.value;
           return (aa<bb?-1:aa>bb?1:0)*direction;
         });
-        var parent=header.parentNode;
+        var parent=table.tBodies && table.tBodies.length ? table.tBodies[0] : header.parentNode;
         rows.forEach(function(row){parent.appendChild(row);});
         direction*=-1;
         Array.from(header.cells).forEach(function(c){c.removeAttribute('data-sort-direction');});
