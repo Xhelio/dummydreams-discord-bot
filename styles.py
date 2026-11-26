@@ -399,6 +399,7 @@ NAV_HTML = """
   });
 })();
 </script>
+"""
 
 AUTO_REFRESH_JS = r"""
 <script>
