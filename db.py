@@ -2786,14 +2786,16 @@ def init_db():
 
         # Read the seed and repair state together to avoid a second remote
         # round trip when the one-time repair has already completed.
-        alias_count, aliases_repaired = _get_host_alias_seed_state(conn)
-        if not alias_count:
-            for alias, host_name in HOST_ALIASES.items():
-                conn.execute(
-                    "INSERT OR IGNORE INTO host_aliases (alias, host_name) VALUES (?, ?)",
-                    (alias, host_name),
-                )
-            conn.commit()
+        _alias_count, aliases_repaired = _get_host_alias_seed_state(conn)
+        # Keep canonical aliases present on every startup. INSERT OR IGNORE
+        # preserves user-defined aliases while allowing new canonical aliases
+        # (such as spelling variants) to reach databases seeded in earlier runs.
+        for alias, host_name in HOST_ALIASES.items():
+            conn.execute(
+                "INSERT OR IGNORE INTO host_aliases (alias, host_name) VALUES (?, ?)",
+                (alias, host_name),
+            )
+        conn.commit()
         stage_started = _log_db_init_stage("host_alias_seed", stage_started)
 
         # Repair stale/incorrect aliases once (e.g. an "angel" alias pointing
