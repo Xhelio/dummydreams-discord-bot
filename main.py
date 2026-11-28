@@ -1010,32 +1010,14 @@ async def process_live_announcement(username: str, is_live: bool, host_name: str
     try:
         live_embed = None
         if is_live:
-            # Resolve public room metadata before taking the announcement lock:
-            # TikTok can be slow or block scraping, but must not stall other hosts.
-            from social_preview import (
-                TikTokLivePreview,
-                build_tiktok_live_embed,
-                fetch_tiktok_live_preview,
-            )
-
             live_url = f"https://www.tiktok.com/@{user_key}/live"
-            try:
-                live_preview = await fetch_tiktok_live_preview(live_url)
-            except Exception as exc:
-                log.debug(
-                    "[Social Preview] LIVE metadata unavailable for @%s: %s",
-                    user_key,
-                    type(exc).__name__,
-                )
-                live_preview = None
-            if live_preview is None:
-                # The observer already confirmed this account is live. Keep a
-                # truthful status card even when TikTok hides its cover metadata.
-                live_preview = TikTokLivePreview(
-                    url=live_url,
-                    username=user_key,
-                )
-            live_embed = build_tiktok_live_embed(live_preview)
+            live_embed = discord.Embed(
+                title=f"@{user_key} sedang LIVE",
+                url=live_url,
+                description="🔴 **SEDANG LIVE**\nBuka link di atas untuk menonton.",
+                color=discord.Color.red(),
+            )
+            live_embed.set_footer(text="TikTok LIVE")
 
         async with NOTIFICATION_LOCK:
             if not bot.is_ready():
@@ -3075,52 +3057,6 @@ def _register_persistent_views() -> None:
 
 @bot.event
 async def on_message(message):
-    # Social preview is deliberately isolated from command/chatbot handling.
-    if not getattr(message.author, "bot", False):
-        try:
-            from social_preview import (
-                build_tiktok_embed,
-                build_tiktok_live_embed,
-                extract_tiktok_live_urls,
-                extract_tiktok_urls,
-                fetch_tiktok_live_preview,
-                fetch_tiktok_preview,
-            )
-
-            live_urls = extract_tiktok_live_urls(message.content)
-            preview_embed = None
-            if live_urls:
-                # LIVE links must never fall back to generic profile metadata:
-                # that can show an avatar and falsely imply a room preview.
-                live_preview = await fetch_tiktok_live_preview(live_urls[0])
-                if live_preview is not None:
-                    preview_embed = build_tiktok_live_embed(live_preview)
-            else:
-                tiktok_urls = extract_tiktok_urls(message.content)
-                if tiktok_urls:
-                    preview = await fetch_tiktok_preview(tiktok_urls[0])
-                    if preview is not None:
-                        preview_embed = build_tiktok_embed(preview)
-
-            if preview_embed is not None:
-                # Avoid showing Discord's generic link card as well when the
-                # bot already has permission to suppress embeds in this channel.
-                guild = getattr(message, "guild", None)
-                me = getattr(guild, "me", None) if guild else None
-                if me is not None:
-                    try:
-                        if message.channel.permissions_for(me).manage_messages:
-                            await message.edit(suppress=True)
-                    except discord.HTTPException:
-                        log.debug("[Social Preview] Could not suppress native link embed.")
-                await message.reply(
-                    embed=preview_embed,
-                    mention_author=False,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-        except Exception as e:
-            log.warning("[Social Preview] handler error: %s", e)
-
     # Chatbot: reply when mentioned / replied to (and in DMs), then still process commands.
     try:
         if await chatbot.should_respond(message, bot.user):
