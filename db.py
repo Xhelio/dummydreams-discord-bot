@@ -3358,6 +3358,9 @@ HOST_ALIASES = {
     "bea": "Beatrix",
     # Fearless
     "fearless": "Fearless",
+    # Windy
+    "windy": "Windy",
+    "windi": "Windy",
     # Yosa
     "yosa": "Yosa",
     # Yuca
@@ -3664,10 +3667,10 @@ def get_current_host_for_account(tiktok_username: str, fresh_only: bool = False)
         if row and row[0] and row[0] != "Host":
             if not fresh_only:
                 return row[0]
-            started = _parse_wib_ts(row[1])
-            heartbeat = _parse_wib_ts(row[2]) or started
-            now = datetime.now(pytz.timezone('Asia/Jakarta'))
-            if started and (now - heartbeat).total_seconds() <= LIVE_HOST_STALE_AFTER_SECONDS:
+            # In fresh_only mode, only trust a host that was actually detected
+            # for the current live. A fresh heartbeat alone is not enough because
+            # open sessions can carry stale/wrong scheduled_host values.
+            if host_belongs_to_current_live(u_clean):
                 return row[0]
     finally:
         conn.close()
