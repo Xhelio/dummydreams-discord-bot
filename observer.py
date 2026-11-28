@@ -1024,6 +1024,13 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
             await asyncio.sleep(LIVE_DISCONNECT_GRACE_SECONDS)
             nonlocal is_connected, current_session_id, probed_live
             runtime_status.clear_live(username_clean)
+            runtime_status.update_observer_diag(
+                username_clean,
+                status="offline_confirmed",
+                grace_pending=False,
+                disconnected_at=None,
+                grace_seconds=None,
+            )
             probed_live = False
             # Live has ended: drop the intro text so the next live cannot reuse
             # this livestream's host via the cached fallback.
@@ -1076,6 +1083,13 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         disconnect_timer_task = asyncio.create_task(
             delayed_disconnect_handler(sid, disconnected_at)
         )
+        runtime_status.update_observer_diag(
+            username_clean,
+            status="grace_pending",
+            grace_pending=True,
+            disconnected_at=disconnected_at,
+            grace_seconds=LIVE_DISCONNECT_GRACE_SECONDS,
+        )
         if current_session_id == sid:
             current_session_id = None
         stop_session_heartbeat()
@@ -1120,6 +1134,12 @@ async def start_single_observer(tiktok_username: str, announcement_callback, rol
         disconnected_at = disconnect_meta.get("at")
         disconnect_meta["session_id"] = None
         disconnect_meta["at"] = None
+        runtime_status.update_observer_diag(
+            username_clean,
+            grace_pending=False,
+            disconnected_at=None,
+            grace_seconds=None,
+        )
         if session_id and disconnected_at:
             try:
                 wib = pytz.timezone('Asia/Jakarta')
