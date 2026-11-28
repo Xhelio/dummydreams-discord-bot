@@ -964,9 +964,24 @@ def view_monitor():
         # showing while a host name was already detected).
         connected_status = status in ("connected", "connected_with_handler_error", "reconnected")
         healthy_status = connected_status or status in (
-            "offline", "unavailable", "non_priority_off", "checking", "online_waiting_websocket"
+            "offline", "unavailable", "non_priority_off", "checking", "online_waiting_websocket", "offline_confirmed"
         )
-        rate_limited = (not healthy_status) and (
+        grace_pending = status == "grace_pending" or bool(d.get("grace_pending"))
+        if grace_pending and not wait_seconds:
+            try:
+                disc_at = str(d.get("disconnected_at") or "")
+                grace_secs = int(d.get("grace_seconds") or 600)
+                if disc_at:
+                    wib = pytz.timezone('Asia/Jakarta')
+                    disc_dt = wib.localize(datetime.strptime(disc_at[:19], '%Y-%m-%d %H:%M:%S'))
+                    wait_seconds = max(0, grace_secs - int((_time.time() - disc_dt.timestamp()) if False else 0))
+                    # compute remaining using wib-aware now
+                    from datetime import datetime as _dt
+                    now_wib = _dt.now(wib)
+                    wait_seconds = max(0, grace_secs - int((now_wib - disc_dt).total_seconds()))
+            except Exception:
+                pass
+        rate_limited = (not healthy_status and not grace_pending) and (
             bool(d.get("rate_limited"))
             or status.startswith("rate_limited")
             or status == "backoff_json_response"
@@ -974,13 +989,18 @@ def view_monitor():
         if rate_limited:
             rate_limited_any = True
         lp = d.get("limit_progress") or {}
-        lp_label = "" if healthy_status else (lp.get("label") or "").strip()
+        lp_label = "" if (healthy_status or grace_pending) else (lp.get("label") or "").strip()
         attempts = d.get("attempts_since_success")
         if attempts is None:
             attempts = d.get("attempts_total")
         retry_text = _fmt_retry(wait_seconds) if (wait_seconds > 0 and not healthy_status) else ""
 
-        if status in ("rate_limited_cooldown", "rate_limited_backoff", "backoff_json_response"):
+        if grace_pending:
+            if retry_text:
+                label = f"🟠 Grace pending — menunggu {retry_text} (bisa disconnect / host end)"
+            else:
+                label = "🟠 Grace pending — menunggu konfirmasi offline/reconnect"
+        elif status in ("rate_limited_cooldown", "rate_limited_backoff", "backoff_json_response"):
             if retry_text:
                 label = f"⏳ Limit/cooldown — coba lagi dalam {retry_text}"
             else:
@@ -989,6 +1009,8 @@ def view_monitor():
             label = "🟡 Online (probe) — waiting websocket for LiveIntro"
         elif status in ("offline",):
             label = "⚪ Offline (polling)"
+        elif status == "offline_confirmed":
+            label = "⚫ Offline confirmed (grace selesai)"
         elif status == "unavailable":
             label = "⚪ Offline (akun belum/tidak bisa live)"
         elif status in ("connected", "connected_with_handler_error"):
